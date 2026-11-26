@@ -18,8 +18,8 @@
  */
 
 import { type DynamoDBDocumentClient, QueryCommand, GetCommand } from '@aws-sdk/lib-dynamodb';
-import { logger } from './logger';
 import { LINEAR_ISSUE_INDEX_NAME } from '../../constructs/task-table-indexes';
+import { logger } from './logger';
 
 /**
  * Cap on the number of task rows summed for one issue.

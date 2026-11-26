@@ -1,18 +1,16 @@
-# @backgroundagent/cli
+# bgagent CLI
 
 Command-line interface for the ABCA platform. Submit coding tasks, monitor their status, and manage results — all through the deployed REST API with Cognito authentication.
 
 ## Installation
 
-```bash
-npm install -g @backgroundagent/cli
-```
-
-Or run directly from the monorepo:
+The CLI is not published to npm: its package (`@abca/cli`) is private. Build it in the monorepo (`mise run install`, then `mise //cli:build`) and run it from there:
 
 ```bash
 node cli/lib/bin/bgagent.js
 ```
+
+The examples below write `bgagent` for that command.
 
 ## Quick start
 
@@ -61,6 +59,8 @@ bgagent configure \
 
 First-time configure needs all four core fields. The easiest paths are `--stack-name backgroundagent-dev --region …` (same outputs as `bgagent platform outputs`) or `--from-bundle` after `admin invite-user`. Individual flags override stack-derived values.
 
+Pointing the CLI at another user pool removes the cached login (`~/.bgagent/credentials.json`): its tokens belong to the previous deployment. Run `bgagent login` again.
+
 ### `bgagent login`
 
 Authenticate with Cognito and cache tokens locally.
@@ -105,7 +105,7 @@ At least one of `--issue` or `--task` is required.
 
 The repository must be onboarded to the platform via a `Blueprint` CDK construct. If the repo is not onboarded, the API returns a `REPO_NOT_ONBOARDED` error.
 
-When `--wait` is used, the CLI polls until the task reaches a terminal status (COMPLETED, FAILED, CANCELLED, TIMED_OUT) and exits with code 0 for COMPLETED or 1 otherwise.
+When `--wait` is used, the CLI polls until the task reaches a terminal status (COMPLETED, FAILED, CANCELLED, TIMED_OUT) and exits with code 0 for COMPLETED or 1 otherwise. If the CLI stops waiting before that (the API keeps failing, or the maximum wait is reached), it exits with code 2: the task may still be running.
 
 ### `bgagent list`
 
@@ -119,6 +119,8 @@ bgagent list \
   --output <text|json>        Output format (default: text)
 ```
 
+The `HEARTBEAT` column is the age of the agent's last in-guest liveness beat, so `is anything still alive?` can be answered across tasks rather than one `bgagent status` at a time. The agent beats every 45 s on the `agentcore` and `lambda-microvm` backends, so anything much past that on a `RUNNING` task means the agent is hung. It shows `—` for terminal tasks (the last beat is noise next to a final status), and on `ecs`, where the agent runs the pipeline directly instead of serving HTTP and so beats only once at start.
+
 ### `bgagent budget status --me`
 
 Show the logged-in user's personal monthly estimated spend and administrator-configured limit:
@@ -129,7 +131,18 @@ bgagent budget status --me [--output text|json]
 
 This path uses Cognito authentication and requires no operator AWS credentials. It is read-only, does not expose team budgets, and reports personal spend even when no personal limit is configured.
 
-The `HEARTBEAT` column is the age of the agent's last in-guest liveness beat, so `is anything still alive?` can be answered across tasks rather than one `bgagent status` at a time. The agent beats every 45 s on the `agentcore` and `lambda-microvm` backends, so anything much past that on a `RUNNING` task means the agent is hung. It shows `—` for terminal tasks (the last beat is noise next to a final status), and on `ecs`, where the agent runs the pipeline directly instead of serving HTTP and so beats only once at start.
+### `bgagent stats`
+
+Show the scoreboard of your own finished tasks: how the work you handed to agents turned into verified and merged pull requests, what it took of your attention and money, and whether it stayed inside the rules.
+
+```
+bgagent stats \
+  --range <7d|30d>             Period the scoreboard covers (default: 30d)
+  --repo <owner/repo>          Count the tasks of one repository only
+  --output <text|json>         Output format (default: text)
+```
+
+The numbers are those of the console's Scoreboard page, under its four headings, each with the counts it rests on and, where the page compares, the number of the period before; a number with nothing to compute it from shows `-` and the reason. `--output json` prints the response of `GET /v1/tasks?view=scoreboard`. What each number counts and leaves out: [Factory scoreboard](../docs/design/OBSERVABILITY.md#factory-scoreboard). The command's limits: [Reading your scoreboard (stats)](../docs/guides/USER_GUIDE.md#reading-your-scoreboard-stats).
 
 ### `bgagent status <task-id>`
 
@@ -163,6 +176,8 @@ bgagent events <task-id> \
 ### `bgagent webhook create`
 
 Create a new webhook integration. The HMAC secret is displayed once at creation time — store it securely.
+
+The output also shows the webhook URL (`webhook_url` in JSON output): the endpoint to enter in the external system. It belongs to the API deployment, not to the webhook, so it is the same for every webhook and there is no need to fetch it again.
 
 ```
 bgagent webhook create \
@@ -200,6 +215,22 @@ Shared flags:
 |------|-------------|
 | `--region <region>` | AWS region (defaults to `bgagent configure` region or `AWS_REGION`) |
 | `--stack-name <name>` | CloudFormation stack name (default: `backgroundagent-dev`) |
+
+### `bgagent setup`
+
+Choose optional features, validate them against the target Region, and deploy from your ABCA checkout ([deployment profiles](../docs/guides/DEPLOYMENT_GUIDE.md#deployment-profiles)):
+
+```
+bgagent setup [--region <region>] [--stack-name <name>] [--repo-root <dir>]
+bgagent setup --features slack,jira --yes          # non-interactive
+bgagent setup --compute agentcore,ecs --features none --yes   # new install on both backends
+bgagent setup --features none --no-deploy          # write abca.deployment.json only
+bgagent setup -c networkTopology=split             # extra CDK context for diff and deploy (repeatable)
+```
+
+It first confirms the AWS account your credentials resolve to and lets you update an existing deployment or create a new one (named by you). For a new installation it then asks where agents run (AgentCore, ECS, or both), and prepares the account (CDK bootstrap) if needed. It then asks y/n per feature, shows a review screen, summarizes the changes, asks to deploy, and then shows live per-component progress and the result (complete, or the failed component and its cause). Raw CDK output is written to `~/.bgagent/logs/<stack>/setup-changes.log` and `setup-deploy.log`. New stacks default to the governed minimal profile. Existing stacks preselect their deployed features. Before writing `abca.deployment.json`, the wizard shows `cdk diff` and asks for confirmation. Deleting, replacing or orphaning state-bearing resources needs the stack name typed back, or `--yes --accept-data-loss` when non-interactive. The same applies when `--no-deploy` removes a stateful feature. Cancelling exits with code 130 and leaves the repository unchanged. After deploying, it configures the CLI from the stack outputs. Features: `slack`, `linear`, `jira`, `deployPreviewScreenshots`, `agentRegistry`, `toolGateway`. A feature or compute backend the Region does not support fails with the supported Regions, before the diff.
+
+Commands for a feature the stack omits (for example `bgagent slack setup`) fail and point back to `bgagent setup`.
 
 ### `bgagent budget status|set`
 
@@ -245,7 +276,7 @@ bgagent repo list \
 
 ### `bgagent repo show <owner/repo>`
 
-Show full `RepoConfig` for a repository. Secret ARNs are redacted. When no per-blueprint token is configured, the output shows that the repo uses the **platform default** GitHub PAT (`GitHubTokenSecretArn`), not an empty/missing token.
+Show full `RepoConfig` for a repository. Secret ARNs are redacted. When no per-blueprint token is configured, the output shows that the repo uses the **platform default** GitHub PAT (`GitHubTokenSecretArn`), not an empty/missing token. When no per-blueprint model is configured, the **platform default** model is shown as this deployment invokes it: with the geography of the stack's `BedrockGeoRegion` output (`us.anthropic.…` on a stack deployed with `-c bedrockGeoRegion=us`). A stack that predates that output shows the shipped `global.` profile.
 
 ```
 bgagent repo show owner/repo \
@@ -288,7 +319,7 @@ bgagent runtime status \
 
 ### `bgagent ops stuck-tasks`
 
-List tasks in `SUBMITTED`, `HYDRATING`, or `AWAITING_APPROVAL` older than the stranded-task reconciler thresholds (defaults: 1200s / 7200s). Text output includes Cognito email plus username UUID.
+List tasks that have been in `SUBMITTED`, `HYDRATING`, or `AWAITING_APPROVAL` longer than the stranded-task reconciler thresholds (defaults: 1200s / 7200s). Text output includes Cognito email plus username UUID. `AGE(s)` / `age_seconds` is the time in the current status; rows are listed oldest-created first.
 
 ```
 bgagent ops stuck-tasks \
@@ -303,7 +334,7 @@ Compare `UserConcurrencyTable` counters with live active task counts per user. R
 
 ```
 bgagent ops concurrency \
-  --limit <n>                 Per-user limit (default: 3) \
+  --limit <n>                 Per-user limit (default: 10) \
   --output <text|json>
 ```
 
@@ -400,21 +431,21 @@ bgagent admin reset-password <email> \
 - `status` and `submit` show a key-value detail view
 - `list` shows an aligned table (TASK ID, STATUS, REPO, CREATED, HEARTBEAT, DESCRIPTION)
 - `events` shows a timeline (TIMESTAMP, EVENT TYPE, METADATA)
-- `webhook create` shows webhook details and the one-time HMAC secret
+- `webhook create` shows webhook details, the URL to post tasks to, and the one-time HMAC secret
 - `webhook list` shows an aligned table (WEBHOOK ID, NAME, STATUS, CREATED)
 - `webhook revoke` shows the revoked webhook details
 
 For failed tasks, the error display is structured when a classification is available:
 
 ```
-Error:       [CONCURRENCY] Concurrency limit reached
-             The maximum number of concurrent tasks for this user has been reached.
-  Remedy:    Wait for an active task to complete, cancel a running task, or ask an admin to increase the limit.
-  Retryable: yes
-  Detail:    User concurrency limit reached
+Error:       [AUTH] Repository not found or inaccessible
+             The GitHub token cannot access the target repository. It may not exist or the token lacks visibility.
+  Remedy:    Check that the repository name is correct and the configured PAT has access to it.
+  Retryable: no
+  Detail:    Pre-flight check failed: REPO_NOT_FOUND_OR_NO_ACCESS — GitHub API returned HTTP 404 for acme/widgets
 ```
 
-The classifier covers 9 error categories: `auth`, `network`, `concurrency`, `compute`, `agent`, `guardrail`, `config`, `timeout`, and `unknown`. When no classification is available, the raw error message is shown.
+The classifier covers 10 error categories: `auth`, `network`, `concurrency`, `compute`, `agent`, `guardrail`, `config`, `timeout`, `blocked`, and `unknown`. When no classification is available, the raw error message is shown.
 
 **JSON mode** (`--output json`) prints the raw API response as pretty-printed JSON, suitable for piping to `jq` or other tools.
 

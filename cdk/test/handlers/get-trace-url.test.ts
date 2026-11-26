@@ -299,6 +299,25 @@ describe('get-trace-url handler', () => {
     expect(mockGetSignedUrl).not.toHaveBeenCalled();
   });
 
+  test('returns 404 TRACE_NOT_AVAILABLE when HEAD returns HTTP 403 (how S3 reports a missing key to this role)', async () => {
+    // The handler's role holds s3:GetObject and no s3:ListBucket, and to such a
+    // caller S3 answers 403, not 404, for a key that does not exist: every trace
+    // the bucket's 7-day lifecycle has removed. A HEAD response has no body, so
+    // SDK v3 names the error 'Unknown' and only the status identifies it.
+    const err = Object.assign(new Error('UnknownError'), { name: 'Unknown', $metadata: { httpStatusCode: 403 } });
+    mockS3Send.mockRejectedValueOnce(err);
+    const stdout = jest.spyOn(process.stdout, 'write').mockReturnValue(true);
+    const result = await handler(makeEvent());
+    const logged = stdout.mock.calls.join('');
+    stdout.mockRestore();
+
+    expect(result.statusCode).toBe(404);
+    expect(JSON.parse(result.body).error.code).toBe('TRACE_NOT_AVAILABLE');
+    expect(mockGetSignedUrl).not.toHaveBeenCalled();
+    // The log keeps the status, so an operator can tell this from a plain 404.
+    expect(logged).toContain('"http_status":403');
+  });
+
   test('returns 500 when HEAD throws a generic error (not a 404)', async () => {
     // A non-404 HEAD error is a real AWS problem (throttle, 500, 503,
     // etc.). Surface as INTERNAL_ERROR — retrying is fine, but hiding

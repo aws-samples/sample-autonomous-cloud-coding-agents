@@ -1,8 +1,6 @@
 ---
-title: Cost model
+title: "Cost model"
 ---
-
-# Cost model
 
 This document provides an order-of-magnitude cost model for the platform. Cost efficiency is a first-class design principle (see [ARCHITECTURE.md](/sample-autonomous-cloud-coding-agents/architecture/architecture)). The model covers infrastructure baseline costs, per-task variable costs, and cost attribution guidance.
 
@@ -109,7 +107,7 @@ For **AWS-native** chargeback of Bedrock spend (Cost Explorer / CUR 2.0 by `user
 | Monthly user/team warning | Estimated terminal-task cost rollup | CloudWatch/SNS at 80% and 100% |
 | Monthly user/team hard stop | Admission check at 100% | Disabled per scope unless `--hard-stop` is set |
 | Session timeout | Orchestrator timeout | 9 hours |
-| Concurrency limit | Per-user atomic counter | 3 concurrent tasks |
+| Concurrency limit | Per-user atomic counter | 10 concurrent tasks |
 | System concurrency | System-wide counter | Account-level AgentCore quota |
 
 Monthly budgets use UTC calendar months and the same estimated `cost_usd` stored on terminal tasks. The TaskTable stream consumer transactionally increments the user and captured Cognito-team rollups and writes a task marker so duplicate stream delivery cannot double count. Admission checks every configured applicable scope; any scope at 100% with hard stop enabled rejects a new task. In-flight tasks continue and can overshoot because their final cost is unknown until termination.
@@ -119,6 +117,8 @@ The 80% and 100% crossings emit claimed, per-scope `ABCA/Budgets` CloudWatch met
 Authenticated users can inspect their personal scope with `bgagent budget status --me` (`GET /v1/tasks?view=budget`). The response includes estimated spend even when no personal limit is configured. It does not expose team scopes or permit mutation; administrators remain the only actors who set user/team limits.
 
 The controls add one on-demand DynamoDB table with PITR, three standard CloudWatch alarms, and up to three custom metric time series. Admission, terminal rollup, and user-status requests incur usage-based DynamoDB/API Gateway/Lambda/SNS charges; no dedicated continuously running compute is added. See the operator guide's [cost-control setup and cost breakdown](/sample-autonomous-cloud-coding-agents/getting-started/cost-attribution#setting-up-cost-controls).
+
+The [factory scoreboard](/sample-autonomous-cloud-coding-agents/architecture/observability#factory-scoreboard) adds custom metric time series in the `ABCA/Factory` namespace, a few requests per finished task in the existing TaskTable stream reconciler, and one function that reads the state of open pull requests from GitHub once an hour; it adds no alarm and no table. The operator guide's [cost breakdown](/sample-autonomous-cloud-coding-agents/getting-started/cost-attribution#cost-of-the-controls) has the count and the price.
 
 ## Additional guardrails
 

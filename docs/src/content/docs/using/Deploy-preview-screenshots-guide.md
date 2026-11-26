@@ -1,8 +1,6 @@
 ---
-title: Deploy preview screenshots guide
+title: "Deploy preview screenshots setup guide"
 ---
-
-# Deploy preview screenshots setup guide
 
 Wire your repo into ABCA so that every preview deploy gets screenshotted and posted as a comment on the open GitHub PR. For Jira-origin tasks, the originating issue receives screenshot and live-preview links. Linked Linear issues also receive preview feedback when configured.
 
@@ -69,13 +67,13 @@ Architecture notes:
 - **Lambda-only.** No agent runtime is involved post-PR — the screenshot job is deterministic; an LLM would only add cost without changing behavior.
 - **AWS-managed default browser.** AgentCore Browser ships an `aws.browser.v1` session you can attach to without provisioning your own browser resource.
 - **Private S3 + CloudFront with OAC.** Screenshot bucket is fully private; CloudFront serves images anonymously over HTTPS so GitHub markdown image embeds (and Linear's, when configured) can render them without auth.
-- **WAF exemption.** The `/v1/github/webhook` path is exempted from the `SizeRestrictions_BODY` rule in `AWSManagedRulesCommonRuleSet` because the full `deployment_status` payload (workflow run history + deploy URLs + deployment metadata) exceeds the 8 KB body-size limit. All other CRS rules (LFI, RFI, XSS, SQLi, …) still evaluate against the path; HMAC verification in Lambda authenticates the body.
+- **WAF exemption.** On the signed webhook routes (`/v1/github/webhook`, `/v1/linear/webhook`, `/v1/jira/webhook`) the WAF rule `AWSManagedRulesCommonRuleSet-SignedWebhooks` counts rather than blocks two rules of the common rule set: `SizeRestrictions_BODY`, because the full `deployment_status` payload (workflow run history + deploy URLs + deployment metadata) exceeds the 8 KB body-size limit, and `CrossSiteScripting_BODY`, because PR and issue text can contain HTML (#1063). Every other rule of the set (LFI, RFI, SQLi, …) still blocks; each receiver verifies the signature over the raw body before it dispatches the event (Linear and Jira first read the tenant ID from the body to choose the signing secret). XSS matches on these routes are counted under the `SignedWebhookXssCounted` metric and alarmed.
 - **Skips non-2xx pages.** The processor enables CDP's `Network` domain and captures the main-document HTTP status. If the preview URL returns 4xx/5xx (404 / 503 / a 3xx that doesn't redirect cleanly), the processor logs `Preview URL returned HTTP <status>; skipping screenshot` and posts no PR/Linear comment. This avoids posting a confidently-wrong screenshot of a 404 page as if it were the deploy. Auth walls that return HTTP 200 (e.g. Vercel deployment protection) are out of scope — disable deployment protection or use a public preview, see the Vercel setup section below.
 
 ## Prerequisites
 
-- ABCA stack deployed (`mise //cdk:deploy`) — confirm `GitHubWebhookUrl` + `GitHubWebhookSecretArn` + `ScreenshotCloudFrontDomain` are listed in the stack outputs
-- (Optional) Linear OAuth installed for at least one workspace (`bgagent linear setup <slug>`) — only required if you want screenshots posted to Linear issues in addition to the GitHub PR
+- ABCA stack deployed with the `deployPreviewScreenshots` feature enabled in its [deployment profile](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide#deployment-profiles) — confirm `GitHubWebhookUrl` + `GitHubWebhookSecretArn` + `ScreenshotCloudFrontDomain` are listed in the stack outputs
+- (Optional) Linear OAuth installed for at least one workspace (`bgagent linear setup <slug>`) — only required if you want screenshots posted to Linear issues in addition to the GitHub PR; the `linear` feature must also be enabled
 - A GitHub repo you own
 - Your deploy provider connected to that repo (the example uses Vercel)
 - AWS CLI logged in to the same account as the ABCA stack
@@ -165,7 +163,7 @@ The pipeline filters `deployment_status` webhooks against `SCREENSHOT_TARGET_ENV
 
 - **401 "Missing signature"**: the request didn't reach our Lambda — check that you saved the webhook with the right signing secret.
 - **401 "Invalid signature"**: the secret you pasted into GitHub doesn't match what's stored in AWS. Re-run `bgagent github set-webhook-secret` with the value from the GitHub webhook page.
-- **403 "Forbidden" with `X-Amzn-Errortype: ForbiddenException`**: WAF rejected the body. Should not happen on the `/v1/github/webhook` path because that path is exempted from the CommonRuleSet, but if you see it, check the `BlockedRequests` metric on the `TaskApiWebAcl` regional WebACL in CloudWatch.
+- **403 "Forbidden" with `X-Amzn-Errortype: ForbiddenException`**: WAF rejected the body. Should be rare on the `/v1/github/webhook` path, where body size and XSS matches are counted rather than blocked, but if you see it, check the `BlockedRequests` metric on the `TaskApiWebAcl` regional WebACL in CloudWatch.
 
 ### Webhook delivers 200 but no screenshot lands
 
@@ -224,7 +222,7 @@ Fetch failures, timeouts, non-JSON bodies, 5xx responses, HTTP 408/429, and all 
 | `http_error` | GitHub returned non-2xx responses; inspect the preceding logged HTTP statuses, token permissions, and rate limits. |
 | `non_json_response` | GitHub's response could not be parsed as JSON. |
 | `malformed_pr_response` | The deployment-status commit-pulls endpoint returned a non-array body. |
-| `pr_not_linked` | No open PR is associated with the deployment SHA yet. |
+| `pr_not_linked` | No open PR of this repository is associated with the deployment SHA yet. A pull request that lives in another repository and was opened from a branch of this one does not count. |
 | `budget_exhausted` | Earlier processing consumed the PR lookup budget before the first request. |
 
 After resolving a failure, rebuild the preview or wait for the one-hour dedup window before replaying the same check.
@@ -237,6 +235,8 @@ The receiver Lambda async-invokes the processor (`InvocationType: Event`) and re
 
 - **`WebhookProcessorErrorAlarm`** — fires on the processor's Lambda `Errors` metric: **any** 5-minute period with `>= 1` error alarms (evaluation range 2 periods, 1 datapoint to alarm). Early signal: an invocation is faulting *now*.
 - **`WebhookProcessorDlqDepthAlarm`** — fires when such a failed invocation has survived Lambda's built-in async retries and landed on the DLQ (construct id `WebhookProcessorDlq`; 14-day retention, SSL-enforced). Backstop: a payload is now parked undelivered. (The queue also gets SSE via SQS's service-side default; the construct doesn't set an explicit `encryption`.)
+
+Both alarms notify the `OperationalAlerts` topic (stack output `OperationalAlertsTopicArn`) when they go into `ALARM`; a fault that also exhausts the retries therefore sends two notifications, one per alarm. The topic has no subscriber until you add one: see [Alarm notifications](/sample-autonomous-cloud-coding-agents/architecture/observability#alarm-notifications).
 
 The two catch the same failure class, but the `Errors` alarm fires no later than — and, when the retry ladder straddles a period boundary, one window before — the DLQ-depth alarm (the `Errors` metric is stamped at invocation time, before retries exhaust onto the DLQ). Find and inspect the DLQ — the construct sets no explicit queue name, so its physical name is CloudFormation-generated and *contains* the `WebhookProcessorDlq` construct id:
 
@@ -260,10 +260,14 @@ The message body is the original async-invoke event; the `RequestContext`/error 
 
 ### Screenshot lands on GitHub PR but not on Linear
 
-The GitHub-side post is the primary path; Linear is opt-in and best-effort. Skipping the Linear post is normal if you don't have Linear configured. If you do, look for the processor log line `Linear identifier did not resolve to an issue` — usually means:
+The GitHub-side post is the primary path; Linear is opt-in and best-effort. Skipping the Linear post is normal if you don't have Linear configured. If you do: a pull request opened by a Linear task needs no identifier, because its issue comes from the task record. For a pull request that was not opened by a Linear task, the branch name, the title and the body are searched for a Linear-style identifier (e.g. `ABCA-42`), in that order; a later one is used only when no workspace has the earlier one. If none of them names the issue, nothing is posted. Look for the processor log line `Linear identifier did not resolve to an issue`, whose field `identifiers` lists the ones that were tried — usually means:
 
-- The PR title and body don't contain a Linear-style identifier (e.g. `ABCA-42`). The agent's task description includes the identifier by default; if you opened the PR manually it might not.
+- No workspace has an issue under any of the identifiers that were found. Any word followed by a number in the branch name reads as one (`feature/upgrade-node-22` gives `NODE-22`), so check that the title or the body names the issue.
 - The identifier's workspace isn't OAuth-installed. Run `bgagent linear list-projects` to confirm the issue's project is in the registry.
+- The identifier exists in two workspaces (warning `Linear issue lookup: identifier exists in more than one workspace`). Nothing says which of the two is meant, so nothing is posted.
+- A workspace could not be asked (its token did not resolve, or warnings `Linear issue lookup: graphql ...`). The search ends there: an identifier further down is not taken in place of one that could not be checked.
+
+A pull request whose branch has the form `bgagent/<id>/...` but names a task of another repository gets the screenshot comment on GitHub only. The processor logs `Failed to persist screenshot_url` with the error `The branch names no task of this repository`. A task counts as one of another repository when its blueprint is registered under another name than the one GitHub reports (letter case aside), for example the old name of a repository that was renamed: register the blueprint under the current name.
 
 ### CloudFront serves a 403
 

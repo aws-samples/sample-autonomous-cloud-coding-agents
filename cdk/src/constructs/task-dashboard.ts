@@ -21,9 +21,153 @@ import { Duration, Stack } from 'aws-cdk-lib';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import { Construct } from 'constructs';
+import { FACTORY_DIMENSIONS, FACTORY_METRIC_NAMESPACE, FACTORY_METRICS, FACTORY_WORK } from '../handlers/shared/scoreboard';
+import type { PullRequestState, TaskOutcome } from '../handlers/shared/types';
 
 /** Metric aggregation period for the Cedar-HITL approval widgets (minutes). */
 const HITL_METRIC_PERIOD_MINUTES = 15;
+
+/** The factory scoreboard row looks back 30 days, whatever time range the dashboard shows. */
+const SCOREBOARD_START = '-P30D';
+
+/**
+ * A number of the factory scoreboard row is one value over its whole window, not the last
+ * bucket of a series: the ratio of one bucket is not the ratio of the window, and the
+ * percentile of a bucket that holds one task is that task.
+ */
+const OVER_THE_WINDOW = { start: SCOREBOARD_START, setPeriodToTimeRange: true } as const;
+
+/** A graph of the row: stacked sums per day over the same window, two graphs to a line. */
+const PER_DAY = { stacked: true, period: Duration.days(1), start: SCOREBOARD_START, width: 12, height: 6 } as const;
+
+/** The units a time widget of the row can show, each in the seconds the metrics are written in. */
+const SECONDS_PER = { minutes: 60, hours: 3600 } as const;
+
+const VERIFIED_PR: TaskOutcome = 'verified_pr';
+
+/** The console's names for the outcomes of a finished task, in the order the graph stacks them. */
+const OUTCOME_LABELS: Readonly<Record<TaskOutcome, string>> = {
+  verified_pr: 'Verified pull request',
+  unverified_pr: 'Pull request without a passed build',
+  no_new_pr: 'Finished, no new pull request',
+  failed: 'Failed',
+  cancelled: 'Cancelled',
+  timed_out: 'Ran out of time',
+};
+
+/** The two final states of a pull request, in the order the graph stacks them. */
+const PR_OUTCOME_LABELS: Readonly<Record<Extract<PullRequestState, 'merged' | 'closed'>, string>> = {
+  merged: 'Merged',
+  closed: 'Closed without merging',
+};
+
+/** A metric of the factory scoreboard. The names are those of the module that writes the metric lines. */
+function factoryMetric(metricName: string, statistic: string, dimensionsMap: Record<string, string> = {}, label?: string): cloudwatch.Metric {
+  return new cloudwatch.Metric({ namespace: FACTORY_METRIC_NAMESPACE, metricName, statistic, dimensionsMap, label });
+}
+
+/**
+ * The factory scoreboard row: what the finished tasks of every user came to, and what
+ * became of the pull requests they opened. The widget titles follow the labels of the
+ * console's Scoreboard page, which shows these numbers for the tasks of one user.
+ */
+function factoryScoreboardWidgets(): cloudwatch.IWidget[] {
+  const math = (expression: string, usingMetrics: Record<string, cloudwatch.IMetric>, label: string): cloudwatch.MathExpression =>
+    new cloudwatch.MathExpression({ expression, usingMetrics, label });
+  // The two values of a time widget. An agent takes minutes and a merge takes days, so each
+  // widget has the unit its numbers read well in, and each label names it.
+  const medianAndSpread = (metricName: string, unit: keyof typeof SECONDS_PER): cloudwatch.MathExpression[] => [
+    math(`time50 / ${SECONDS_PER[unit]}`, { time50: factoryMetric(metricName, 'p50') }, `Median (${unit})`),
+    math(`time90 / ${SECONDS_PER[unit]}`, { time90: factoryMetric(metricName, 'p90') }, `9 in 10 within (${unit})`),
+  ];
+  const ofCodingTasks = { [FACTORY_DIMENSIONS.work]: FACTORY_WORK.coding };
+  // The divisor of the two ratios. They have no zero branch: a window without a verified
+  // pull request shows no value, where 0 would read as "no touchpoints" or "no spend".
+  const verified = factoryMetric(FACTORY_METRICS.tasksFinished, 'Sum', { [FACTORY_DIMENSIONS.outcome]: VERIFIED_PR });
+
+  return [
+    new cloudwatch.TextWidget({
+      markdown: '## Factory scoreboard\n'
+        + "Every user's tasks that finished in the last 30 days, or since the scoreboard was deployed if that is less. "
+        + 'The row keeps that window whatever time range the dashboard shows. '
+        + "A verified pull request is one opened after the repository's build passed. "
+        + 'The two pull-request widgets count a pull request on the day it was merged or closed, not on the day its task finished, '
+        + 'and reach up to 13 days back before the deployment.',
+      width: 24,
+      height: 2,
+    }),
+    new cloudwatch.SingleValueWidget({
+      title: 'Time to verified pull request',
+      metrics: medianAndSpread(FACTORY_METRICS.timeToVerifiedPr, 'minutes'),
+      width: 8,
+      ...OVER_THE_WINDOW,
+    }),
+    new cloudwatch.SingleValueWidget({
+      title: 'Time to merged pull request',
+      metrics: medianAndSpread(FACTORY_METRICS.timeToMerge, 'hours'),
+      width: 8,
+      ...OVER_THE_WINDOW,
+    }),
+    new cloudwatch.SingleValueWidget({
+      title: 'Verified pull request with no stop for a person',
+      metrics: [
+        // The metric is 0 or 1 on each task that asked for a new pull request: its average is the share.
+        math(
+          '100 * untouched',
+          { untouched: factoryMetric(FACTORY_METRICS.untouchedVerifiedPrs, 'Average') },
+          '% of the tasks that asked for a new pull request',
+        ),
+      ],
+      width: 8,
+      ...OVER_THE_WINDOW,
+    }),
+    new cloudwatch.SingleValueWidget({
+      title: 'Human touchpoints per verified pull request',
+      metrics: [
+        math(
+          'touchpoints / verified',
+          { touchpoints: factoryMetric(FACTORY_METRICS.humanTouchpoints, 'Sum', ofCodingTasks), verified },
+          'On coding tasks, failed ones too',
+        ),
+      ],
+      width: 8,
+      ...OVER_THE_WINDOW,
+    }),
+    new cloudwatch.SingleValueWidget({
+      title: 'Spend per verified pull request',
+      metrics: [
+        math(
+          'spend / verified',
+          { spend: factoryMetric(FACTORY_METRICS.costUsd, 'Sum', ofCodingTasks), verified },
+          'USD on coding tasks, failed ones too',
+        ),
+      ],
+      width: 8,
+      ...OVER_THE_WINDOW,
+    }),
+    new cloudwatch.SingleValueWidget({
+      title: 'Guardrail stops and blanket approvals',
+      metrics: [
+        factoryMetric(FACTORY_METRICS.guardrailStops, 'Sum', {}, 'Stopped by a guardrail'),
+        factoryMetric(FACTORY_METRICS.blanketApprovals, 'Sum', {}, 'Started with blanket approval'),
+      ],
+      width: 8,
+      ...OVER_THE_WINDOW,
+    }),
+    new cloudwatch.GraphWidget({
+      title: 'Tasks finished per day, by outcome',
+      left: Object.entries(OUTCOME_LABELS).map(([outcome, label]) =>
+        factoryMetric(FACTORY_METRICS.tasksFinished, 'Sum', { [FACTORY_DIMENSIONS.outcome]: outcome }, label)),
+      ...PER_DAY,
+    }),
+    new cloudwatch.GraphWidget({
+      title: 'Pull requests merged and closed per day',
+      left: Object.entries(PR_OUTCOME_LABELS).map(([state, label]) =>
+        factoryMetric(FACTORY_METRICS.pullRequestsResolved, 'Sum', { [FACTORY_DIMENSIONS.prOutcome]: state }, label)),
+      ...PER_DAY,
+    }),
+  ];
+}
 
 /**
  * Properties for the TaskDashboard construct.
@@ -54,6 +198,12 @@ export interface TaskDashboardProps {
  * Queries use either auto-discovered JSON fields or ``parse @message`` with
  * regex patterns for field extraction (when custom field names are needed to
  * avoid conflicts with auto-discovered fields).
+ *
+ * The factory scoreboard row, first on the dashboard, reads no logs: its widgets
+ * read the ``ABCA/Factory`` metrics, written once per finished task by the
+ * TaskTable stream consumer (``handlers/scoreboard-metrics.ts``) and once per
+ * merged or closed pull request by the hourly read of GitHub
+ * (``handlers/sweep-pr-outcomes.ts``).
  */
 export class TaskDashboard extends Construct {
   public readonly dashboard: cloudwatch.Dashboard;
@@ -67,6 +217,9 @@ export class TaskDashboard extends Construct {
       dashboardName: `BackgroundAgent-Tasks-${Stack.of(this).stackName}`,
       defaultInterval: Duration.hours(24),
     });
+
+    // --- Factory scoreboard: first, as the summary; the rows below are diagnostics ---
+    this.dashboard.addWidgets(...factoryScoreboardWidgets());
 
     // --- Row 1: Task outcomes ---
     this.dashboard.addWidgets(
@@ -155,13 +308,18 @@ export class TaskDashboard extends Construct {
     );
 
     // --- Row 3: Build and lint verification ---
+    // The agent writes `null` when no build or lint ran (a task without a
+    // repository, a crashed task, a build command that could not run). The two
+    // patterns match `true` and `false` but not `null`, so that `ispresent`
+    // drops such an event instead of counting it as a failed run.
     this.dashboard.addWidgets(
       new cloudwatch.LogQueryWidget({
         title: 'Build Pass Rate (24h)',
         logGroupNames: [logGroup.logGroupName],
         queryLines: [
           'filter @message like "METRICS_REPORT"',
-          'parse @message /"build_passed":\\s*(?<bp_raw>[^,}]+)/',
+          // [tf][a-z]+, not true|false: AWS's `parse` examples show no `|`, and it could not be tried here.
+          'parse @message /"build_passed":\\s*(?<bp_raw>[tf][a-z]+)/',
           'filter ispresent(bp_raw)',
           'stats sum(bp_raw = "true") / count(*) * 100 as build_pass_rate_pct by bin(1h)',
         ],
@@ -174,7 +332,8 @@ export class TaskDashboard extends Construct {
         logGroupNames: [logGroup.logGroupName],
         queryLines: [
           'filter @message like "METRICS_REPORT"',
-          'parse @message /"lint_passed":\\s*(?<lp_raw>[^,}]+)/',
+          // [tf][a-z]+ for the same reason as in the build widget.
+          'parse @message /"lint_passed":\\s*(?<lp_raw>[tf][a-z]+)/',
           'filter ispresent(lp_raw)',
           'stats sum(lp_raw = "true") / count(*) * 100 as lint_pass_rate_pct by bin(1h)',
         ],
@@ -456,10 +615,12 @@ export class TaskDashboard extends Construct {
       // effective_timeout_s that was actually in effect. Aggregated
       // p50/p90/p99 so operators can distinguish "timeout was 30s,
       // obviously the user couldn't respond" from "timeout was 600s
-      // and the user really was unavailable." ``rule_id`` dimension
-      // is emitted per normalized rule id (allowlist + ``other``
-      // bucket to cap cardinality); the three lines below roll up
-      // across all dimension values at dashboard-render time.
+      // and the user really was unavailable." The publisher writes each
+      // value twice: with a ``rule_id`` dimension (normalized rule id:
+      // allowlist + ``other`` bucket to cap cardinality) and without
+      // dimensions. The three lines below read the one without
+      // dimensions, because CloudWatch does not aggregate a custom
+      // metric across dimensions.
       new cloudwatch.GraphWidget({
         title: 'Approval Timeout Breakdown — effective timeout on timed-out approvals (s)',
         left: [

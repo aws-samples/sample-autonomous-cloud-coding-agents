@@ -41,9 +41,9 @@ const VIEWS: Readonly<Record<TaskView, { label: string; status?: readonly TaskSt
   all: { label: 'All tasks' },
   attention: { label: 'Needs you' },
   active: { label: 'Working now', status: ACTIVE_STATUSES },
-  queued: { label: 'Waiting in line', status: PRE_ACTIVE_STATUSES },
+  queued: { label: 'Waiting to start', status: PRE_ACTIVE_STATUSES },
   completed: { label: 'Done', status: ['COMPLETED'] },
-  unsuccessful: { label: 'Failed or cancelled', status: ['FAILED', 'TIMED_OUT', 'CANCELLED'] },
+  unsuccessful: { label: 'Failed, ran out of time or cancelled', status: ['FAILED', 'TIMED_OUT', 'CANCELLED'] },
 };
 
 const VIEW_OPTIONS: SelectProps.Option[] = (Object.keys(VIEWS) as TaskView[]).map((value) => ({ value, label: VIEWS[value].label }));
@@ -159,7 +159,7 @@ export function TaskListPage() {
           empty={<Box textAlign="center" color="inherit">No tasks match this view.</Box>}
           hasMore={query.hasNextPage}
           loadingMore={query.isFetchingNextPage}
-          onLoadMore={() => query.fetchNextPage()}
+          onLoadMore={() => void query.fetchNextPage()}
         />
       )}
     </ContentLayout>

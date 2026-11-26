@@ -67,13 +67,13 @@ jest.mock('../../src/repo-lookup', () => {
   };
 });
 
-const getStackOutputSpy = jest.spyOn(stackOutputs, 'getStackOutput');
+const getStackOutputsSpy = jest.spyOn(stackOutputs, 'getStackOutputs');
 const isGithubTokenConfiguredMock = githubToken.isGithubTokenConfigured as jest.Mock;
 const listRepoConfigsMock = repoLookup.listRepoConfigs as jest.Mock;
 const originalFetch = global.fetch;
 
 function mockStackOutputs(): void {
-  getStackOutputSpy.mockImplementation(async (_region, _stack, key) => {
+  getStackOutputsSpy.mockImplementation(async (_region, _stack, keys) => {
     const outputs: Record<string, string> = {
       ApiUrl: 'https://api.example/v1/',
       UserPoolId: 'us-east-1_pool',
@@ -81,13 +81,13 @@ function mockStackOutputs(): void {
       GitHubTokenSecretArn: 'arn:token',
       RepoTableName: 'RepoTable',
     };
-    return outputs[key] ?? null;
+    return Object.fromEntries(keys.map((key) => [key, outputs[key] ?? null]));
   });
 }
 
 describe('runPlatformDoctor', () => {
   beforeEach(() => {
-    getStackOutputSpy.mockReset();
+    getStackOutputsSpy.mockReset();
     isGithubTokenConfiguredMock.mockReset();
     listRepoConfigsMock.mockReset();
     cognitoSend.mockReset().mockResolvedValue({});
@@ -115,6 +115,11 @@ describe('runPlatformDoctor', () => {
     expect(results.find((r) => r.id === 'active_repos')?.status).toBe('pass');
     expect(cognitoSend).toHaveBeenCalledTimes(2);
     expect(bedrockSend).toHaveBeenCalledTimes(1);
+    // Each output reaches the argument it is read for.
+    expect(results.find((r) => r.id === 'cognito_config')?.detail)
+      .toBe('User pool us-east-1_pool and client client123 are valid.');
+    expect(global.fetch).toHaveBeenCalledWith('https://api.example/v1/tasks', { method: 'GET' });
+    expect(isGithubTokenConfiguredMock).toHaveBeenCalledWith('us-east-1', 'arn:token');
   });
 
   test('fails when github token is not configured', async () => {
@@ -140,13 +145,15 @@ describe('runPlatformDoctor', () => {
 
   test('fails the active-repo check when the repo table output is missing', async () => {
     mockStackOutputs();
-    getStackOutputSpy.mockImplementation(async (_region, _stack, key) =>
+    getStackOutputsSpy.mockImplementation(async (_region, _stack, keys) => Object.fromEntries(keys.map((key) => [
+      key,
       key === 'RepoTableName' ? null : ({
         ApiUrl: 'https://api.example/v1/',
         UserPoolId: 'us-east-1_pool',
         AppClientId: 'client123',
         GitHubTokenSecretArn: 'arn:token',
-      }[key] ?? null));
+      }[key] ?? null),
+    ])));
     isGithubTokenConfiguredMock.mockResolvedValue(true);
 
     const results = await runPlatformDoctor({ region: 'us-east-1', stackName: 'dev' });

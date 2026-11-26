@@ -123,6 +123,16 @@ describe('list-api-keys handler', () => {
       expect(q.Limit).toBe(21);
     });
 
+    test('returns 400 for a next_token that cannot be decoded', async () => {
+      // Taken for no token, it restarted the list at the first page with status 200.
+      const cut = Buffer.from('{"key_id":"k').toString('base64');
+      const result = await handler(makeEvent({ queryStringParameters: { next_token: cut } }));
+
+      expect(result.statusCode).toBe(400);
+      expect(JSON.parse(result.body).error).toMatchObject({ code: 'VALIDATION_ERROR', message: 'Invalid next_token.' });
+      expect(mockDdbSend).not.toHaveBeenCalled();
+    });
+
     test('a single page short of the limit reports has_more=false with no token', async () => {
       // Fewer active items than requested, table exhausted (no LastEvaluatedKey).
       mockDdbSend.mockResolvedValueOnce({ Items: [makeRecord(1), makeRecord(2)] });

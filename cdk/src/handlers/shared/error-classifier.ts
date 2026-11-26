@@ -41,6 +41,11 @@ export const ErrorCategory = {
 
 export type ErrorCategoryType = (typeof ErrorCategory)[keyof typeof ErrorCategory];
 
+/** A start was sent, but its response does not establish whether AWS created a VM. */
+export class MicrovmStartUncertainError extends Error {
+  override name = 'MicrovmStartUncertainError';
+}
+
 /**
  * WHO should act, and whether retrying the SAME request can help — the axis a
  * channel reader needs to answer "just retry, or tell my admin?". Distinct from
@@ -90,7 +95,114 @@ interface ErrorPattern {
   readonly classification: ErrorClassification;
 }
 
+/** Stable codes written by the orchestrator; diagnostic text cannot override them. */
+const MICROVM_TERMINAL_CLASSIFICATIONS: Readonly<Record<string, ErrorClassification>> = {
+  MICROVM_RESUME_HOOK_FAILED: {
+    category: ErrorCategory.COMPUTE,
+    title: 'The MicroVM could not wake after being paused',
+    description:
+        'AWS could not complete the worker’s wake hook. An accepted wake request does not mean the worker resumed. The task may already have made changes before it paused.',
+    remedy:
+        'An ABCA admin should inspect the task ID and MicroVM ID in the coordinator and approval API logs, including the AWS request ID, '
+        + 'then check microvm_hook_started, microvm_hook_stage_failed and microvm_hook_finished in /aws/lambda-microvms/<image-name>. '
+        + 'A transport error can occur before any guest hook log. The service’s "connection was refused" wording alone does not establish that the listener was closed. '
+        + 'Check saved task progress and cleanup before starting a replacement task; retrying alone is not a verified fix.',
+    retryable: false,
+    errorClass: ErrorClass.SERVICE,
+  },
+  MICROVM_RUN_HOOK_REJECTED: {
+    category: ErrorCategory.CONFIG,
+    title: 'The MicroVM rejected its own run payload',
+    description:
+        'The agent\'s /run hook rejected the request with an HTTP 4xx response before reporting a task result. Common causes are a malformed payload, invalid platform configuration, or mismatched orchestrator and image versions.',
+    remedy:
+        'Retrying as-is will not help — the guest will reject the identical payload again. '
+        + 'Read the agent\'s structured response in the MicroVM log group (/aws/lambda-microvms/<image-name>) for the MICROVM_RUN_* code and any missing environment variables. '
+        + 'MICROVM_RUN_PLATFORM_CONFIG_INCOMPLETE means the orchestrator predates the platform_config contract — an admin should redeploy the stack so the orchestrator and image versions match.',
+    retryable: false,
+    errorClass: ErrorClass.SERVICE,
+  },
+  MICROVM_SUBSTRATE_TERMINATED: {
+    category: ErrorCategory.COMPUTE,
+    title: 'The MicroVM stopped before the agent reported a result',
+    description:
+        'The MicroVM ended before the agent reported a task result. Any explanation supplied by AWS is preserved in the original error message for diagnosis.',
+    remedy:
+        'This is a compute-substrate fault, not a problem with your request — reply here to try again. '
+        + 'If the message names a lifecycle-hook HTTP status, check that named hook in the MicroVM log group for its structured diagnostic code. '
+        + 'Otherwise check the MicroVM logs for the session and whether the task is exceeding the 8-hour session cap; '
+        + 'a long-running repo may belong on --compute-type ecs.',
+    retryable: true,
+    errorClass: ErrorClass.TRANSIENT,
+  },
+};
+const MICROVM_TERMINAL_PREFIX = 'MicroVM substrate terminated before the agent wrote a terminal status: ';
+const MICROVM_RUN_HOOK_4XX = /^Run lifecycle hook returned HTTP status 4\d{2}(?:\.|$)/i;
+const MICROVM_RESUME_HOOK_FAILURE = /^Resume lifecycle hook (?:failed|timed out|connection was refused|returned HTTP status [45]\d{2})(?:\.|$)/i;
+
+function microvmTerminalCode(stateReason?: string): string {
+  if (stateReason && MICROVM_RUN_HOOK_4XX.test(stateReason)) return 'MICROVM_RUN_HOOK_REJECTED';
+  if (stateReason && MICROVM_RESUME_HOOK_FAILURE.test(stateReason)) return 'MICROVM_RESUME_HOOK_FAILED';
+  return 'MICROVM_SUBSTRATE_TERMINATED';
+}
+
+/**
+ * Preserve the service reason for diagnosis, independently of the persisted code.
+ * GetMicrovm exposes hook status only in stateReason. Recognize observed service
+ * message shapes at this boundary; unknown wording stays a generic terminal failure.
+ * The strategy itself continues to report state without applying health policy.
+ */
+export function formatMicrovmTerminalFailure(detail: string, stateReason?: string): string {
+  const code = microvmTerminalCode(stateReason);
+  const reason = stateReason ? ` (${stateReason})` : '';
+  return `${code}: ${MICROVM_TERMINAL_PREFIX}${detail}${reason}`;
+}
+
+/** Classify persisted MicroVM terminal failures, including records without a code. */
+export function classifyMicrovmTerminalFailure(errorMessage?: string | null): ErrorClassification | null {
+  if (!errorMessage) return null;
+  const code = /^(MICROVM_RUN_HOOK_REJECTED|MICROVM_RESUME_HOOK_FAILED|MICROVM_SUBSTRATE_TERMINATED): /.exec(errorMessage)?.[1];
+  if (code) return MICROVM_TERMINAL_CLASSIFICATIONS[code];
+  if (MICROVM_RUN_HOOK_4XX.test(errorMessage)) return MICROVM_TERMINAL_CLASSIFICATIONS.MICROVM_RUN_HOOK_REJECTED;
+  if (MICROVM_RESUME_HOOK_FAILURE.test(errorMessage)) return MICROVM_TERMINAL_CLASSIFICATIONS.MICROVM_RESUME_HOOK_FAILED;
+
+  // Old records have only the descriptive prefix. Do not let other words in
+  // their service reason override the known terminal failure.
+  if (errorMessage.startsWith(MICROVM_TERMINAL_PREFIX)) {
+    const reason = errorMessage.slice(errorMessage.indexOf(' (') + 2).replace(/\)$/, '');
+    return MICROVM_TERMINAL_CLASSIFICATIONS[microvmTerminalCode(reason)];
+  }
+  return null;
+}
+
 const PATTERNS: readonly ErrorPattern[] = [
+  {
+    // The supervisor persists this reason for a permanent read failure or after
+    // exhausting its bounded retry count. Neither outcome establishes whether
+    // the retained worker was healthy or whether cleanup has completed.
+    pattern: /^MicroVM supervisor: substrate-read-failed(?:-repeatedly)?$/,
+    classification: {
+      category: ErrorCategory.COMPUTE,
+      title: 'The MicroVM status could not be checked',
+      description: 'ABCA ended the task after its required worker-state checks failed.',
+      remedy:
+        'An ABCA admin should find microvm_supervisor_request_failed in the coordinator logs using the task ID and MicroVM ID. '
+        + 'Check stage, error_type and any AWS request ID. Confirm worker termination and review saved task progress before starting a replacement task.',
+      retryable: false,
+      errorClass: ErrorClass.SERVICE,
+    },
+  },
+  {
+    pattern: /MICROVM_START_(?:OUTCOME_UNKNOWN|INPUT_CHANGED|STATE_INVALID|TASK_CLOSED|RECEIPT_SAVE_FAILED):/,
+    classification: {
+      category: ErrorCategory.COMPUTE,
+      title: 'The MicroVM start requires reconciliation',
+      description: 'The platform cannot safely issue another start for this task.',
+      remedy: 'An admin should inspect the task\'s saved MicroVM start receipt and any recorded computer ID before submitting another task. An unknown start may still have created a MicroVM; do not assume that a missing response means it failed.',
+      retryable: false,
+      errorClass: ErrorClass.SERVICE,
+    },
+  },
   // --- Auth ---
   {
     pattern: /INSUFFICIENT_GITHUB_REPO_PERMISSIONS/i,
@@ -126,12 +238,66 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
   {
+    pattern: /PR_FROM_FORK/i,
+    classification: {
+      category: ErrorCategory.AUTH,
+      title: 'Pull request from a fork',
+      description: 'The pull request comes from a fork: its branch is in another repository, where the agent cannot check it out or push to it.',
+      remedy: 'Open the pull request from a branch of the repository itself (push the branch there first), then submit the task for that pull request.',
+      retryable: false,
+      errorClass: ErrorClass.USER,
+    },
+  },
+  {
+    // The agent's push preflight (agent/src/repo.py): SAML SSO or an IP allow list
+    // blocks the token, which scopes would not fix.
+    pattern: /GitHub organization policy blocks pushes to/i,
+    classification: {
+      category: ErrorCategory.AUTH,
+      title: 'GitHub organization policy blocks the token',
+      description: 'The organization that owns the repository enforces SAML single sign-on or an IP allow list, and the GitHub token does not satisfy it.',
+      remedy: 'Do what the error detail names: authorize the token for the organization\'s SAML single sign-on, or add the agent\'s egress IP addresses to the organization\'s IP allow list. Then resubmit.',
+      retryable: false,
+      errorClass: ErrorClass.SERVICE,
+    },
+  },
+  {
+    // The agent's push preflight: no token change makes an archived repository writable.
+    pattern: /is archived on GitHub, so it is read-only/i,
+    classification: {
+      category: ErrorCategory.CONFIG,
+      title: 'Repository is archived',
+      description: 'The repository is archived on GitHub, so nothing can be pushed to it.',
+      remedy: 'Unarchive the repository on GitHub, or submit the task against another repository.',
+      retryable: false,
+      errorClass: ErrorClass.USER,
+    },
+  },
+  {
     pattern: /Token cannot (push to|interact with pull requests on)/i,
     classification: {
       category: ErrorCategory.AUTH,
       title: 'Insufficient GitHub token scopes',
       description: 'The GitHub token is missing required scopes for the requested operation.',
       remedy: 'Update the PAT with Contents (Read and write), Pull requests (Read and write), and Issues (Read) scopes.',
+      retryable: false,
+      errorClass: ErrorClass.SERVICE,
+    },
+  },
+  {
+    // GitHub was reached and refused the credential: the stored token is
+    // invalid, expired or revoked.
+    //
+    // ORDERING: this entry MUST stay ABOVE `GITHUB_UNREACHABLE`. Pre-flight
+    // files every non-2xx answer of its reachability probe under that reason, so
+    // the 401 arrives in the same message and would read as a network outage
+    // that a retry clears.
+    pattern: /GitHub API returned HTTP 401/i,
+    classification: {
+      category: ErrorCategory.AUTH,
+      title: 'GitHub token rejected',
+      description: 'GitHub answered 401 during pre-flight checks: the configured token is invalid, expired or revoked.',
+      remedy: 'Store a valid token (bgagent github set-token, with --repo <owner/repo> when the repository has its own token secret), then resubmit the task.',
       retryable: false,
       errorClass: ErrorClass.SERVICE,
     },
@@ -192,6 +358,29 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
   {
+    // The repository is on a compute backend this stack cannot run it on. Either
+    // the pin is refused when the blueprint loads (`resolveRepositoryBackend` in
+    // compute-backend.ts), or the stack selects the backend but its strategy has
+    // nothing to start a session with (the "deployed without the … substrate"
+    // throw of the ECS and MicroVM strategies; for lambda-microvm that is the
+    // state between the first deploy and the one that adds the image).
+    //
+    // ORDERING: this entry MUST stay ABOVE the generic `Session start failed` and
+    // `Blueprint config load failed` entries. The messages are persisted under
+    // those two prefixes, and both entries offer a retry that cannot work.
+    pattern: /compute_type '[\w-]+' is not deployed|deployed without the (?:ECS|Lambda MicroVMs) substrate/i,
+    classification: {
+      category: ErrorCategory.CONFIG,
+      title: 'The repository\'s compute backend is not deployed in this stack',
+      description: 'The repository is configured for a compute backend that this deployment does not provide, or provides without what a session needs (for lambda-microvm: its image).',
+      remedy:
+        'Retrying will not help. An admin either redeploys the stack with that backend in compute_types (for lambda-microvm, with its image configured), '
+        + 'or moves the repository to a backend the stack deploys (bgagent repo onboard <repo> --compute-type <backend>).',
+      retryable: false,
+      errorClass: ErrorClass.SERVICE,
+    },
+  },
+  {
     // ADR-021 sub-decision 4, "Regional availability enforcement" (defense in
     // depth): Lambda MicroVMs launched in 5 Regions, so a stack deployed
     // elsewhere gets an endpoint-resolution failure from the SDK rather than a
@@ -205,7 +394,7 @@ const PATTERNS: readonly ErrorPattern[] = [
     // anchored on a `lambda`/`microvm` marker precisely so an AgentCore or ECS
     // endpoint failure cannot be hijacked into MicroVM copy — their endpoint
     // hosts are `bedrock-agentcore.*` / `ecs.*`.
-    pattern: /(?:UnknownEndpoint|Inaccessible host|Could not resolve endpoint).{0,120}lambda|(?:lambda[- ]?microvms?|microvms?).{0,60}(?:not available|not supported|unavailable)|(?:not available|not supported|unavailable).{0,60}(?:lambda[- ]?microvms?)/i,
+    pattern: /(?:UnknownEndpoint|Inaccessible host|Could not resolve endpoint).{0,120}lambda|(?:lambda[- ]?microvms?|microvms?)\s+(?:service\s+)?(?:(?:is|are)\s+)?(?:not available|not supported|unavailable)\s+in\s+[^.\n]{0,50}\bregion\b/i,
     classification: {
       category: ErrorCategory.CONFIG,
       title: 'Lambda MicroVMs is not available in this Region',
@@ -217,14 +406,14 @@ const PATTERNS: readonly ErrorPattern[] = [
         + '. Either redeploy the platform in a supported Region, or move this repo to a backend that is available here '
         + '(bgagent repo onboard <repo> --compute-type agentcore, or --compute-type ecs for large repos). '
         + 'If AWS has since launched MicroVMs in this Region, update the supported-Region list in '
-        + 'cdk/src/handlers/shared/microvm-regions.ts. Retrying as-is will not help.',
+        + 'contracts/deployment-capabilities.json. Retrying as-is will not help.',
       retryable: false,
       errorClass: ErrorClass.SERVICE,
     },
   },
   // --- Lambda MicroVMs (ADR-021) ---
   //
-  // SCOPING: the three SDK-exception entries below are anchored on the
+  // SCOPING: the SDK-exception entries below are anchored on the
   // ``MicroVM <operation> failed`` marker that
   // ``lambda-microvm-strategy.wrapMicrovmError`` puts on every error it lets
   // escape (see ``MICROVM_ERROR_MARKER``). The anchor is mandatory, not
@@ -237,9 +426,8 @@ const PATTERNS: readonly ErrorPattern[] = [
   // classified them before this section existed (a precise earlier pattern, or
   // UNKNOWN).
   //
-  // Both orders are accepted in each pattern so a future wrapper that puts the
-  // exception name ahead of the marker still matches; ``[\s\S]`` rather than
-  // ``.`` because SDK messages can span lines.
+  // ``[\s\S]`` rather than ``.`` because SDK messages can span lines. The older
+  // quota/throttle/not-found patterns also accept the reverse wrapper order.
   //
   // ORDERING: this section sits immediately ABOVE the generic
   // `Session start failed` catch-all. That is only safe BECAUSE of the marker:
@@ -249,66 +437,6 @@ const PATTERNS: readonly ErrorPattern[] = [
   // the MICROVM_* env vars to check) instead of "Check AgentCore Runtime or ECS
   // cluster health" — advice that names the wrong substrate entirely. If the
   // marker anchor is ever dropped, these MUST move back below the catch-all.
-  {
-    // A LIFECYCLE-HOOK 4xx, which the substrate reports in `stateReason` and
-    // `reconcileMicrovmSubstrateState` appends to the persisted message.
-    //
-    // ORDERING: this MUST stay above the generic `MicroVM substrate terminated`
-    // entry below, which matches the same message (both strings travel in one
-    // `error_message`) and would otherwise win with `retryable: true`.
-    //
-    // WHY it is a distinct, NON-retryable entry: every 4xx the guest can answer is
-    // a config/envelope fault that an identical retry cannot fix —
-    // `MICROVM_RUN_PAYLOAD_INVALID` (bad envelope),
-    // `MICROVM_RUN_PLATFORM_CONFIG_INVALID` (bad `platform_config` value) and
-    // `MICROVM_RUN_PLATFORM_CONFIG_INCOMPLETE` (missing required key / version
-    // skew), all in `agent/src/server.py`'s `microvm_run`. The one genuinely
-    // retryable guest answer, `MICROVM_RUN_PAYLOAD_UNREADABLE`, is deliberately a
-    // **500**, which is why this pattern is scoped to `4\d\d` and a 5xx still falls
-    // through to the retryable entry below. Without this, a permanently-skewed
-    // deployment rendered as TRANSIENT with the remedy "reply here to try again",
-    // i.e. an invitation to loop forever.
-    //
-    // WHAT THE MESSAGE DOES *NOT* CARRY, measured: the guest's structured response
-    // BODY does not reach `stateReason`. Live evidence
-    // (`docs/verification/645-p2-smoke-runbook.md` §6.1) shows the service supplies
-    // exactly `"Run lifecycle hook returned HTTP status 400. Please check your hook
-    // endpoint and application logs for more details."` — the status code and
-    // nothing else. So this entry anchors on the STATUS, which is the only
-    // discriminator that actually travels; the `code` is available to the operator
-    // only in the guest log group, which is what the remedy sends them to. If a
-    // future service release ever enriches `stateReason` with the body, a
-    // code-anchored entry becomes possible and would be strictly better.
-    pattern: /Run lifecycle hook returned HTTP status 4\d\d/i,
-    classification: {
-      category: ErrorCategory.CONFIG,
-      title: 'The MicroVM rejected its own run payload',
-      description:
-        'The Lambda MicroVMs service delivered this task to the in-guest agent\'s /run lifecycle hook and the agent answered 4xx, so the service reaped the MicroVM within ~12 s without the task ever starting. The agent refuses a run for exactly three reasons, all of them wiring faults rather than transient ones: the orchestrator built a malformed envelope, a platform_config value was invalid, or a required platform_config key was missing (a version-skewed orchestrator paired with a current image). The agent writes a structured reason to its log group before answering.',
-      remedy:
-        'Retrying as-is will not help — the guest will reject the identical payload again. '
-        + 'Read the agent\'s own structured response body in the MicroVM log group (/aws/lambda-microvms/<image-name>): it carries a MICROVM_RUN_* code that names which of the three faults occurred, and for a missing-config fault it lists the exact environment variables. '
-        + 'MICROVM_RUN_PLATFORM_CONFIG_INCOMPLETE means the orchestrator predates the platform_config contract — an admin should redeploy the stack so the orchestrator and image versions match.',
-      retryable: false,
-      errorClass: ErrorClass.SERVICE,
-    },
-  },
-  {
-    pattern: /MicroVM substrate terminated before the agent wrote a terminal status/i,
-    classification: {
-      category: ErrorCategory.COMPUTE,
-      title: 'The MicroVM stopped before the agent reported a result',
-      description:
-        'The Lambda MicroVM running this task reached a terminal state while the task was still mid-flight, so no result was ever written. When the substrate supplied a reason (GetMicrovm\'s stateReason) the orchestrator appends it in parentheses on the message above — read that first, because it distinguishes the common causes (a /run lifecycle-hook 4xx, which the service reaps in ~12 s) from the rarer ones (the session duration cap, a host fault, or an external terminate).',
-      remedy:
-        'This is a compute-substrate fault, not a problem with your request — reply here to try again. '
-        + 'If the message names a lifecycle-hook HTTP status, the guest rejected the run: check the MicroVM log group for the agent\'s structured response body. '
-        + 'Otherwise check the MicroVM logs for the session and whether the task is exceeding the 8-hour session cap; '
-        + 'a long-running repo may belong on --compute-type ecs.',
-      retryable: true,
-      errorClass: ErrorClass.TRANSIENT,
-    },
-  },
   {
     // A `platform_config` block the orchestrator could not even assemble: a
     // REQUIRED key is absent from the orchestrator Lambda's own environment, so
@@ -335,18 +463,14 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
   {
-    // Account-level MicroVM memory quota. Deliberately TRANSIENT rather than
-    // SERVICE: this quota is capacity-shaped, not configuration-shaped — it
-    // frees as running/suspended MicroVMs terminate (AWS counts SUSPENDED VMs
-    // toward the quota), which is the same "wait and retry" character as the
-    // existing per-user `concurrency limit` entry above. The remedy still names
-    // the quota-increase path for the case where the ceiling is genuinely too
-    // low, so a persistently failing deployment is not left guessing.
+    // Account-level capacity may become available as other sessions terminate.
+    // Suspended-session quota accounting still needs live verification; do not
+    // promise that suspending a session frees capacity.
     pattern: /MicroVM [\w ]+failed[\s\S]*ServiceQuotaExceededException|ServiceQuotaExceededException[\s\S]*MicroVM [\w ]+failed/i,
     classification: {
       category: ErrorCategory.COMPUTE,
       title: 'Couldn\'t start — the MicroVM compute quota is currently exhausted',
-      description: 'Starting the MicroVM was rejected because the account\'s Lambda MicroVMs quota (memory across running and suspended MicroVMs) is fully consumed.',
+      description: 'Starting the MicroVM was rejected because the account\'s Lambda MicroVMs compute quota is fully consumed.',
       remedy:
         'Wait for in-flight tasks to finish and retry — the quota frees as MicroVMs terminate. '
         + 'If the platform hits this routinely, request a Lambda MicroVMs quota increase in Service Quotas, '
@@ -387,6 +511,50 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
 
+  {
+    pattern: /MicroVM [\w ]+failed[\s\S]*(?:AccessDeniedException|UnauthorizedException)/i,
+    classification: {
+      category: ErrorCategory.AUTH,
+      title: 'The platform is not authorized to run this MicroVM',
+      description: 'AWS denied the MicroVM lifecycle request with the current permissions.',
+      remedy: 'An admin should check the orchestrator role, iam:PassRole, and the MicroVM execution role against the deployed bootstrap bundle and stack. Correct the permissions before retrying.',
+      retryable: false,
+      errorClass: ErrorClass.SERVICE,
+    },
+  },
+  {
+    pattern: /MicroVM [\w ]+failed[\s\S]*(?:ValidationException|InvalidParameterValueException)/i,
+    classification: {
+      category: ErrorCategory.CONFIG,
+      title: 'The MicroVM request contains invalid configuration',
+      description: 'AWS rejected a value in the MicroVM request.',
+      remedy: 'An admin should check the image identifier/version, connector ARNs, execution role and hook payload against the service contract, then redeploy the corrected configuration.',
+      retryable: false,
+      errorClass: ErrorClass.SERVICE,
+    },
+  },
+  {
+    pattern: /MicroVM[\s\S]*(?:host|capacity)[\s\S]*(?:unavailable|not available)|MicroVM[\s\S]*InsufficientCapacityException/i,
+    classification: {
+      category: ErrorCategory.COMPUTE,
+      title: 'The MicroVM host or capacity is temporarily unavailable',
+      description: 'AWS could not provide the host or capacity needed for this MicroVM.',
+      remedy: 'Retry the task. If the failure persists, an admin should check AWS service health and the available MicroVM capacity.',
+      retryable: true,
+      errorClass: ErrorClass.TRANSIENT,
+    },
+  },
+  {
+    pattern: /MicroVM [\w ]+failed[\s\S]*(?:TimeoutError|RequestTimeout|ECONNRESET|ETIMEDOUT|InternalServerException|ServiceException)/i,
+    classification: {
+      category: ErrorCategory.COMPUTE,
+      title: 'The MicroVM service response was interrupted',
+      description: 'The request timed out, the connection failed, or AWS returned a server error. The request may already have succeeded.',
+      remedy: 'The platform retries the same saved start request within its recovery window. If recovery fails, an admin should inspect the saved start receipt before creating a new task.',
+      retryable: true,
+      errorClass: ErrorClass.TRANSIENT,
+    },
+  },
   {
     pattern: /Session start failed/i,
     classification: {
@@ -438,6 +606,22 @@ const PATTERNS: readonly ErrorPattern[] = [
       title: 'Agent session never started',
       description: 'The task remained in HYDRATING state — the agent container never transitioned to RUNNING.',
       remedy: 'Check if the container image pulled successfully and the runtime is available. Review CloudWatch logs for the session.',
+      retryable: true,
+      errorClass: ErrorClass.TRANSIENT,
+    },
+  },
+  {
+    // The two messages of the stranded-task reconciler
+    // (`reconcile-stranded-tasks.ts`): a task that nothing was driving any more.
+    // For a task still HYDRATING it is the condition the orchestrator reports as
+    // `Session never started` above, found by the sweep because the orchestrator
+    // was gone. Without this entry they read "Unexpected error", not retryable.
+    pattern: /Stranded: (?:SUBMITTED|HYDRATING) for \d+s|Approval stranded:/i,
+    classification: {
+      category: ErrorCategory.COMPUTE,
+      title: 'The platform lost track of this task',
+      description: 'The task was waiting to start, or paused for an approval, past the stranded-task timeout: its orchestrator or its agent container most likely stopped unexpectedly.',
+      remedy: 'Retry the task. If it repeats, an admin should check the orchestrator and stranded-task reconciler logs for the task id.',
       retryable: true,
       errorClass: ErrorClass.TRANSIENT,
     },
@@ -563,21 +747,20 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
   {
-    // A new-work coding task reported agent-success but no commit
-    // reached the branch and no PR was opened — the agent's changes were LOST
-    // (observed cause: a stacked child edited a nested working tree that was never
-    // the branch's tree, so nothing committed). This is an environment/infra
-    // fault, not the user's code, and a fresh run usually lands the work — so
-    // it reads as retryable, NOT the non-retryable "your task didn't succeed".
+    // ``_apply_delivery_gate`` (``agent/src/pipeline.py``) cannot tell lost changes
+    // from a run that correctly changed nothing (#751), so the copy names both.
+    // Retryable, because a fresh run usually lands lost work.
     // Ordered before the generic ``agent_status=`` catch-all so it wins.
     pattern: /deliverable=lost/i,
     classification: {
       category: ErrorCategory.AGENT,
-      title: 'The change was not saved',
-      description: 'The agent finished, but none of its changes were committed to the branch and no pull request was opened — the work did not land in the repository. This is usually a transient workspace fault (e.g. the clone ended up in an unexpected directory), not a problem with your request.',
-      remedy: 'Reply here to try again — a fresh run normally saves the work correctly. If it keeps happening on this repo, share the task ID with your ABCA admin to check the agent workspace setup.',
+      title: 'No change was delivered',
+      description: 'The agent finished and reported success, but no commit reached the branch and no pull request was opened. Either the agent found nothing to change (for example, the repository already has what the request asked for), or it made changes that were lost before they reached the branch. The platform cannot tell the two apart.',
+      remedy: 'Check whether the repository already has what you asked for: if it does, nothing more is needed, and a retry would end the same way. If a change was expected, reply here to try again; if it keeps happening on this repo, share the task ID with your ABCA admin to check the agent workspace setup.',
       retryable: true,
-      errorClass: ErrorClass.TRANSIENT,
+      // USER on purpose. TRANSIENT makes ``retryGuidance`` ask for a plain retry, which
+      // cannot help a run that correctly changed nothing.
+      errorClass: ErrorClass.USER,
     },
   },
   {
@@ -594,6 +777,37 @@ const PATTERNS: readonly ErrorPattern[] = [
       remedy: 'Reply here to try again — it will find the existing commit and open the PR. If it persists, an admin can open a PR from the task branch manually, or check the GitHub token\'s Pull requests (Read and write) scope.',
       retryable: true,
       errorClass: ErrorClass.TRANSIENT,
+    },
+  },
+  // The agent finished cleanly and the post-agent build gate is what stopped
+  // the task (``agent/src/pipeline.py`` ``_resolve_overall_task_status``): the
+  // verify command ran past its time limit (``build_ok=timeout``) or failed
+  // (``build_ok=False``). ``failure-reply.ts`` tells the two apart for the
+  // replies it renders; without these entries every other reader got the generic
+  // catch-all below, "the agent reported a non-success status", not retryable.
+  {
+    pattern: /agent_status=['"]?(?:success|end_turn)['"]?.*build_ok=timeout/i,
+    classification: {
+      category: ErrorCategory.TIMEOUT,
+      title: 'Build/tests didn\'t finish in time (timed out)',
+      description: 'The agent finished its change, but the configured build/verify command was still running when it hit the time limit and was stopped — it did not fail, it ran too long.',
+      remedy: 'This is usually a slow build, not broken code — retry, since a one-off may just have been slow. If a repo\'s build is legitimately long, its build environment likely needs more time or capacity; contact your ABCA admin.',
+      retryable: true,
+      // Intentionally USER (no auto-retry): re-running an unchanged slow build
+      // just times out again, so this must NOT be TRANSIENT — a human decides
+      // whether to retry or right-size the build. Do not "fix" this to TRANSIENT.
+      errorClass: ErrorClass.USER,
+    },
+  },
+  {
+    pattern: /agent_status=['"]?(?:success|end_turn)['"]?.*build_ok=False/i,
+    classification: {
+      category: ErrorCategory.AGENT,
+      title: 'Build or tests did not pass',
+      description: 'The agent finished its change, but the repository\'s build or verify command failed on the result.',
+      remedy: 'Read the build log in CloudWatch for the task id, then retry with guidance on what to fix.',
+      retryable: true,
+      errorClass: ErrorClass.USER,
     },
   },
   {
@@ -688,23 +902,19 @@ const PATTERNS: readonly ErrorPattern[] = [
     // otherwise surfaces as a bare "Unexpected error". This is NOT a code
     // failure — the command didn't fail, it ran too long — so name it precisely
     // and point at "slow, retry", not the diff. NOTE: this matches only
-    // UNCAUGHT ``run_cmd`` timeouts (clone/setup/etc.); the post-agent build/lint
-    // VERIFY path catches ``TimeoutExpired`` itself and returns a plain build
-    // failure, so it does not reach here. The remedy is deliberately generic
-    // ("retry / it may be slow") rather than naming a specific env knob — on
-    // ``main`` the verify timeout is not operator-tunable, so promising a lever
-    // here would misdirect (the tunable ``BUILD_VERIFY_TIMEOUT_S`` + larger ECS
-    // build compute live on the ECS-substrate track, not this branch).
+    // UNCAUGHT ``run_cmd`` timeouts, and the build and lint commands catch their
+    // own: a timed-out build gate arrives as ``build_ok=timeout`` (Agent block
+    // above). What reaches this entry is a command around the agent's work —
+    // clone, fetch, ``mise install``, push — so the copy must not name the build.
     pattern: /TimeoutExpired.*timed out after \d+(?:\.\d+)? ?s(econds)?|Command .*build.* timed out/i,
     classification: {
       category: ErrorCategory.TIMEOUT,
-      title: 'Build/tests didn\'t finish in time (timed out)',
-      description: 'The configured build/verify command was still running when it hit the time limit and was stopped — it did not fail, it ran too long.',
-      remedy: 'This is usually a slow build, not broken code — retry, since a one-off may just have been slow. If a repo\'s build is legitimately long, its build environment likely needs more time or capacity; contact your ABCA admin.',
+      title: 'A setup or git command timed out',
+      description: 'A command the agent runs around its work (cloning the repository, fetching a branch, installing tools, pushing) was still running when it hit its time limit and was stopped — it did not fail, it ran too long.',
+      remedy: 'Usually a slow network or a very large repository — retry. If it keeps happening on this repo, contact your ABCA admin with the task id.',
       retryable: true,
-      // Intentionally USER (no auto-retry): re-running an unchanged slow build
-      // just times out again, so this must NOT be TRANSIENT — a human decides
-      // whether to retry or right-size the build. Do not "fix" this to TRANSIENT.
+      // USER, not TRANSIENT: a clone or install that needs more than its time
+      // limit hits it again, so the next step is a deliberate retry.
       errorClass: ErrorClass.USER,
     },
   },
@@ -716,11 +926,35 @@ const PATTERNS: readonly ErrorPattern[] = [
       description: 'The orchestrator polling window expired before the agent completed.',
       remedy: 'The task may be too large for the configured turn/budget limits. Consider breaking it into smaller tasks or increasing max_turns.',
       retryable: false,
-      errorClass: ErrorClass.TRANSIENT,
+      errorClass: ErrorClass.USER,
     },
   },
 
 ];
+
+/**
+ * The agent's push preflight refusal (``PushCapabilityError`` in agent/src/repo.py):
+ * ``Token cannot push to <repo>: GitHub refused the <token type> write access (<git
+ * line>). To fix it, <fix>. The task stopped before the agent ran …``. The fix
+ * depends on the token type (scope for a classic PAT, repository access and
+ * Contents for a fine-grained one, installation for a GitHub App), so the
+ * classification carries the agent's own fix rather than the generic remedy of
+ * the ``Token cannot push`` pattern, which the orchestrator's preflight shares.
+ * The fix is matched up to the sentence that follows it, so a period inside it (a
+ * repository named ``a.b``) does not cut it short.
+ */
+const AGENT_PUSH_REFUSAL = /Token cannot push to (\S+): GitHub refused the (.+?) write access \(.*?\)\. To fix it, (.+?)\. The task stopped before the agent ran/;
+
+function agentPushRefusalClassification(repo: string, tokenType: string, fix: string): ErrorClassification {
+  return {
+    category: ErrorCategory.AUTH,
+    title: 'Insufficient GitHub token scopes',
+    description: `GitHub refused the ${tokenType} write access to ${repo}.`,
+    remedy: `${fix.charAt(0).toUpperCase()}${fix.slice(1)}. Then resubmit. The permissions each token type needs are in agent/README.md, GitHub PAT — Minimal Permissions.`,
+    retryable: false,
+    errorClass: ErrorClass.SERVICE,
+  };
+}
 
 /**
  * Canonical blocker-reason contract. Matches ``BLOCKED[<kind>]`` and,
@@ -856,28 +1090,44 @@ const UNKNOWN_CLASSIFICATION: ErrorClassification = {
 };
 
 /**
+ * Bounds what is classified: the agent stores at most 1,000 characters, and the
+ * platform's own reasons carry their marker at the front.
+ */
+const CLASSIFIED_MESSAGE_CHARS = 1000;
+
+/**
  * Classify an error message into a structured category with user-facing guidance.
- * Returns null if the error message is empty or undefined.
+ * Returns null if the error message is empty or undefined. A value that is not
+ * text has no classification.
  *
- * @param errorMessage - the raw error_message string from a task record.
+ * @param errorMessage - the raw error_message string from a task record; its first
+ *   {@link CLASSIFIED_MESSAGE_CHARS} characters are what is classified.
  * @returns the classification, or null if there is no error to classify.
  */
 export function classifyError(errorMessage: string | undefined | null): ErrorClassification | null {
-  if (!errorMessage) {
-    return null;
-  }
+  if (typeof errorMessage !== 'string' || errorMessage === '') return null;
+  const message = errorMessage.slice(0, CLASSIFIED_MESSAGE_CHARS);
+
+  // Read the orchestrator's code before scanning any appended service text.
+  const microvmFailure = classifyMicrovmTerminalFailure(message);
+  if (microvmFailure) return microvmFailure;
 
   // Environmental blockers carry a canonical ``BLOCKED[<kind>]`` prefix
   // and an extractable resource — check them first so the remedy can name the
   // exact secret / host rather than falling through to a generic pattern.
-  const kindMatch = BLOCKED_KIND.exec(errorMessage);
+  const kindMatch = BLOCKED_KIND.exec(message);
   if (kindMatch) {
-    const resource = BLOCKED_RESOURCE.exec(errorMessage)?.[1];
+    const resource = BLOCKED_RESOURCE.exec(message)?.[1];
     return blockerClassification(kindMatch[1].toLowerCase(), resource);
   }
 
+  const pushRefusal = AGENT_PUSH_REFUSAL.exec(message);
+  if (pushRefusal) {
+    return agentPushRefusalClassification(pushRefusal[1], pushRefusal[2], pushRefusal[3]);
+  }
+
   for (const { pattern, exclude, classification } of PATTERNS) {
-    if (pattern.test(errorMessage) && (!exclude || !exclude.test(errorMessage))) {
+    if (pattern.test(message) && (!exclude || !exclude.test(message))) {
       return classification;
     }
   }

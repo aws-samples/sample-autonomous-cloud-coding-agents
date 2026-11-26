@@ -26,7 +26,9 @@ describe('format', () => {
     status: 'COMPLETED',
     repo: 'owner/repo',
     issue_number: 42,
+    issue_title: null,
     resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
+    resolved_assets: null,
     pr_number: null,
     task_description: 'Fix the bug',
     branch_name: 'bgagent/abc123/fix-the-bug',
@@ -41,9 +43,12 @@ describe('format', () => {
     started_at: '2026-01-01T00:01:00Z',
     completed_at: '2026-01-01T01:00:00Z',
     agent_heartbeat_at: '2026-01-01T00:59:48Z',
+    compute_type: null,
     duration_s: 3540,
     cost_usd: 0.1234,
     build_passed: true,
+    lint_passed: null,
+    otel_trace_id: null,
     max_turns: 100,
     max_budget_usd: null,
     turns_attempted: null,
@@ -168,6 +173,18 @@ describe('format', () => {
           agent_heartbeat_at: null,
         };
         expect(formatTaskDetail(running)).not.toContain('Heartbeat:');
+      });
+
+      test('hides it on ecs, where the agent beats once, at its start, and the age only grows', () => {
+        const running: TaskDetail = {
+          ...task,
+          status: 'RUNNING',
+          completed_at: null,
+          compute_type: 'ecs',
+          agent_heartbeat_at: '2026-08-07T00:00:00.000Z',
+        };
+
+        expect(formatTaskDetail(running, Date.parse('2026-08-07T00:00:12.000Z'))).not.toContain('Heartbeat:');
       });
 
       test('degrades to a placeholder rather than throwing on a malformed value', () => {
@@ -332,7 +349,9 @@ describe('format', () => {
         status: 'RUNNING',
         repo: 'owner/repo',
         issue_number: 1,
+        issue_title: null,
         resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
+        resolved_assets: null,
         pr_number: null,
         task_description: null,
         branch_name: 'bgagent/abc/fix',
@@ -340,6 +359,10 @@ describe('format', () => {
         created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:00Z',
         agent_heartbeat_at: null,
+        compute_type: null,
+        cost_usd: null,
+        completed_at: null,
+        channel_source: 'api',
       }];
       const output = formatTaskList(tasks);
       expect(output).toContain('TASK ID');
@@ -358,7 +381,9 @@ describe('format', () => {
         status: 'RUNNING',
         repo: 'owner/repo',
         issue_number: null,
+        issue_title: null,
         resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
+        resolved_assets: null,
         pr_number: null,
         task_description: 'work',
         branch_name: 'bgagent/abc/fix',
@@ -366,6 +391,10 @@ describe('format', () => {
         created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:00Z',
         agent_heartbeat_at: null,
+        compute_type: null,
+        cost_usd: null,
+        completed_at: null,
+        channel_source: 'api',
       };
       const now = Date.parse('2026-08-07T00:05:30.000Z');
 
@@ -380,6 +409,17 @@ describe('format', () => {
 
       test('shows a placeholder when the agent has not beaten yet', () => {
         expect(formatTaskList([base], now)).toContain('—');
+      });
+
+      /** The HEARTBEAT cell of the one task listed. */
+      const heartbeatCell = (listed: TaskSummary) => formatTaskList([listed], now).split('\n')[2].split(/ {2,}/)[4];
+
+      test.each(['agentcore', 'lambda-microvm'] as const)('renders the age on %s, where the agent keeps beating', (backend) => {
+        expect(heartbeatCell({ ...base, compute_type: backend, agent_heartbeat_at: '2026-08-07T00:05:18.000Z' })).toBe('12s ago');
+      });
+
+      test('shows a placeholder on ecs, where the agent beats once, at its start, and the age only grows', () => {
+        expect(heartbeatCell({ ...base, compute_type: 'ecs', agent_heartbeat_at: '2026-08-07T00:05:18.000Z' })).toBe('—');
       });
 
       test('suppresses it on a terminal task, where the last beat is noise', () => {
@@ -410,7 +450,9 @@ describe('format', () => {
         status: 'RUNNING',
         repo: 'owner/repo',
         issue_number: null,
+        issue_title: null,
         resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
+        resolved_assets: null,
         pr_number: null,
         task_description: 'Fix the login bug',
         branch_name: 'bgagent/abc/fix',
@@ -418,6 +460,10 @@ describe('format', () => {
         created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:00Z',
         agent_heartbeat_at: null,
+        compute_type: null,
+        cost_usd: null,
+        completed_at: null,
+        channel_source: 'api',
       }];
       const output = formatTaskList(tasks);
       expect(output).toContain('Fix the login bug');
@@ -430,7 +476,9 @@ describe('format', () => {
         status: 'RUNNING',
         repo: 'owner/repo',
         issue_number: 42,
+        issue_title: null,
         resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
+        resolved_assets: null,
         pr_number: null,
         task_description: null,
         branch_name: 'bgagent/abc/fix',
@@ -438,6 +486,10 @@ describe('format', () => {
         created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:00Z',
         agent_heartbeat_at: null,
+        compute_type: null,
+        cost_usd: null,
+        completed_at: null,
+        channel_source: 'api',
       }];
       const output = formatTaskList(tasks);
       expect(output).toContain('#42');
@@ -449,7 +501,9 @@ describe('format', () => {
         status: 'RUNNING',
         repo: null,
         issue_number: null,
+        issue_title: null,
         resolved_workflow: { id: 'default/agent-v1', version: '1.0.0' },
+        resolved_assets: null,
         pr_number: null,
         task_description: 'Summarise these papers',
         branch_name: 'bgagent/abc/task',
@@ -457,6 +511,10 @@ describe('format', () => {
         created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:00Z',
         agent_heartbeat_at: null,
+        compute_type: null,
+        cost_usd: null,
+        completed_at: null,
+        channel_source: 'api',
       }];
       const output = formatTaskList(tasks);
       expect(output).toContain('—');
@@ -493,6 +551,7 @@ describe('format', () => {
         webhook_id: 'wh-abc',
         name: 'My CI Pipeline',
         secret: 'whsec_supersecret123',
+        webhook_url: 'https://abc123.execute-api.us-east-1.amazonaws.com/v1/webhooks/tasks',
         created_at: '2026-01-01T00:00:00Z',
       };
       const output = formatWebhookCreated(res);
@@ -501,6 +560,38 @@ describe('format', () => {
       expect(output).toContain('Created:     2026-01-01T00:00:00Z');
       expect(output).toContain('Secret (store securely — shown only once):');
       expect(output).toContain('whsec_supersecret123');
+    });
+
+    test('shows the URL to post tasks to, with a hint, above the secret', () => {
+      const output = formatWebhookCreated({
+        webhook_id: 'wh-abc',
+        name: 'My CI Pipeline',
+        secret: 'whsec_supersecret123',
+        webhook_url: 'https://abc123.execute-api.us-east-1.amazonaws.com/v1/webhooks/tasks',
+        created_at: '2026-01-01T00:00:00Z',
+      });
+      expect(output.split('\n')).toEqual([
+        'Webhook:     wh-abc',
+        'Name:        My CI Pipeline',
+        'Created:     2026-01-01T00:00:00Z',
+        'URL:         https://abc123.execute-api.us-east-1.amazonaws.com/v1/webhooks/tasks',
+        '             (the endpoint to enter in the webhook settings of the external system)',
+        '',
+        'Secret (store securely — shown only once):',
+        'whsec_supersecret123',
+      ]);
+    });
+
+    test('leaves the URL out when the API returned none', () => {
+      const older = { webhook_id: 'wh-abc', name: 'My CI Pipeline', secret: 'whsec_supersecret123', created_at: '2026-01-01T00:00:00Z' };
+      expect(formatWebhookCreated(older as CreateWebhookResponse).split('\n')).toEqual([
+        'Webhook:     wh-abc',
+        'Name:        My CI Pipeline',
+        'Created:     2026-01-01T00:00:00Z',
+        '',
+        'Secret (store securely — shown only once):',
+        'whsec_supersecret123',
+      ]);
     });
   });
 
@@ -512,7 +603,6 @@ describe('format', () => {
         status: 'active',
         created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:00Z',
-        agent_heartbeat_at: null,
         revoked_at: null,
       }];
       const output = formatWebhookList(webhooks);
@@ -553,7 +643,6 @@ describe('format', () => {
         status: 'active',
         created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:00Z',
-        agent_heartbeat_at: null,
         revoked_at: null,
       };
       const output = formatWebhookDetail(webhook);

@@ -59,7 +59,7 @@ import hashlib
 import json
 import time
 from collections import OrderedDict, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from fnmatch import fnmatch
@@ -87,6 +87,21 @@ APPROVAL_GATE_CAP_MAX: int = int(_AGC["max"])
 _ATS = _SHARED_CONSTANTS["approval_timeout_s"]
 FLOOR_TIMEOUT_S: int = int(_ATS["min"])  # §6 decision #6: rejected below this at load
 DEFAULT_TASK_TIMEOUT_S: int = int(_ATS["default"])  # §6 decision #6 default
+#: Canonical ``created_at`` format of approval rows (UTC, whole seconds).
+APPROVAL_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def approval_deadline_epoch(created_at: str, timeout_s: int) -> int:
+    """Wall-clock expiry (epoch seconds) of an approval row: ``created_at + timeout_s``.
+
+    The single definition shared by the gate that writes ``deadline_epoch``, the
+    in-process wait and the MicroVM suspend/resume identity check, so all three
+    agree with the coordinator. Raises ValueError for a non-canonical timestamp.
+    """
+    created = datetime.strptime(created_at, APPROVAL_TIMESTAMP_FORMAT).replace(tzinfo=UTC)
+    if created.strftime(APPROVAL_TIMESTAMP_FORMAT) != created_at:
+        raise ValueError("Approval timestamp is not canonical")
+    return int(created.timestamp()) + timeout_s
 
 
 def _validate_constants() -> None:
@@ -133,7 +148,6 @@ APPROVAL_RATE_WINDOW_S: float = 60.0  # sliding window paired with APPROVAL_RATE
 _SEVERITY_ORDER = {"low": 0, "medium": 1, "high": 2}
 _DEFAULT_SEVERITY = "medium"
 _VALID_SEVERITIES = frozenset(_SEVERITY_ORDER)
-_VALID_TIERS = frozenset({"hard", "soft"})
 
 # Tool group membership (§6.4 decision #21). Resolves tool_group:file_write
 # scope to {Write, Edit} at runtime.
@@ -164,6 +178,7 @@ class Outcome(StrEnum):
     REQUIRE_APPROVAL = "require_approval"
 
 
+@dataclass(frozen=True, kw_only=True)
 class PolicyDecision:
     """Result of a Cedar policy evaluation.
 
@@ -171,68 +186,32 @@ class PolicyDecision:
     only on ``REQUIRE_APPROVAL``. ``.allowed`` is the backward-compat shim
     for Phase 1a/1b/2 callers that predate the three-outcome engine and
     treat this as a simple allow/deny boolean.
-
-    Not a dataclass — a custom ``__init__`` supports BOTH the new
-    ``outcome=...``-keyed form and the legacy ``allowed=...``-keyed form
-    so Phase 1 tests keep working without caller changes. Instances are
-    immutable by convention (no mutator methods); callers should treat
-    them as read-only.
     """
 
-    __slots__ = (
-        "cache_hit_metadata",
-        "duration_ms",
-        "fail_closed",
-        "matching_rule_ids",
-        "outcome",
-        "reason",
-        "severity",
-        "timeout_s",
-    )
-
-    def __init__(
-        self,
-        *,
-        outcome: Outcome | None = None,
-        allowed: bool | None = None,  # Legacy Phase 1 kwarg
-        reason: str = "",
-        timeout_s: int | None = None,
-        severity: str | None = None,
-        matching_rule_ids: tuple[str, ...] = (),
-        duration_ms: float = 0.0,
-        cache_hit_metadata: dict | None = None,
-        fail_closed: bool = False,
-    ) -> None:
-        if outcome is None and allowed is None:
-            raise TypeError("PolicyDecision requires either outcome= or allowed=")
-        if outcome is not None and allowed is not None:
-            raise TypeError("PolicyDecision: pass either outcome= or allowed=, not both")
-        if outcome is None:
-            outcome = Outcome.ALLOW if allowed else Outcome.DENY
-        self.outcome = outcome
-        self.reason = reason
-        self.timeout_s = timeout_s
-        self.severity = severity
-        self.matching_rule_ids = matching_rule_ids
-        self.duration_ms = duration_ms
-        # IMPL-23: populated only when Step 2.5 of evaluate_tool_use returns
-        # a cache-hit DENY. Contains the payload for the `policy_decision`
-        # milestone with `decision_source="recent_decision_cache"`; the hook
-        # forwards it to progress_writer.write_policy_decision_cached().
-        # Observability-only — NOT part of __eq__/__hash__: two cache-hit
-        # decisions with different original_decision_ts values still
-        # represent the same deny outcome.
-        self.cache_hit_metadata = cache_hit_metadata
-        # #251 (decision E): structured discriminator for environmental
-        # fail-closed denies (Cedar engine errored / unavailable) vs.
-        # intentional hard-denies and cache-driven denies. The hook branches
-        # on THIS flag — not a brittle ``reason.startswith("fail-closed:")``
-        # string match — to decide whether to emit a ``policy_fail_closed``
-        # blocker event. Set True ONLY at engine-error/unavailable deny sites;
-        # hard-deny and cache-deny leave it False. Like ``cache_hit_metadata``,
-        # NOT part of __eq__/__hash__ (it is derived from outcome+reason, and
-        # legacy equality-based tests predate the field).
-        self.fail_closed = fail_closed
+    outcome: Outcome
+    reason: str = ""
+    timeout_s: int | None = None
+    severity: str | None = None
+    matching_rule_ids: tuple[str, ...] = ()
+    duration_ms: float = 0.0
+    # IMPL-23: populated only when Step 2.5 of evaluate_tool_use returns
+    # a cache-hit DENY. Contains the payload for the `policy_decision`
+    # milestone with `decision_source="recent_decision_cache"`; the hook
+    # forwards it to progress_writer.write_policy_decision_cached().
+    # Observability-only — NOT part of __eq__/__hash__: two cache-hit
+    # decisions with different original_decision_ts values still
+    # represent the same deny outcome.
+    cache_hit_metadata: dict | None = field(default=None, compare=False)
+    # #251 (decision E): structured discriminator for environmental
+    # fail-closed denies (Cedar engine errored / unavailable) vs.
+    # intentional hard-denies and cache-driven denies. The hook branches
+    # on THIS flag — not a brittle ``reason.startswith("fail-closed:")``
+    # string match — to decide whether to emit a ``policy_fail_closed``
+    # blocker event. Set True ONLY at engine-error/unavailable deny sites;
+    # hard-deny and cache-deny leave it False. Like ``cache_hit_metadata``,
+    # NOT part of __eq__/__hash__ (it is derived from outcome+reason, and
+    # legacy equality-based tests predate the field).
+    fail_closed: bool = field(default=False, compare=False)
 
     @property
     def allowed(self) -> bool:
@@ -242,43 +221,6 @@ class PolicyDecision:
         PreToolUse hook is extended to the three-outcome path in Chunk 3).
         """
         return self.outcome == Outcome.ALLOW
-
-    def __repr__(self) -> str:
-        base = (
-            f"PolicyDecision(outcome={self.outcome.value!r}, "
-            f"reason={self.reason!r}, duration_ms={self.duration_ms}"
-        )
-        if self.outcome == Outcome.REQUIRE_APPROVAL:
-            return (
-                f"{base}, timeout_s={self.timeout_s}, "
-                f"severity={self.severity!r}, "
-                f"matching_rule_ids={self.matching_rule_ids!r})"
-            )
-        return base + ")"
-
-    def __eq__(self, other: object) -> bool:
-        if not isinstance(other, PolicyDecision):
-            return NotImplemented
-        return (
-            self.outcome == other.outcome
-            and self.reason == other.reason
-            and self.timeout_s == other.timeout_s
-            and self.severity == other.severity
-            and self.matching_rule_ids == other.matching_rule_ids
-            and self.duration_ms == other.duration_ms
-        )
-
-    def __hash__(self) -> int:
-        return hash(
-            (
-                self.outcome,
-                self.reason,
-                self.timeout_s,
-                self.severity,
-                self.matching_rule_ids,
-                self.duration_ms,
-            )
-        )
 
     @classmethod
     def allow(cls, reason: str = "permitted", duration_ms: float = 0.0) -> PolicyDecision:
@@ -564,9 +506,6 @@ class RecentDecisionCache:
             return rule_id, entry
         return None
 
-    def __len__(self) -> int:
-        return len(self._entries)
-
 
 # ---------------------------------------------------------------------------
 # Annotation handling (§5.2, §6.3, §12.4)
@@ -583,19 +522,18 @@ class _ParsedRule:
     effect: str | None  # "permit" or "forbid" — used to gate base_permit exemption
     approval_timeout_s: int | None
     severity: str | None
-    category: str | None
 
 
-def _parse_policy_annotations(cedarpy_module, policies_text: str) -> list[_ParsedRule]:
-    """Parse every static policy's annotations via cedarpy.policies_to_json_str.
-
-    Returns a list in cedarpy's positional order. Raises on malformed input.
-    """
+def _parse_policy_set(cedarpy_module, policies_text: str) -> dict:
     try:
-        parsed = json.loads(cedarpy_module.policies_to_json_str(policies_text))
+        return json.loads(cedarpy_module.policies_to_json_str(policies_text))
     except Exception as exc:
         raise ValueError(f"Cedar policy parse failed: {type(exc).__name__}: {exc}") from exc
 
+
+def _parse_policy_annotations(cedarpy_module, policies_text: str) -> list[_ParsedRule]:
+    """Read every static policy's annotations in cedarpy's positional order."""
+    parsed = _parse_policy_set(cedarpy_module, policies_text)
     rules: list[_ParsedRule] = []
     for pid, body in parsed.get("staticPolicies", {}).items():
         ann = body.get("annotations", {}) or {}
@@ -616,10 +554,56 @@ def _parse_policy_annotations(cedarpy_module, policies_text: str) -> list[_Parse
                 effect=body.get("effect"),
                 approval_timeout_s=timeout,
                 severity=ann.get("severity"),
-                category=ann.get("category"),
             )
         )
     return rules
+
+
+def _route_operator_policies(
+    cedarpy_module, extra_policies: list[str], blueprint_policies: list[str]
+) -> tuple[list[str], list[str]]:
+    """Keep each entry intact. Only entries without a tier or rule ID get a generated ID."""
+    hard: list[str] = []
+    soft: list[str] = []
+    legacy_count = 0
+    for field_name, entries in (
+        ("extra_policies", extra_policies),
+        ("cedar_policies", blueprint_policies),
+    ):
+        for idx, text in enumerate(entries):
+            source = f"{field_name}[{idx}]"
+            try:
+                parsed = _parse_policy_set(cedarpy_module, text)
+            except ValueError as exc:
+                raise ValueError(f"{source}: {exc}") from exc
+            templates = parsed.get("templates", {}).values()
+            if templates and field_name == "cedar_policies":
+                raise ValueError(
+                    f"{source} contains an unbound Cedar template; use a static policy"
+                )
+            bodies = (*parsed.get("staticPolicies", {}).values(), *templates)
+            if not bodies:
+                raise ValueError(f"{source} must contain a Cedar policy")
+            annotations = [body.get("annotations", {}) for body in bodies]
+            tiers = {ann.get("tier") for ann in annotations}
+            if tiers == {None} and all("rule_id" not in ann for ann in annotations):
+                soft.append(f'@tier("soft")\n@rule_id("legacy_extra_{legacy_count}")\n{text}')
+                legacy_count += 1
+            elif field_name == "extra_policies":
+                raise ValueError(
+                    f"{source} already declares @tier or @rule_id; use blueprint_policies"
+                )
+            elif tiers == {"hard"}:
+                hard.append(text)
+            elif tiers == {"soft"}:
+                soft.append(text)
+            elif {"hard", "soft"} <= tiers:
+                raise ValueError(
+                    f"{source} declares both hard and soft tiers; use separate entries"
+                )
+            else:
+                raise ValueError(f'{source}: declare the tier ("hard" or "soft") on each rule')
+    return hard, soft
 
 
 def _validate_tier(rules: list[_ParsedRule], expected_tier: str, source: str) -> None:
@@ -746,6 +730,11 @@ def _sha256_tool_input(tool_input: dict) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _recent_reason(prefix: str, reason: str | None) -> str:
+    """Recent-decision deny text; omit the reason when the human gave none."""
+    return f"{prefix}: {reason}" if reason else prefix
+
+
 class PolicyEngine:
     """Evaluate tool-use requests against Cedar policies with three outcomes.
 
@@ -754,11 +743,8 @@ class PolicyEngine:
     disable-list validation), probes a test authorization to catch syntax
     errors early, and seeds the approval allowlist from ``initial_approvals``.
 
-    Legacy callers that pass ``extra_policies=[...]`` (Phase 1 shape) are
-    supported in backward-compat mode: the extra text is appended to the
-    soft-deny tier WITHOUT strict annotation validation. New callers in
-    Chunks 3+ should use ``blueprint_hard_policies`` / ``blueprint_soft_policies``
-    / ``blueprint_disable`` / ``initial_approvals`` / ``approval_gate_cap``.
+    Each ``blueprint_policies`` entry declares its tier in Cedar. Unannotated
+    entries and legacy ``extra_policies`` get generated soft rule IDs.
     """
 
     def __init__(
@@ -768,6 +754,7 @@ class PolicyEngine:
         *,
         read_only: bool = False,
         extra_policies: list[str] | None = None,
+        blueprint_policies: list[str] | None = None,
         blueprint_hard_policies: str | None = None,
         blueprint_soft_policies: str | None = None,
         blueprint_disable: list[str] | None = None,
@@ -847,59 +834,27 @@ class PolicyEngine:
             # (rm -rf /, .git writes, DROP TABLE) are missing.
             raise RuntimeError(str(exc)) from exc
 
-        # Blueprint customization: append blueprint rules into the tiers.
-        hard_text = builtin_hard
-        if blueprint_hard_policies:
-            hard_text = f"{hard_text}\n{blueprint_hard_policies}"
-        soft_text = builtin_soft
-
-        # Legacy ``extra_policies`` goes into soft tier with a synthetic
-        # wrapper (@tier("soft") + @rule_id("legacy_extra_N")). Cedar's
-        # annotation semantics on duplicate keys within a single policy
-        # are implementation-defined (parse error in most versions), so
-        # we REJECT legacy text that already declares @tier or @rule_id
-        # (finding #2 from Chunk 2 review) instead of silently picking
-        # one interpretation. Callers should migrate to
-        # blueprint_soft_policies / blueprint_hard_policies with fully
-        # annotated rules.
-        legacy_extra: list[str] = []
-        if extra_policies:
-            for idx, policy_text in enumerate(extra_policies):
-                if "@tier(" in policy_text or "@rule_id(" in policy_text:
-                    raise ValueError(
-                        f"extra_policies[{idx}] already declares @tier or "
-                        f"@rule_id; the legacy extra_policies kwarg is for "
-                        f"UNANNOTATED rules only. Migrate annotated rules "
-                        f"to blueprint_soft_policies / blueprint_hard_policies."
-                    )
-                legacy_rule_id = f"legacy_extra_{idx}"
-                legacy_extra.append(f'@tier("soft")\n@rule_id("{legacy_rule_id}")\n{policy_text}')
-        if blueprint_soft_policies:
-            soft_text = f"{soft_text}\n{blueprint_soft_policies}"
-        if legacy_extra:
-            soft_text = soft_text + "\n" + "\n".join(legacy_extra)
-
-        # 64 KB cap on combined operator-supplied policy text (finding #12).
-        # Built-ins do not count — they are trusted platform content. Registry
-        # cedar_policy_module assets arrive via the legacy ``extra_policies``
-        # path, so they MUST be counted here too; otherwise a large registry
-        # policy bypasses the cap entirely (#246 review). Count the raw operator
-        # text (pre-synthetic-wrapper) so the bound reflects authored bytes.
-        operator_text = "".join(
-            filter(
-                None,
-                [
-                    blueprint_hard_policies,
-                    blueprint_soft_policies,
-                    *(extra_policies or []),
-                ],
+        # Cap all operator-authored bytes before asking Cedar to parse any of them.
+        operator_bytes = sum(
+            len(text.encode("utf-8"))
+            for text in (
+                blueprint_hard_policies or "",
+                blueprint_soft_policies or "",
+                *(extra_policies or []),
+                *(blueprint_policies or []),
             )
         )
-        if len(operator_text.encode("utf-8")) > POLICIES_MAX_BYTES:
+        if operator_bytes > POLICIES_MAX_BYTES:
             raise ValueError(
                 f"cedar_policies exceeds {POLICIES_MAX_BYTES // 1024} KB cap "
-                f"({len(operator_text.encode('utf-8'))} bytes)"
+                f"({operator_bytes} bytes)"
             )
+
+        hard, soft = _route_operator_policies(
+            self._cedarpy, extra_policies or [], blueprint_policies or []
+        )
+        hard_text = "\n".join(filter(None, [builtin_hard, blueprint_hard_policies, *hard]))
+        soft_text = "\n".join(filter(None, [builtin_soft, blueprint_soft_policies, *soft]))
 
         # Parse + validate annotations on each tier.
         try:
@@ -973,10 +928,6 @@ class PolicyEngine:
         )
 
     # ---- Public properties -------------------------------------------------
-
-    @property
-    def task_type(self) -> str:
-        return self._task_type
 
     @property
     def repo(self) -> str:
@@ -1062,33 +1013,30 @@ class PolicyEngine:
     # ---- Probes + low-level evaluation ------------------------------------
 
     def _probe_cedar(self, policies_text: str, tier_name: str) -> None:
-        """Run a synthetic is_authorized call so Cedar rejects bad syntax early."""
-        # _probe_cedar is only called from __init__ AFTER the ImportError
-        # early-return, so ``_cedarpy`` is guaranteed non-None here.
-        if self._cedarpy is None:  # pragma: no cover — invariant guard
-            raise RuntimeError("probe called on disabled engine")
+        """Evaluate one call of each kind of tool ``_eval_for_tool`` tells apart.
+
+        A rule Cedar cannot evaluate (bad syntax, or a ``when`` clause reading
+        a context attribute the request does not carry) makes ``_eval_tier``
+        raise, which at run time denies every call the rule is evaluated for.
+        Raised here, it fails the task at start instead. ``Read`` stands for
+        the tools that are neither a file write nor Bash: a rule that names
+        another one of those is evaluated when that tool is called, not here.
+        """
+        base_context = {
+            "task_type": self._task_type,
+            "repo": self._repo,
+            "read_only": self._read_only,
+        }
         try:
-            self._cedarpy.is_authorized(
-                {
-                    "principal": f'Agent::TaskAgent::"{self._task_type}"',
-                    "action": 'Agent::Action::"invoke_tool"',
-                    "resource": 'Agent::Tool::"Read"',
-                    "context": {
-                        "task_type": self._task_type,
-                        "repo": self._repo,
-                        "read_only": self._read_only,
-                    },
-                },
-                policies_text,
-                [
-                    {
-                        "uid": {"type": "Agent::TaskAgent", "id": self._task_type},
-                        "attrs": {},
-                        "parents": [],
-                    },
-                    {"uid": {"type": "Agent::Tool", "id": "Read"}, "attrs": {}, "parents": []},
-                ],
-            )
+            for tool_name, tool_input in (
+                ("Read", {}),
+                ("Write", {"file_path": "probe"}),
+                ("Edit", {"file_path": "probe"}),
+                ("Bash", {"command": "probe"}),
+            ):
+                self._eval_for_tool(
+                    policies_text, tool_name, tool_input, base_context, tier_name=tier_name
+                )
         except Exception as exc:
             raise ValueError(
                 f"{tier_name}-deny Cedar probe failed: {type(exc).__name__}: {exc}"
@@ -1131,7 +1079,7 @@ class PolicyEngine:
         # _eval_tier is only reached from evaluate_tool_use AFTER the
         # ``_disabled``/``_cedarpy is None`` guard, so the attribute is
         # narrowed to a live module here.
-        if self._cedarpy is None:  # pragma: no cover — invariant guard
+        if self._cedarpy is None:  # invariant guard
             raise RuntimeError("eval called on disabled engine")
         result = self._cedarpy.is_authorized(request, policies_text, entities)
         if getattr(result.diagnostics, "errors", []):
@@ -1220,7 +1168,9 @@ class PolicyEngine:
                 # engine pure — policy.py never calls the progress writer.
                 return PolicyDecision(
                     outcome=Outcome.DENY,
-                    reason=f"Recent {cached.decision} within {int(CACHE_TTL_S)}s: {cached.reason}",
+                    reason=_recent_reason(
+                        f"Recent {cached.decision} within {int(CACHE_TTL_S)}s", cached.reason
+                    ),
                     duration_ms=(time.monotonic() - start) * 1000,
                     cache_hit_metadata={
                         "tool_name": tool_name,
@@ -1272,9 +1222,10 @@ class PolicyEngine:
                     matched_rule_id, cached = rule_hit
                     return PolicyDecision(
                         outcome=Outcome.DENY,
-                        reason=(
+                        reason=_recent_reason(
                             f"Recent {cached.decision} on rule {matched_rule_id!r} "
-                            f"within {int(CACHE_TTL_S)}s: {cached.reason}"
+                            f"within {int(CACHE_TTL_S)}s",
+                            cached.reason,
                         ),
                         duration_ms=(time.monotonic() - start) * 1000,
                         cache_hit_metadata={
@@ -1329,7 +1280,7 @@ class PolicyEngine:
         tool_input: dict,
         base_context: dict,
         *,
-        tier_name: str = "",
+        tier_name: str,
     ) -> tuple[str, list[str]] | None:
         """Run the appropriate Cedar eval(s) for a given tool + input.
 
@@ -1353,7 +1304,7 @@ class PolicyEngine:
             if decision == "no_decision":
                 log(
                     "WARN",
-                    f"{tier_name or 'tier'}: Cedar no_decision for "
+                    f"{tier_name}: Cedar no_decision for "
                     f"action={action!r} tool={tool_name!r} — base_permit "
                     f"catch-all missing or malformed",
                 )
@@ -1399,7 +1350,7 @@ def _matching_rule_ids(
     rules: list[_ParsedRule],
     matching_policy_ids: list[str],
     *,
-    tier_name: str = "",
+    tier_name: str,
 ) -> list[str]:
     """Map positional Cedar policy IDs to their @rule_id annotations.
 
@@ -1414,7 +1365,7 @@ def _matching_rule_ids(
         if pid not in by_id:
             log(
                 "WARN",
-                f"{tier_name or 'tier'}: Cedar reported matching policy "
+                f"{tier_name}: Cedar reported matching policy "
                 f"{pid!r} but no parsed rule carries that ID; "
                 f"policy/rule lists may be out of sync",
             )

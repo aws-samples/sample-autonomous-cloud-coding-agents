@@ -22,10 +22,10 @@ import { GetCommand } from '@aws-sdk/lib-dynamodb';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
-import { TRACE_OBJECT_KEY_PREFIX } from '../constructs/trace-artifacts-bucket';
 import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
+import { TRACE_OBJECT_KEY_PREFIX } from './shared/storage-names';
 import type { TaskRecord } from './shared/types';
 import { makeClient, makeDocClient } from './shared/ua';
 
@@ -58,7 +58,8 @@ export const TRACE_URL_TTL_SECONDS = 900;
  *  - 403 FORBIDDEN — caller does not own this task
  *  - 404 TASK_NOT_FOUND — task_id not in the table
  *  - 404 TRACE_NOT_AVAILABLE — task exists but was not submitted with ``--trace``,
- *    or the upload has not yet completed
+ *    the upload has not yet completed, or the artifact no longer exists
+ *    (the bucket's lifecycle rule expires traces)
  *  - 500 INTERNAL_ERROR — DDB or S3 presign failure
  */
 export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
@@ -167,18 +168,22 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     } catch (err) {
       // S3 SDK v3 returns either ``NotFound`` (object-level 404) or
       // ``NoSuchKey`` (key-level 404) depending on operation; both map
-      // to the same user-facing outcome. HTTP 403 can also mean the
-      // object is missing in a bucket the principal can't probe, but
-      // since this handler signs for its own bucket and the CLI already
-      // received ``trace_s3_uri``, 404 is the only case we hide behind
-      // TRACE_NOT_AVAILABLE.
+      // to the same user-facing outcome. So does HTTP 403: this role
+      // holds ``s3:GetObject`` without ``s3:ListBucket``, and to such a
+      // caller S3 answers 403, not 404, for a key that does not exist
+      // (HeadObject API reference, "Permissions"). That is every trace
+      // the bucket's lifecycle rule has expired. The bucket and the
+      // caller's key prefix were checked above, so a 403 here means a
+      // missing object unless the role's own grant is broken; the WARN
+      // keeps the status for that case.
       const name = (err as { name?: string })?.name;
       const httpStatus = (err as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode;
-      if (name === 'NotFound' || name === 'NoSuchKey' || httpStatus === 404) {
+      if (name === 'NotFound' || name === 'NoSuchKey' || httpStatus === 404 || httpStatus === 403) {
         logger.warn('Trace artifact S3 object not found at HEAD time', {
           task_id: taskId,
           bucket: parsed.bucket,
           key: parsed.key,
+          http_status: httpStatus,
           request_id: requestId,
         });
         return errorResponse(

@@ -79,8 +79,9 @@ function readToolkitOutputs(argv: readonly string[]): CfnOutput[] | null {
     return (JSON.parse(raw) as CfnOutput[] | null) ?? [];
   } catch (err) {
     const stderr = String((err as { stderr?: unknown }).stderr || err);
-    if (/does not exist/.test(stderr)) return null;
-    throw new Error(`could not read the ${toolkitStackName(argv)} stack: ${stderr.trim()}`);
+    // CloudFormation's text for a missing stack. AWS CLI v2 can break it across lines (`cli_error_format = yaml`).
+    if (/Stack with id \S+\s+does\s+not\s+exist/.test(stderr)) return null;
+    throw new Error(`could not read the ${toolkitStackName(argv)} stack: ${stderr.trim()}`, { cause: err });
   }
 }
 

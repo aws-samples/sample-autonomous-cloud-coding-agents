@@ -21,7 +21,7 @@ import { Command } from 'commander';
 import { ApiClient } from '../api-client';
 import { tryLoadConfig } from '../config';
 import { CliError } from '../errors';
-import { formatJson, formatWebhookCreated, formatWebhookDetail, formatWebhookList } from '../format';
+import { followPages, formatJson, formatWebhookCreated, formatWebhookDetail, formatWebhookList } from '../format';
 import { DEFAULT_STACK_NAME, resolveOperatorContext } from '../operator-context';
 import { loadActiveRepoConfig, listRepoConfigs } from '../repo-lookup';
 import { getStackOutput } from '../stack-outputs';
@@ -41,6 +41,13 @@ export function makeWebhookCommand(): Command {
       .requiredOption('--name <name>', 'Webhook name')
       .option('--api-key <key>', 'Platform API key (skips Cognito; else uses BGAGENT_API_KEY or login)')
       .option('--output <format>', 'Output format (text or json)', 'text')
+      .addHelpText(
+        'after',
+        '\nThe output includes the webhook URL (webhook_url in JSON output): the endpoint\n'
+        + 'the external system posts tasks to. The URL belongs to the API deployment, not\n'
+        + 'to the webhook: it is the same for every webhook and does not change while the\n'
+        + 'API stays deployed, so there is no need to fetch it again.',
+      )
       .action(async (opts) => {
         const client = new ApiClient({ apiKey: opts.apiKey });
         const result = await client.createWebhook({ name: opts.name });
@@ -58,10 +65,11 @@ export function makeWebhookCommand(): Command {
       .option('--output <format>', 'Output format (text or json)', 'text')
       .action(async (opts) => {
         const client = new ApiClient({ apiKey: opts.apiKey });
-        const result = await client.listWebhooks({
-          includeRevoked: opts.includeRevoked,
-          limit: opts.limit,
-        });
+        const result = await followPages(
+          await client.listWebhooks({ includeRevoked: opts.includeRevoked, limit: opts.limit }),
+          opts.limit,
+          (limit, nextToken) => client.listWebhooks({ includeRevoked: opts.includeRevoked, limit, nextToken }),
+        );
 
         if (opts.output === 'json') {
           console.log(formatJson(result));

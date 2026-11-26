@@ -1,0 +1,22 @@
+# Findings accepted temporarily in the agent image scan (`mise //agent:security:image`).
+# An entry applies to the whole image. Each one expires (exp:YYYY-MM-DD is the first
+# day, in UTC, on which it no longer applies) so that the scan fails again and the
+# finding is re-reviewed. The weekly Security workflow lists an entry in its rolling
+# issue from 21 days before that day. Remove an entry as soon as a fixed release is
+# available.
+
+# golang.org/x/net/html, quadratic text-node parsing (GO-2026-6860), reported for
+# usr/local/bin/gh. On 2026-11-16 no gh release requires x/net >= 0.62.0, which has the
+# fix: 2.103.3 requires 0.60.0, 2.104.0 requires 0.61.0, cli/cli trunk 0.62.0. The
+# functions the advisory names (html.Parse and the parser behind it) are not linked into
+# the binary: gh keeps only the tokenizer (`govulncheck -mode binary` and `go tool nm`).
+# Remove this with the GH_VERSION bump in agent/Dockerfile that brings x/net 0.62.0.
+CVE-2026-78661 exp:2026-12-16
+
+# setuptools 70.3.0, path traversal in PackageIndex (CVE-2025-47273), reported for the
+# copy that pip vendors (pip/_vendor/vendor.txt). pip ships only pkg_resources from it:
+# the module the advisory names, setuptools/package_index.py, is not in the image
+# (`find / -name 'package_index*'` prints nothing). On 2026-11-17 pip 26.3, the newest
+# release, still vendors 70.3.0. Remove this when the image's pip vendors setuptools
+# 78.1.1 or later, or no longer vendors it.
+CVE-2025-47273 exp:2026-12-16

@@ -54,14 +54,13 @@
 
 import { createHash } from 'crypto';
 import * as dns from 'dns/promises';
-import * as net from 'net';
 import { PutObjectCommand, DeleteObjectsCommand, type S3Client } from '@aws-sdk/client-s3';
 import { screenImage, screenTextFile, AttachmentScreeningError, type ScreeningConfig } from './attachment-screening';
 import { estimateImageTokensFromBuffer } from './image-tokens';
 import { logger } from './logger';
+import { ATTACHMENT_OBJECT_KEY_PREFIX } from './storage-names';
 import { createAttachmentRecord, type PassedAttachmentRecord } from './types';
-import { EXTENSION_TO_MIME, isAllowedMimeType, isValidFilename, validateMagicBytes, MAX_ATTACHMENT_SIZE_BYTES, MAX_TOTAL_ATTACHMENT_SIZE_BYTES, MAX_ATTACHMENTS_PER_TASK, SUPPORTED_ATTACHMENT_EXTENSIONS_LABEL } from './validation';
-import { ATTACHMENT_OBJECT_KEY_PREFIX } from '../../constructs/attachments-bucket';
+import { EXTENSION_TO_MIME, isAllowedMimeType, isPrivateIp, isValidFilename, validateMagicBytes, MAX_ATTACHMENT_SIZE_BYTES, MAX_TOTAL_ATTACHMENT_SIZE_BYTES, MAX_ATTACHMENTS_PER_TASK, SUPPORTED_ATTACHMENT_EXTENSIONS_LABEL } from './validation';
 
 /** Per-request timeout for a single attachment download. */
 const ATTACHMENT_FETCH_TIMEOUT_MS = 10_000;
@@ -201,54 +200,6 @@ export function isLinearUploadsUrl(url: string): boolean {
   }
 }
 
-// Private/reserved IPv4 first-octet (and second-octet range) constants, named to
-// document the RFC each blocks and to satisfy no-magic-numbers.
-const OCTET_10_PRIVATE = 10; // 10.0.0.0/8 (RFC 1918)
-const OCTET_127_LOOPBACK = 127; // 127.0.0.0/8
-const OCTET_0_ANY = 0; // 0.0.0.0/8
-const OCTET_172_PRIVATE = 172; // 172.16.0.0/12 (RFC 1918)
-const OCTET_172_LO = 16;
-const OCTET_172_HI = 31;
-const OCTET_192_PRIVATE = 192; // 192.168.0.0/16 (RFC 1918)
-const OCTET_192_SECOND = 168;
-const OCTET_169_LINKLOCAL = 169; // 169.254.0.0/16 (link-local)
-const OCTET_169_SECOND = 254;
-const OCTET_100_CGN = 100; // 100.64.0.0/10 (carrier-grade NAT)
-const OCTET_100_LO = 64;
-const OCTET_100_HI = 127;
-// IPv6 link-local fe80::/10 = first hextet in [0xfe80, 0xfebf].
-const IPV6_LINKLOCAL_LO = 0xfe80;
-const IPV6_LINKLOCAL_HI = 0xfebf;
-
-/** Reject private / internal IPs (basic SSRF guard for the resolved host). */
-function isPrivateIp(ip: string): boolean {
-  if (net.isIPv4(ip)) {
-    const [a, b] = ip.split('.').map(Number);
-    if (a === OCTET_10_PRIVATE || a === OCTET_127_LOOPBACK || a === OCTET_0_ANY) return true;
-    if (a === OCTET_172_PRIVATE && b >= OCTET_172_LO && b <= OCTET_172_HI) return true;
-    if (a === OCTET_192_PRIVATE && b === OCTET_192_SECOND) return true;
-    if (a === OCTET_169_LINKLOCAL && b === OCTET_169_SECOND) return true;
-    if (a === OCTET_100_CGN && b >= OCTET_100_LO && b <= OCTET_100_HI) return true;
-    return false;
-  }
-  const lower = ip.toLowerCase();
-  // IPv4-mapped / -compatible IPv6 (::ffff:169.254.169.254, ::ffff:10.0.0.1, …):
-  // extract the trailing dotted-quad and re-check it as IPv4, so an attacker
-  // can't reach the metadata endpoint or an RFC-1918 host via the v6 wrapper
-  // (review #8). Matches `::ffff:1.2.3.4` and `::1.2.3.4` forms.
-  const mapped = lower.match(/(?:::ffff:|::)(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
-  if (mapped && net.isIPv4(mapped[1])) return isPrivateIp(mapped[1]);
-  // IPv6 loopback + all-zeros.
-  if (lower === '::1' || lower === '::') return true;
-  // Unique-local fc00::/7 (fc.. / fd..).
-  if (lower.startsWith('fc') || lower.startsWith('fd')) return true;
-  // Link-local is the FULL fe80::/10 range = fe80..febf (not just the fe80
-  // prefix). The first hextet's high 10 bits are fixed: 0xfe80–0xfebf.
-  const firstHextet = parseInt(lower.split(':')[0] || '0', 16);
-  if (firstHextet >= IPV6_LINKLOCAL_LO && firstHextet <= IPV6_LINKLOCAL_HI) return true;
-  return false;
-}
-
 /**
  * Derive a stable, path-traversal-safe id + filename from a `uploads.linear.app`
  * URL. The id becomes an S3 key segment AND the agent-side on-disk directory
@@ -365,11 +316,16 @@ async function fetchUploadBytes(
   // SSRF: resolve the host and reject private/internal targets before connecting.
   try {
     const addrs = await dns.lookup(parsed.hostname, { all: true });
-    if (addrs.length === 0 || addrs.some((a) => isPrivateIp(a.address))) {
+    if (addrs.length === 0 || addrs.some((a) => isPrivateIp(a.address) !== undefined)) {
       return { kind: 'error', message: 'host resolves to a private/reserved address' };
     }
   } catch (err) {
-    return { kind: 'error', message: `DNS resolution failed: ${err instanceof Error ? err.message : String(err)}` };
+    // The outcome's message is posted on the Linear issue: the cause goes to the log.
+    logger.warn('Linear attachment download: DNS resolution failed', {
+      host: parsed.hostname,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { kind: 'error', message: 'DNS resolution failed' };
   }
 
   const controller = new AbortController();
@@ -415,7 +371,12 @@ async function fetchUploadBytes(
     }
     return { kind: 'ok', content: Buffer.concat(chunks), contentType };
   } catch (err) {
-    return { kind: 'error', message: err instanceof Error ? err.message : String(err) };
+    // As above: the cause goes to the log, not onto the issue.
+    logger.warn('Linear attachment download: request failed', {
+      host: parsed.hostname,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { kind: 'error', message: 'the request failed or timed out' };
   } finally {
     clearTimeout(timer);
   }
@@ -505,7 +466,7 @@ export async function downloadScreenAndStoreLinearAttachments(
 
   try {
     for (const upload of selected) {
-      let outcome = await fetchUploadBytes(ctx.accessToken, upload.url);
+      const outcome = await fetchUploadBytes(ctx.accessToken, upload.url);
 
       // uploads.linear.app auth failures are terminal here: the caller already
       // resolved a fresh workspace token (resolveLinearOauthToken refreshes
@@ -591,8 +552,16 @@ export async function downloadScreenAndStoreLinearAttachments(
             { cause: err },
           );
         }
+        // Not a verdict on the file: the screening call itself failed (throttled,
+        // denied). The SDK's text can name the role and the account, and this
+        // error's message is posted on the Linear issue, so it stays in the log.
+        logger.error('Screening call failed for Linear attachment', {
+          linear_workspace_id: ctx.linearWorkspaceId,
+          attachment_filename: upload.displayName,
+          error: err instanceof Error ? err.message : String(err),
+        });
         throw new LinearAttachmentError(
-          `Attachment '${upload.displayName}' could not be screened: ${err instanceof Error ? err.message : String(err)}`,
+          `Attachment '${upload.displayName}' could not be screened: the content screening service is unavailable.`,
           { cause: err },
         );
       }

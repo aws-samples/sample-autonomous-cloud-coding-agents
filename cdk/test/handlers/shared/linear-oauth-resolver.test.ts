@@ -129,6 +129,7 @@ describe('resolveLinearOauthToken', () => {
   beforeEach(() => {
     _resetCachesForTesting();
   });
+  afterEach(() => jest.restoreAllMocks());
 
   test('happy path: returns access token + workspace slug + secret arn', async () => {
     const stored = makeStoredToken({ access_token: 'lin_oauth_happy' });
@@ -195,8 +196,8 @@ describe('resolveLinearOauthToken', () => {
         ...clients,
         resolveViaVault: async () => ({ kind: 'token', accessToken: 'lin_oauth_vault' }),
       });
-      expect(result.accessToken).toBe('lin_oauth_vault');
-      expect(result.vaultUserId).toBe('linear-ws-acme');
+      expect(result?.accessToken).toBe('lin_oauth_vault');
+      expect(result?.vaultUserId).toBe('linear-ws-acme');
     });
 
     test('passes the RECORDED vault_user_id through, not a derived one', async () => {
@@ -296,6 +297,78 @@ describe('resolveLinearOauthToken', () => {
 
       expect(resolveViaVault).not.toHaveBeenCalled();
       expect(result?.accessToken).toBe('lin_oauth_SM_only');
+    });
+
+    describe('a token the vault returned is reused for a minute', () => {
+      // One comment on an issue resolves a token several times in a row (the
+      // reaction, the reply, the progress edit…), and every vault resolution is two
+      // AgentCore requests. The Secrets-Manager path has always kept its token for
+      // a minute; the vault path asked again each time.
+      const vaultRow = {
+        workspace_slug: 'acme',
+        oauth_secret_arn: 'arn:secret:acme',
+        status: 'active',
+        provider_name: 'bgagent-linear-oauth-acme',
+        vault_user_id: 'linear-ws-acme',
+        installed_at: '2026-08-01T00:00:00.000Z',
+      };
+      const vaultToken = () => jest.fn().mockResolvedValue({ kind: 'token', accessToken: 'lin_oauth_vault' });
+
+      test('two calls in a row ask the vault once; after the minute it is asked again', async () => {
+        const resolveViaVault = vaultToken();
+        const options = { ...makeFakeClients({ registryItem: vaultRow }), resolveViaVault };
+
+        const first = await resolveLinearOauthToken('ws-uuid-1', REGISTRY_TABLE, options);
+        const second = await resolveLinearOauthToken('ws-uuid-1', REGISTRY_TABLE, options);
+
+        expect(first?.accessToken).toBe('lin_oauth_vault');
+        expect(second).toEqual(first);
+        expect(resolveViaVault).toHaveBeenCalledTimes(1);
+
+        jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 61_000);
+        await resolveLinearOauthToken('ws-uuid-1', REGISTRY_TABLE, options);
+        expect(resolveViaVault).toHaveBeenCalledTimes(2);
+      });
+
+      test('invalidateLinearOauthCache drops it', async () => {
+        const resolveViaVault = vaultToken();
+        const options = { ...makeFakeClients({ registryItem: vaultRow }), resolveViaVault };
+
+        await resolveLinearOauthToken('ws-uuid-1', REGISTRY_TABLE, options);
+        invalidateLinearOauthCache('ws-uuid-1');
+        await resolveLinearOauthToken('ws-uuid-1', REGISTRY_TABLE, options);
+
+        expect(resolveViaVault).toHaveBeenCalledTimes(2);
+      });
+
+      test('a row latched on the vault inference is still asked: a kept token is no re-probe', async () => {
+        // The latch is cleared by a token in reply to the re-probe. A token kept from
+        // before the latch proves nothing about the grant now, so it must not clear it.
+        const beforeTheLatch = vaultToken();
+        await resolveLinearOauthToken('ws-uuid-1', REGISTRY_TABLE, {
+          ...makeFakeClients({ registryItem: vaultRow }),
+          resolveViaVault: beforeTheLatch,
+        });
+        // The row is latched, which also drops the cached row.
+        await markWorkspaceRevoked(
+          { send: jest.fn().mockResolvedValue({}) } as never,
+          REGISTRY_TABLE, 'ws-uuid-1', vaultRow.installed_at, undefined, 'vault_consent_required',
+        );
+
+        const latched = makeFakeClients({
+          registryItem: { ...vaultRow, status: 'revoked', revoked_reason: 'vault_consent_required' },
+        });
+        const reprobe = jest.fn().mockResolvedValue({ kind: 'consent-required', authorizationUrl: 'https://x/authorize' });
+        const result = await resolveLinearOauthToken('ws-uuid-1', REGISTRY_TABLE, {
+          ...latched,
+          resolveViaVault: reprobe,
+          onAuthorizationRevoked: async () => undefined,
+        });
+
+        expect(reprobe).toHaveBeenCalledTimes(1);
+        expect(result).toBeNull();
+        expect(latched.ddbSend.mock.calls.filter((c) => c[0].constructor.name === 'UpdateCommand')).toHaveLength(0);
+      });
     });
   });
 
@@ -445,6 +518,32 @@ describe('resolveLinearOauthToken', () => {
     });
 
     expect(result).toBeNull();
+  });
+
+  test('gives up on a refresh that Linear takes and never answers', async () => {
+    const clients = makeFakeClients({
+      registryItem: {
+        workspace_slug: 'acme',
+        oauth_secret_arn: 'arn:secret:acme',
+        status: 'active',
+      },
+      storedToken: makeStoredToken({ expires_at: new Date(Date.now() - 1000).toISOString() }),
+    });
+    // The request's time limit, already run out: `AbortSignal.timeout` runs on a
+    // timer that jest's fake timers do not drive.
+    const timeoutSpy = jest.spyOn(AbortSignal, 'timeout').mockReturnValue(AbortSignal.abort(new Error('timed out')));
+    const fetchImpl = jest.fn((_url: unknown, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      // No answer ever comes: only the signal of the request ends the wait.
+      if (init?.signal?.aborted) reject(init.signal.reason as Error);
+    }));
+
+    const result = await resolveLinearOauthToken('ws-uuid-1', REGISTRY_TABLE, {
+      ...clients,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    expect(result).toBeNull();
+    expect(timeoutSpy).toHaveBeenCalledWith(10_000);
   });
 
   test('invalidateLinearOauthCache clears the cache', async () => {
@@ -946,6 +1045,67 @@ describe('a transient Secrets Manager error is not a revocation', () => {
 
     expect(result?.accessToken).toBe('lin_oauth_sm_alive');
     expect(recorder).not.toHaveBeenCalled();
+  });
+
+  describe('Linear rejects the refresh token of the stored fallback grant', () => {
+    // A workspace that moved onto the vault keeps its Secrets-Manager grant as a
+    // fallback, and nothing renews it once the vault serves every token: Linear
+    // expires a refresh token 30 days after issuance. So this rejection is where
+    // every such workspace ends up, and it says nothing about the vault grant.
+    // What it means depends on what the vault answered.
+    const expiredFallback = () => makeStoredToken({
+      refresh_token: 'rt-fallback-past-30-days',
+      expires_at: new Date(Date.now() - 1000).toISOString(),
+      // Not the row's value, to show which installation the verdict is recorded for.
+      installed_at: '2026-06-01T00:00:00.000Z',
+    });
+    const rejectedByLinear = () => jest.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      json: async () => ({ error: 'invalid_request', error_description: 'Invalid refresh token' }),
+    }) as unknown as typeof fetch;
+
+    test('the vault was unavailable → NO latch, only this event fails', async () => {
+      // One throttled AgentCore call. Recording the fallback's rejection here latches
+      // the row `refresh_token_rejected`, the reason that is never re-probed: the
+      // vault is not asked again and a working workspace stays offline.
+      const clients = makeFakeClients({ registryItem: vaultRow, storedToken: expiredFallback() });
+      const recorder = jest.fn();
+
+      const result = await resolveLinearOauthToken(WS_ACME, REGISTRY_TABLE, {
+        ...clients,
+        resolveViaVault: async () => ({ kind: 'unavailable', reason: 'ThrottlingException' }),
+        fetchImpl: rejectedByLinear(),
+        onAuthorizationRevoked: recorder,
+      });
+
+      expect(result).toBeNull();
+      expect(recorder).not.toHaveBeenCalled();
+      expect(updatesFrom(clients)).toHaveLength(0);
+    });
+
+    test('the vault says consent-required → recorded as the vault\'s verdict, so the re-probe can clear it', async () => {
+      // Neither path yields a token, as when the bundle holds no grant at all. The
+      // latch must be the same one: `vault_consent_required` for the row's
+      // installation, which a later vault token clears.
+      const clients = makeFakeClients({ registryItem: vaultRow, storedToken: expiredFallback() });
+      const recorder = jest.fn();
+
+      const result = await resolveLinearOauthToken(WS_ACME, REGISTRY_TABLE, {
+        ...clients,
+        resolveViaVault: consentRequired,
+        fetchImpl: rejectedByLinear(),
+        onAuthorizationRevoked: recorder,
+      });
+
+      expect(result).toBeNull();
+      expect(recorder).toHaveBeenCalledTimes(1);
+      expect(recorder).toHaveBeenCalledWith(expect.objectContaining({
+        linearWorkspaceId: WS_ACME,
+        source: 'vault-consent-required',
+        installedAt: vaultRow.installed_at,
+      }));
+    });
   });
 });
 

@@ -22,11 +22,11 @@ import {
   CognitoIdentityProviderClient,
 } from '@aws-sdk/client-cognito-identity-provider';
 import { BatchGetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
+import sharedConstants from '../../../../contracts/constants.json';
 import { logger } from './logger';
 import { coerceNumericOrNull } from './numeric';
 import type { PersonalBudgetStatus } from './types';
 import { makeClient, makeDocClient } from './ua';
-import sharedConstants from '../../../../contracts/constants.json';
 
 const budgetContract = sharedConstants.monthly_budgets;
 export const BUDGET_CONFIG_PERIOD = budgetContract.config_period;
@@ -89,11 +89,13 @@ export class BudgetScopeLimitError extends Error {
   override readonly name = 'BudgetScopeLimitError';
 }
 
-function assertSupportedScopeCount(userId: string, teamIds: readonly string[]): void {
+// The message is returned to whoever asked for the task, who is not always the
+// billed user: it must not name that user. createTaskCore logs the user id with it.
+function assertSupportedScopeCount(teamIds: readonly string[]): void {
   if (teamIds.length + 1 > MAX_BUDGET_SCOPES_PER_TASK) {
     throw new BudgetScopeLimitError(
-      `User ${userId} belongs to ${teamIds.length} teams; budget rollup supports at most `
-      + `${MAX_BUDGET_SCOPES_PER_TASK - 1}.`,
+      `The user this task is billed to belongs to ${teamIds.length} teams; budget rollup `
+      + `supports at most ${MAX_BUDGET_SCOPES_PER_TASK - 1}.`,
     );
   }
 }
@@ -119,6 +121,12 @@ export function teamBudgetScopeKey(teamId: string): string {
 export function taskBudgetMarkerKey(taskId: string): string {
   return `${BUDGET_TASK_PREFIX}${taskId}`;
 }
+
+/**
+ * Sort key of the scoreboard's once-only claim. Same partition key as the rollup
+ * marker, so the two items never collide, and not a row the budget queries read.
+ */
+export const BUDGET_METRICS_PERIOD = 'METRICS';
 
 export function parseBudgetScopeKey(scopeKey: string): {
   scopeType: BudgetScopeType;
@@ -182,7 +190,8 @@ function emitMissingTeamMembershipMetric(userId: string): void {
       Timestamp: Date.now(),
       CloudWatchMetrics: [{
         Namespace: BUDGET_METRIC_NAMESPACE,
-        Dimensions: [],
+        // One empty DimensionSet: a metric without dimensions. `[]` would declare no metric.
+        Dimensions: [[]],
         Metrics: [{ Name: 'BudgetTeamMembershipUnresolved', Unit: 'Count' }],
       }],
     },
@@ -233,7 +242,7 @@ async function resolveTeamIds(userId: string): Promise<string[]> {
         error_name: name,
         metric_type: 'budget_team_membership_user_missing',
       });
-      return []; // nosemgrep: ts-silent-success-masking -- user budgets remain enforced; an alarm pages on skipped team enforcement
+      return []; // user budgets remain enforced; an alarm pages on skipped team enforcement
     }
     logger.error('Failed to resolve budget team membership', {
       user_id: userId,
@@ -422,14 +431,14 @@ export async function checkBudgetAdmission(
     teamIds = budgetTableName && await hasConfiguredTeamBudgets()
       ? await resolveTeamIds(userId)
       : [];
-    assertSupportedScopeCount(userId, teamIds);
+    assertSupportedScopeCount(teamIds);
     states = [
       ...userStates,
       ...(await loadBudgetStates(teamIds.map(teamBudgetScopeKey), period)),
     ];
   } else {
     teamIds = [...new Set(suppliedTeamIds)].sort();
-    assertSupportedScopeCount(userId, teamIds);
+    assertSupportedScopeCount(teamIds);
     states = await loadBudgetStates([
       userScopeKey,
       ...teamIds.map(teamBudgetScopeKey),

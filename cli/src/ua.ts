@@ -48,16 +48,18 @@ import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 export const SOLUTION_ID = 'uksb-wt64nei4u6';
 
 /** Stable per-component label: this surface IS the bgagent CLI. */
-export const COMPONENT = 'cli';
+const COMPONENT = 'cli';
 
 /** Standard AWS SDK env var the JS v3 SDK reads natively for the `app/` segment. */
 export const APP_ID_ENV = 'AWS_SDK_UA_APP_ID';
 
 /**
  * RFC 7230 token charset. `#` is the scheme's structural separator and is
- * deliberately excluded. Mirrors `_ALLOWED` in `agent/src/ua.py`.
+ * deliberately excluded. Mirrors `_ALLOWED` in `agent/src/ua.py`. The `u` flag
+ * matches by code point, as Python iterates a string, so a character outside
+ * the Basic Multilingual Plane is one `-`, not two.
  */
-const UA_TOKEN_SAFE = /[^A-Za-z0-9!$%&'*+\-.^_`|~]/g;
+const UA_TOKEN_SAFE = /[^A-Za-z0-9!$%&'*+\-.^_`|~]/gu;
 
 /** Replace every non-UA-token char (incl. non-ASCII) with `-`. */
 export function sanitizeUaValue(raw: string): string {
@@ -95,7 +97,7 @@ export function abcaUserAgent(): { customUserAgent: [string, string][] } {
  * factory composable instead of clobbering. (#319)
  */
 export function makeClient<C>(
-  Ctor: new (cfg: any) => C,
+  Ctor: new (cfg: { customUserAgent: [string, string][] }) => C,
   cfg: Record<string, unknown> = {},
 ): C {
   const callerUa = (cfg.customUserAgent as [string, string][] | undefined) ?? [];

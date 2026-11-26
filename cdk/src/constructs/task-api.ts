@@ -18,8 +18,9 @@
  */
 
 import * as path from 'path';
-import { ArnFormat, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
+import { ArnFormat, Duration, Fn, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
@@ -48,8 +49,15 @@ const API_HANDLER_TIMEOUT_SECONDS = 15;
 
 /**
  * Confirm-uploads Lambda timeout (seconds). Downloads + screens up to
- * five attachments (Guardrail image scan, PDF text extraction) in one
+ * ten attachments (Guardrail image scan, PDF text extraction) in one
  * invocation, so it gets a much larger budget than the standard handlers.
+ *
+ * After a gateway timeout `bgagent submit` waits before it confirms again,
+ * and derives that wait from this value (`CONFIRM_MAX_POLLS` in
+ * `cli/src/commands/submit.ts`: this long, less the gateway's 29 s, plus room
+ * for a cold start). Change the two together: with a longer timeout here and
+ * the same wait there, the second confirmation can run beside the first and
+ * screen every upload again.
  */
 const CONFIRM_UPLOADS_TIMEOUT_SECONDS = 180;
 
@@ -61,6 +69,29 @@ const SCREENING_HANDLER_MEMORY_MB = 512;
 
 /** Memory for confirm-uploads / webhook-create attachment path (MB). */
 const HEAVY_ATTACHMENT_HANDLER_MEMORY_MB = 1024;
+
+/** Webhook routes that bypass the body-size rule; each is HMAC-verified in its Lambda. */
+const LARGE_BODY_WEBHOOK_PATHS = ['/v1/linear/webhook', '/v1/jira/webhook', '/v1/github/webhook'] as const;
+export type LargeBodyWebhookPath = typeof LARGE_BODY_WEBHOOK_PATHS[number];
+
+/** Metric (and rule) name of the count rule for XSS matches let through on signed webhook routes. */
+const SIGNED_WEBHOOK_XSS_METRIC = 'SignedWebhookXssCounted';
+
+/** XSS-shaped bodies per hour on the signed webhook routes that raise the alarm. */
+const SIGNED_WEBHOOK_XSS_ALARM_PER_HOUR = 20;
+
+const uriPathMatch = (positionalConstraint: 'STARTS_WITH' | 'EXACTLY', searchString: string) => ({
+  byteMatchStatement: {
+    fieldToMatch: { uriPath: {} },
+    positionalConstraint,
+    searchString,
+    textTransformations: [{ priority: 0, type: 'NONE' }],
+  },
+});
+
+/** WAF rejects one-element OR/AND statements, so a single match is used directly. */
+const anyOf = (statements: object[]) => statements.length === 1 ? statements[0] : { orStatement: { statements } };
+const allOf = (statements: object[]) => statements.length === 1 ? statements[0] : { andStatement: { statements } };
 
 /**
  * Properties for TaskApi construct.
@@ -138,7 +169,8 @@ export interface TaskApiProps {
   /**
    * Maximum concurrent tasks per user (#441). Threaded to the get-task
    * handler so the queue-wait ETA heuristic agrees with the
-   * orchestrator's admission cap. Must match
+   * orchestrator's admission cap, and to the confirm-uploads handler,
+   * which admits against it. Must match
    * ``TaskOrchestrator.maxConcurrentTasksPerUser``.
    * @default 10
    */
@@ -200,10 +232,8 @@ export interface TaskApiProps {
 
   /**
    * IAM resource ARN of the MicroVM image this deployment provisioned (ADR-021
-   * sub-decision 4). When provided, the cancel Lambda gets
-   * `lambda:TerminateMicrovm` **scoped to that one image**, so a cancelled
-   * MicroVM-backed task actually stops billing — mirroring the conditional
-   * AgentCore `RUNTIME_ARN` / `ecsClusterArn` wiring above.
+   * sub-decision 4). When provided, cancel gets TerminateMicrovm and the approval
+   * decision handlers get GetMicrovm/ResumeMicrovm, scoped to that one image.
    *
    * An ARN rather than an on/off boolean so the grant is exactly scoped. `TaskApi`
    * is constructed before `LambdaMicrovmCompute` (the cancel Lambda's ARN is
@@ -239,6 +269,102 @@ export interface TaskApiProps {
    */
   readonly budgetTable?: dynamodb.ITable;
 
+  /**
+   * Deployed webhook routes whose payloads exceed CRS SizeRestrictions_BODY
+   * (#836). Only these are exempted, so an omitted integration leaves no WAF
+   * exemption behind. @default every large-body webhook (legacy topology)
+   */
+  readonly largeBodyWebhookPaths?: readonly LargeBodyWebhookPath[];
+}
+
+/**
+ * WAF rules for the HMAC-signed webhook routes (#1063). Their bodies carry user-written
+ * issue and PR text, and a Linear agent session opened by an @-mention adds XML-like
+ * `promptContext` (`<issue identifier=…>`), so CrossSiteScripting_BODY blocked them with a
+ * 403 before the receiver ran and the task or session never started. Here that rule (and
+ * SizeRestrictions_BODY: payloads > 8 KB) only counts. That is safe on these routes alone:
+ * each receiver verifies the signature over the raw body before it dispatches the event
+ * (Linear and Jira first read the tenant id from the body to choose the signing secret),
+ * and nothing renders a webhook body as HTML. Every other rule of the set still blocks, every other
+ * route still blocks XSS, and the priority-4 rate limit still applies. The second rule
+ * counts the XSS matches let through under their own metric, which signedWebhookXssAlarm
+ * watches (a counted rule inside a managed group has no metric of its own).
+ * @param paths - the deployed signed webhook routes.
+ * @returns the rules, or none when no webhook route is deployed.
+ */
+function signedWebhookRules(paths: readonly string[]): wafv2.CfnWebACL.RuleProperty[] {
+  if (paths.length === 0) return [];
+  return [
+    {
+      name: 'AWSManagedRulesCommonRuleSet-SignedWebhooks',
+      priority: 5,
+      overrideAction: { none: {} },
+      statement: {
+        managedRuleGroupStatement: {
+          vendorName: 'AWS',
+          name: 'AWSManagedRulesCommonRuleSet',
+          // WAF rejects `excludedRules` alongside `ruleActionOverrides`, and an excluded
+          // rule is a count override, so both rules are overrides here.
+          ruleActionOverrides: [
+            { name: 'SizeRestrictions_BODY', actionToUse: { count: {} } },
+            { name: 'CrossSiteScripting_BODY', actionToUse: { count: {} } },
+          ],
+          scopeDownStatement: anyOf(paths.map(webhookPath => uriPathMatch('EXACTLY', webhookPath))),
+        },
+      },
+      visibilityConfig: {
+        cloudWatchMetricsEnabled: true,
+        metricName: 'CommonRuleSetSignedWebhooks',
+        sampledRequestsEnabled: true,
+      },
+    },
+    {
+      name: SIGNED_WEBHOOK_XSS_METRIC,
+      priority: 6,
+      action: { count: {} },
+      statement: {
+        labelMatchStatement: { scope: 'LABEL', key: 'awswaf:managed:aws:core-rule-set:CrossSiteScripting_Body' },
+      },
+      visibilityConfig: {
+        cloudWatchMetricsEnabled: true,
+        metricName: SIGNED_WEBHOOK_XSS_METRIC,
+        sampledRequestsEnabled: true,
+      },
+    },
+  ];
+}
+
+/**
+ * The alarm on XSS-shaped bodies let through on the signed webhook routes. One now and
+ * then is expected (issue text with HTML, a session's prompt context); a sustained run is
+ * worth a look.
+ * @param scope - the construct to create the alarm in.
+ * @param webAcl - the web ACL whose count rule the alarm reads.
+ * @param paths - the deployed signed webhook routes.
+ * @returns the alarm, or undefined when no webhook route is deployed.
+ */
+function signedWebhookXssAlarm(scope: Construct, webAcl: wafv2.CfnWebACL, paths: readonly string[]): cloudwatch.Alarm | undefined {
+  if (paths.length === 0) return undefined;
+  return new cloudwatch.Alarm(scope, 'SignedWebhookXssCountedAlarm', {
+    metric: new cloudwatch.Metric({
+      namespace: 'AWS/WAFV2',
+      metricName: 'CountedRequests',
+      // The ACL's Ref is `name|id|scope`. WAF dimensions its metrics by the web ACL's
+      // name (here generated, e.g. `TaskApiWebAcl28D7DCC9-…`), not its visibilityConfig
+      // metric name: observed on a deployed stack, where every CountedRequests series
+      // carries the name and none carries `TaskApiWebAcl`.
+      dimensionsMap: { WebACL: Fn.select(0, Fn.split('|', webAcl.ref)), Rule: SIGNED_WEBHOOK_XSS_METRIC, Region: Stack.of(scope).region },
+      statistic: 'Sum',
+      period: Duration.hours(1),
+    }),
+    threshold: SIGNED_WEBHOOK_XSS_ALARM_PER_HOUR,
+    evaluationPeriods: 1,
+    comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+    treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    alarmDescription: 'Many XSS-shaped bodies reached a signed webhook route (Linear, Jira, GitHub) in an hour. '
+      + 'The WAF counts rather than blocks them there (each receiver verifies the HMAC first); check the '
+      + `WAF sampled requests for rule ${SIGNED_WEBHOOK_XSS_METRIC}.`,
+  });
 }
 
 /**
@@ -281,6 +407,14 @@ export class TaskApi extends Construct {
    */
   public readonly appClientId: string;
 
+  /**
+   * Raised when many XSS-shaped bodies reach the signed webhook routes, where
+   * the WAF counts rather than blocks them. Undefined when no webhook route is
+   * deployed.
+   */
+  public readonly webhookXssCountedAlarm?: cloudwatch.Alarm;
+
+  // eslint-disable-next-line complexity -- predates the ceiling (55; 53 when it landed); must not grow
   constructor(scope: Construct, id: string, props: TaskApiProps) {
     super(scope, id);
 
@@ -313,8 +447,7 @@ export class TaskApi extends Construct {
     // Suppress Cognito rules not applicable for dev environment
     NagSuppressions.addResourceSuppressions(this.userPool, [
       { id: 'AwsSolutions-COG2', reason: 'MFA not required for dev environment — CLI-based auth flow' },
-      { id: 'AwsSolutions-COG3', reason: 'Advanced security mode (Plus tier) not required for dev environment' },
-      { id: 'AwsSolutions-COG8', reason: 'Cognito Plus tier / feature plan not required for dev environment — same rationale as COG3 (advanced security)' },
+      { id: 'AwsSolutions-COG8', reason: 'Cognito Plus tier / feature plan not required for dev environment (advanced security)' },
     ]);
 
     // --- REST API ---
@@ -344,6 +477,8 @@ export class TaskApi extends Construct {
     });
 
     // --- WAF Web ACL ---
+    const largeBodyWebhookPaths: readonly string[] = props.largeBodyWebhookPaths ?? LARGE_BODY_WEBHOOK_PATHS;
+    const signedWebhookPaths = LARGE_BODY_WEBHOOK_PATHS.filter(webhookPath => largeBodyWebhookPaths.includes(webhookPath));
     const webAcl = new wafv2.CfnWebACL(this, 'WebAcl', {
       defaultAction: { allow: {} },
       scope: 'REGIONAL',
@@ -352,21 +487,26 @@ export class TaskApi extends Construct {
         metricName: 'TaskApiWebAcl',
         sampledRequestsEnabled: true,
       },
+      // Sampling keeps the name and value of every header of a sampled request
+      // for three hours, readable with wafv2:GetSampledRequests. Two headers are
+      // a complete credential: `Authorization` (the Cognito token) and
+      // `X-API-Key` (the platform stores only the hash of that key). WAF writes
+      // REDACTED in their place; the rules still inspect the real request, and
+      // the header names match in any letter case.
+      dataProtectionConfig: {
+        dataProtections: [{
+          action: 'SUBSTITUTION',
+          field: { fieldType: 'SINGLE_HEADER', fieldKeys: ['authorization', 'x-api-key'] },
+        }],
+      },
       rules: [
         {
           // CRS for task paths that accept large bodies (inline base64
           // attachments up to 3 MB, presigned upload metadata). Excludes
-          // SizeRestrictions_BODY only; all other CRS rules apply. Payload
-          // size is bounded by API GW (10 MB) and validateAttachments().
-          //
-          // NOTE (known limitation, tracked as backlog): CrossSiteScripting_BODY here BLOCKS a
-          // Linear/Jira webhook whose issue body contains HTML markup
-          // (``<head>``, ``<meta>``, ``<div>``) at the WAF edge with a 403
-          // before the Lambda runs — the task silently never starts and the
-          // sender gets an opaque 403. XSS protection is intentionally kept ON
-          // for now (a real defense-in-depth layer); the false-positive is
-          // tracked as a backlog item to fix deliberately (e.g. a considered
-          // per-route exclusion + operator alarm) rather than weaken WAF here.
+          // SizeRestrictions_BODY only; all other CRS rules apply, XSS
+          // included. Payload size is bounded by API GW (10 MB) and
+          // validateAttachments(). The signed webhook routes have their own
+          // rule (AWSManagedRulesCommonRuleSet-SignedWebhooks, below).
           name: 'AWSManagedRulesCommonRuleSet-TaskPaths',
           priority: 1,
           overrideAction: { none: {} },
@@ -375,57 +515,7 @@ export class TaskApi extends Construct {
               vendorName: 'AWS',
               name: 'AWSManagedRulesCommonRuleSet',
               excludedRules: [{ name: 'SizeRestrictions_BODY' }],
-              scopeDownStatement: {
-                orStatement: {
-                  statements: [
-                    {
-                      byteMatchStatement: {
-                        fieldToMatch: { uriPath: {} },
-                        positionalConstraint: 'STARTS_WITH',
-                        searchString: '/v1/tasks',
-                        textTransformations: [{ priority: 0, type: 'NONE' }],
-                      },
-                    },
-                    {
-                      // Linear webhook payloads > 8 KB (HMAC-verified in Lambda,
-                      // rate-limited by priority-4 rule below).
-                      byteMatchStatement: {
-                        fieldToMatch: { uriPath: {} },
-                        positionalConstraint: 'EXACTLY',
-                        searchString: '/v1/linear/webhook',
-                        textTransformations: [{ priority: 0, type: 'NONE' }],
-                      },
-                    },
-                    {
-                      // Jira issue payloads include the full issue field set.
-                      // Attachment metadata can push them over 8 KB. The
-                      // receiver HMAC-verifies the raw body and the priority-4
-                      // rule below still rate-limits this route.
-                      byteMatchStatement: {
-                        fieldToMatch: { uriPath: {} },
-                        positionalConstraint: 'EXACTLY',
-                        searchString: '/v1/jira/webhook',
-                        textTransformations: [{ priority: 0, type: 'NONE' }],
-                      },
-                    },
-                    {
-                      // GitHub deployment_status webhook (preview-deploy
-                      // screenshot pipeline). The full payload (workflow run
-                      // history + deploy URLs + deployment metadata) exceeds
-                      // 8 KB and trips SizeRestrictions_BODY. HMAC-verified
-                      // in Lambda. (CloudWatch BlockedRequests metric
-                      // confirmed: SizeRestrictions_BODY fired, not RFI —
-                      // GenericRFI_BODY has never blocked on this WebACL.)
-                      byteMatchStatement: {
-                        fieldToMatch: { uriPath: {} },
-                        positionalConstraint: 'EXACTLY',
-                        searchString: '/v1/github/webhook',
-                        textTransformations: [{ priority: 0, type: 'NONE' }],
-                      },
-                    },
-                  ],
-                },
-              },
+              scopeDownStatement: uriPathMatch('STARTS_WITH', '/v1/tasks'),
             },
           },
           visibilityConfig: {
@@ -443,60 +533,12 @@ export class TaskApi extends Construct {
             managedRuleGroupStatement: {
               vendorName: 'AWS',
               name: 'AWSManagedRulesCommonRuleSet',
-              scopeDownStatement: {
-                andStatement: {
-                  statements: [
-                    {
-                      notStatement: {
-                        statement: {
-                          byteMatchStatement: {
-                            fieldToMatch: { uriPath: {} },
-                            positionalConstraint: 'STARTS_WITH',
-                            searchString: '/v1/tasks',
-                            textTransformations: [{ priority: 0, type: 'NONE' }],
-                          },
-                        },
-                      },
-                    },
-                    {
-                      notStatement: {
-                        statement: {
-                          byteMatchStatement: {
-                            fieldToMatch: { uriPath: {} },
-                            positionalConstraint: 'EXACTLY',
-                            searchString: '/v1/jira/webhook',
-                            textTransformations: [{ priority: 0, type: 'NONE' }],
-                          },
-                        },
-                      },
-                    },
-                    {
-                      notStatement: {
-                        statement: {
-                          byteMatchStatement: {
-                            fieldToMatch: { uriPath: {} },
-                            positionalConstraint: 'EXACTLY',
-                            searchString: '/v1/linear/webhook',
-                            textTransformations: [{ priority: 0, type: 'NONE' }],
-                          },
-                        },
-                      },
-                    },
-                    {
-                      notStatement: {
-                        statement: {
-                          byteMatchStatement: {
-                            fieldToMatch: { uriPath: {} },
-                            positionalConstraint: 'EXACTLY',
-                            searchString: '/v1/github/webhook',
-                            textTransformations: [{ priority: 0, type: 'NONE' }],
-                          },
-                        },
-                      },
-                    },
-                  ],
-                },
-              },
+              // Order preserved from the original rule so the legacy template is unchanged.
+              scopeDownStatement: allOf(['/v1/tasks', '/v1/jira/webhook', '/v1/linear/webhook', '/v1/github/webhook']
+                .filter(uriPath => uriPath === '/v1/tasks' || largeBodyWebhookPaths.includes(uriPath))
+                .map(uriPath => ({
+                  notStatement: { statement: uriPathMatch(uriPath === '/v1/tasks' ? 'STARTS_WITH' : 'EXACTLY', uriPath) },
+                }))),
             },
           },
           visibilityConfig: {
@@ -537,8 +579,10 @@ export class TaskApi extends Construct {
             sampledRequestsEnabled: true,
           },
         },
+        ...signedWebhookRules(signedWebhookPaths),
       ],
     });
+    this.webhookXssCountedAlarm = signedWebhookXssAlarm(this, webAcl, signedWebhookPaths);
 
     new wafv2.CfnWebACLAssociation(this, 'WebAclAssociation', {
       resourceArn: this.api.deploymentStage.stageArn,
@@ -630,6 +674,10 @@ export class TaskApi extends Construct {
       timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
     });
 
+    // The per-user cap for the handlers here that read it. It has to match the
+    // orchestrator's (see the prop).
+    const maxConcurrentTasksPerUser = String(props.maxConcurrentTasksPerUser ?? 10);
+
     const getTaskFn = new lambda.NodejsFunction(this, 'GetTaskFn', {
       entry: path.join(handlersDir, 'get-task.ts'),
       handler: 'handler',
@@ -639,7 +687,7 @@ export class TaskApi extends Construct {
         ...commonEnv,
         // #441: queue-position ETA heuristic must agree with the
         // orchestrator's per-user admission cap.
-        MAX_CONCURRENT_TASKS_PER_USER: String(props.maxConcurrentTasksPerUser ?? 10),
+        MAX_CONCURRENT_TASKS_PER_USER: maxConcurrentTasksPerUser,
       },
       bundling: commonBundling,
     });
@@ -655,6 +703,11 @@ export class TaskApi extends Construct {
       architecture: Architecture.ARM_64,
       environment: listTasksEnv,
       bundling: commonBundling,
+      // Task rows are large: a filtered list pages through up to 10 Queries of up to 1 MB
+      // each, and the scoreboard view through up to 24, four at a time. So this gets the
+      // API-handler settings, not the 3s / 128MB defaults.
+      timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
+      memorySize: API_HANDLER_MEMORY_MB,
     });
 
     const cancelTaskEnv: Record<string, string> = { ...commonEnv };
@@ -744,8 +797,7 @@ export class TaskApi extends Construct {
     // ONLY `lambda:TerminateMicrovm`. `cancel-task.ts` sends
     // `TerminateMicrovmCommand` and nothing else — it does not read MicroVM
     // state first — so `lambda:GetMicrovm` would be a permission with no caller.
-    // (The approve/deny Lambdas get `ResumeMicrovm` + `GetMicrovm` in P3, where
-    // a state read is genuinely needed for the resume reconciliation.)
+    // The approve/deny Lambdas separately get ResumeMicrovm + GetMicrovm below.
     //
     // Resource is the MicroVM *image*, not the running instance: every MicroVM
     // lifecycle action authorizes against `microvm-image:<name>` (Service
@@ -816,6 +868,8 @@ export class TaskApi extends Construct {
       const confirmUploadsEnv: Record<string, string> = { ...commonEnv };
       confirmUploadsEnv.ATTACHMENTS_BUCKET_NAME = props.attachmentsBucket.bucketName;
       confirmUploadsEnv.USER_CONCURRENCY_TABLE_NAME = props.userConcurrencyTable.tableName;
+      // Without it the handler admits against its own fallback of 3.
+      confirmUploadsEnv.MAX_CONCURRENT_TASKS_PER_USER = maxConcurrentTasksPerUser;
       if (props.orchestratorFunctionArn) {
         confirmUploadsEnv.ORCHESTRATOR_FUNCTION_ARN = props.orchestratorFunctionArn;
       }
@@ -1033,6 +1087,14 @@ export class TaskApi extends Construct {
       props.taskTable.grantReadWriteData(denyTaskFn);
       props.taskApprovalsTable.grantReadWriteData(denyTaskFn);
       props.taskEventsTable.grantReadWriteData(denyTaskFn);
+      if (props.lambdaMicrovmImageArn) {
+        for (const decisionFn of [approveTaskFn, denyTaskFn]) {
+          decisionFn.addToRolePolicy(new iam.PolicyStatement({
+            actions: ['lambda:GetMicrovm', 'lambda:ResumeMicrovm'],
+            resources: [props.lambdaMicrovmImageArn, `${props.lambdaMicrovmImageArn}:*`],
+          }));
+        }
+      }
 
       // GetPendingFn — GET /pending
       const getPendingFn = new lambda.NodejsFunction(this, 'GetPendingFn', {
@@ -1432,7 +1494,7 @@ export class TaskApi extends Construct {
         },
         {
           id: 'AwsSolutions-IAM5',
-          reason: 'DynamoDB index/* wildcards generated by CDK grantReadWriteData/grantReadData for GSI access; ecs:StopTask is conditioned on the cluster ARN; lambda:TerminateMicrovm is scoped to the single platform MicroVM image ARN plus a <arn>:* version-suffix sibling (delivered as a Lazy.string because TaskApi is built before the MicroVM construct) — ADR-021',
+          reason: 'DynamoDB index/* wildcards generated by CDK grantReadWriteData/grantReadData for GSI access; ecs:StopTask is conditioned on the cluster ARN; Lambda MicroVM cancel/wake actions (TerminateMicrovm/GetMicrovm/ResumeMicrovm) are scoped to the single platform MicroVM image ARN plus a <arn>:* version-suffix sibling (delivered as a Lazy.string because TaskApi is built before the MicroVM construct) — ADR-021',
         },
       ], true);
     }

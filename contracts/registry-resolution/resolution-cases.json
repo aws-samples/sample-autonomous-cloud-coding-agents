@@ -72,6 +72,24 @@
       "constraint": "^1.0.0",
       "candidates": ["1.0.9007199254740991", "1.0.9007199254740990"],
       "winner": "1.0.9007199254740991"
+    },
+    {
+      "name": "exact-pin-ignores-a-leading-zero-twin",
+      "constraint": "1.0.0-rc.1",
+      "candidates": ["1.0.0-rc.01", "1.0.0-rc.1"],
+      "winner": "1.0.0-rc.1"
+    },
+    {
+      "name": "numeric-prerelease-above-max-safe-integer",
+      "constraint": "^1.0.0-0",
+      "candidates": ["1.0.0-9007199254740992", "1.0.0-9007199254740993"],
+      "winner": "1.0.0-9007199254740993"
+    },
+    {
+      "name": "non-ascii-digit-candidate-skipped",
+      "constraint": "^1.0.0",
+      "candidates": ["1.0.0", "1.1\u0662.0"],
+      "winner": "1.0.0"
     }
   ]
 }

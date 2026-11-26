@@ -31,9 +31,14 @@ const ICON: Readonly<Record<ActivityKind, IconProps.Name>> = {
   problem: 'status-warning',
 };
 
-function time(iso: string): string {
+const DAY = new Intl.DateTimeFormat([], { month: 'short', day: 'numeric' });
+const TIME = new Intl.DateTimeFormat([], { hour: '2-digit', minute: '2-digit' });
+
+/** A line's time of day and its day ("Nov 12"), on the reader's clock. Both empty when the line has no time. */
+function clock(iso: string): { time: string; day: string } {
   const date = new Date(iso);
-  return Number.isNaN(date.getTime()) ? '' : date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  if (Number.isNaN(date.getTime())) return { time: '', day: '' };
+  return { time: TIME.format(date), day: DAY.format(date) };
 }
 
 /** How close to the bottom still counts as "following" the feed. */
@@ -68,12 +73,13 @@ function LineText({ line, open = false }: { line: ActivityLine; open?: boolean }
   );
 }
 
-function FeedLine({ line, trace }: { line: ActivityLine; trace: boolean }) {
+function FeedLine({ line, time, newDay, trace }: { line: ActivityLine; time: string; newDay: string | false; trace: boolean }) {
   const [open, setOpen] = useState(false);
   return (
     <li style={{ padding: '4px 0' }}>
+      {newDay && <Box variant="small" color="text-status-inactive" padding={{ top: 'xs' }}>{newDay}</Box>}
       <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
-        <Box variant="small" color="text-status-inactive"><span style={{ display: 'inline-block', minWidth: 44 }}>{time(line.at)}</span></Box>
+        <Box variant="small" color="text-status-inactive"><span style={{ display: 'inline-block', minWidth: 44 }}>{time}</span></Box>
         <Icon name={line.step ? (open ? 'caret-down-filled' : 'caret-right-filled') : ICON[line.kind]} variant={line.kind === 'problem' ? 'warning' : 'subtle'} size="small" />
         <div style={{ minWidth: 0, flex: 1 }}>
           {line.step
@@ -117,10 +123,16 @@ export function ActivityFeed({ lines, loading, live, trace = false }: {
   if (loading) return <Box color="text-status-inactive">Loading…</Box>;
   if (count === 0) return <Box color="text-status-inactive">Nothing yet. Updates appear here as the agent works.</Box>;
 
+  // The lines show a time of day. Most tasks begin and end within one day; a line on another day than
+  // the line before it, such as the end of a pull request days after the task, names its day above it.
+  const clocks = lines.map((line) => clock(line.at));
+
   return (
     <div ref={box} onScroll={onScroll} style={{ maxHeight: 480, overflowY: 'auto' }}>
       <ul aria-label="Activity" style={{ listStyle: 'none', margin: 0, padding: 0 }}>
-        {lines.map((line) => <FeedLine key={line.id} line={line} trace={trace} />)}
+        {lines.map((line, i) => (
+          <FeedLine key={line.id} line={line} time={clocks[i].time} newDay={i > 0 && clocks[i].day !== clocks[i - 1].day && clocks[i].day} trace={trace} />
+        ))}
       </ul>
       <div ref={end} />
     </div>

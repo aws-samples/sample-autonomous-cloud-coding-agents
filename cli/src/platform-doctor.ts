@@ -40,7 +40,7 @@ import {
 import { BEDROCK_GEO_PREFIXES } from './model-id';
 import { PLATFORM_REPO_DEFAULTS } from './repo-display';
 import { listRepoConfigs, RepoConfigRow } from './repo-lookup';
-import { getStackOutput } from './stack-outputs';
+import { getStackOutputs } from './stack-outputs';
 import { makeClient } from './ua';
 
 /**
@@ -119,32 +119,32 @@ export async function runPlatformDoctor(
   options: RunPlatformDoctorOptions,
 ): Promise<DoctorCheckResult[]> {
   const { region, stackName } = options;
-  const [
-    apiUrl,
-    userPoolId,
-    appClientId,
-    githubTokenSecretArn,
-    repoTableName,
-    linearRegistryTableName,
-    jiraRegistryTableName,
-    bedrockGeoRegion,
-    bedrockModelIds,
-    linearVaultWorkloadName,
-    linearProjectMappingTableName,
-  ] = await Promise.all([
-    getStackOutput(region, stackName, 'ApiUrl'),
-    getStackOutput(region, stackName, 'UserPoolId'),
-    getStackOutput(region, stackName, 'AppClientId'),
-    getStackOutput(region, stackName, 'GitHubTokenSecretArn'),
-    getStackOutput(region, stackName, 'RepoTableName'),
-    getStackOutput(region, stackName, 'LinearWorkspaceRegistryTableName'),
-    getStackOutput(region, stackName, 'JiraWorkspaceRegistryTableName'),
-    getStackOutput(region, stackName, 'BedrockGeoRegion'),
-    getStackOutput(region, stackName, 'BedrockModelIds'),
+  const {
+    ApiUrl: apiUrl,
+    UserPoolId: userPoolId,
+    AppClientId: appClientId,
+    GitHubTokenSecretArn: githubTokenSecretArn,
+    RepoTableName: repoTableName,
+    LinearWorkspaceRegistryTableName: linearRegistryTableName,
+    JiraWorkspaceRegistryTableName: jiraRegistryTableName,
+    BedrockGeoRegion: bedrockGeoRegion,
+    BedrockModelIds: bedrockModelIds,
+    LinearVaultWorkloadName: linearVaultWorkloadName,
+    LinearProjectMappingTableName: linearProjectMappingTableName,
+  } = await getStackOutputs(region, stackName, [
+    'ApiUrl',
+    'UserPoolId',
+    'AppClientId',
+    'GitHubTokenSecretArn',
+    'RepoTableName',
+    'LinearWorkspaceRegistryTableName',
+    'JiraWorkspaceRegistryTableName',
+    'BedrockGeoRegion',
+    'BedrockModelIds',
     // Absent unless the stack was deployed with the Linear identity vault enabled.
     // Its absence is the signal that no workspace here is vault-managed.
-    getStackOutput(region, stackName, 'LinearVaultWorkloadName'),
-    getStackOutput(region, stackName, 'LinearProjectMappingTableName'),
+    'LinearVaultWorkloadName',
+    'LinearProjectMappingTableName',
   ]);
 
   const checks: DoctorCheckResult[] = [];
@@ -351,7 +351,8 @@ export async function checkLinearProjectWorkspaces(
     const projectIds = allIds.length > NAMED_LIMIT
       ? `${allIds.slice(0, NAMED_LIMIT).join(', ')} (and ${allIds.length - NAMED_LIMIT} more)`
       : allIds.join(', ');
-    const remedy = 're-run `bgagent linear onboard-project <uuid> --repo <owner/repo>` for each of them';
+    // --label too: onboard-project rewrites the whole mapping and stores the default label when it is left out.
+    const remedy = 're-run `bgagent linear onboard-project <uuid> --repo <owner/repo> --label <its trigger label>` for each of them';
     const unbackedSummary = `${unbacked.length} of ${active.length} active Linear project mapping(s) do not `
       + 'record an owning workspace, so a webhook naming them cannot be checked against the workspace that '
       + `signed it: ${projectIds}.`;
@@ -463,7 +464,7 @@ export async function checkJiraAppIdentity(
       status: 'warn',
       detail: `${incomplete.length} of ${active.length} active Jira tenant(s) will write as the OAuth `
         + `setup user or have incomplete Forge metadata: ${tenantIds}. Run \`bgagent jira app-setup `
-        + '<cloud-id> --proxy-url <forge-v2-url> --stack-name <stack>\` for each tenant.',
+        + '<cloud-id> --proxy-url <forge-v2-url> --stack-name <stack>` for each tenant.',
     };
   } catch (err) {
     return {
@@ -565,7 +566,7 @@ async function checkGithubToken(
     id,
     label,
     status: 'fail',
-    detail: 'GitHub token secret is empty or still the CDK placeholder. Run `bgagent github set-token`.',
+    detail: 'GitHub token secret is empty, still the CDK placeholder, or not in a GitHub token format. Run `bgagent github set-token`.',
   };
 }
 
@@ -656,21 +657,18 @@ async function checkBedrockModel(region: string, modelId: string): Promise<Docto
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    // Match on name AND message, the idiom `checkGithubToken` above already uses. A
-    // real denial carries the identifier ONLY in `err.name`
-    // (`AccessDeniedException`); its message reads "User: … is not authorized to
-    // perform: …". So `message.includes('AccessDenied')` never fires, and an
-    // operator on a least-privilege role got `fail` — which exits doctor non-zero
-    // and reports a healthy stack as broken.
     const failure = classifyProbeFailure(err);
     return {
       id,
       label,
       status: statusFor(failure),
-      detail: failure === 'unverified'
-        ? `${message} The check did not complete, so model access is unknown — re-run before `
-          + 'changing anything.'
-        : `${message} Enable model access in the Bedrock console if tasks fail at invoke time.`,
+      detail: failure === 'denied'
+        ? `${message} That is a permissions gap on the caller, not evidence about the model — `
+          + 're-run with credentials holding bedrock:GetFoundationModel to settle it.'
+        : failure === 'absent'
+          ? `${message} Enable model access in the Bedrock console if tasks fail at invoke time.`
+          : `${message} The check did not complete, so model access is unknown — re-run before `
+            + 'changing anything.',
     };
   }
 }
@@ -732,12 +730,6 @@ async function checkBedrockInferenceProfile(
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    // Match on name AND message, the idiom `checkGithubToken` above already uses. A
-    // real denial carries the identifier ONLY in `err.name`
-    // (`AccessDeniedException`); its message reads "User: … is not authorized to
-    // perform: …". So `message.includes('AccessDenied')` never fires, and an
-    // operator on a least-privilege role got `fail` — which exits doctor non-zero
-    // and reports a healthy stack as broken.
     const failure = classifyProbeFailure(err);
     // The remedy depends on WHICH happened, so it cannot be shared. Rendering the
     // denial case showed why the old shared string was wrong: it appended "Either
@@ -789,13 +781,17 @@ async function checkGrantedModelProfiles(
   const id = 'bedrock_granted_model_profiles';
   const label = 'Every granted Bedrock model has an inference profile';
   if (!bedrockModelIds || !geoRegion) {
+    const missing = [
+      ...(bedrockModelIds ? [] : ['BedrockModelIds']),
+      ...(geoRegion ? [] : ['BedrockGeoRegion']),
+    ].join(' and ');
     return {
       id,
       label,
       status: 'warn',
-      detail: 'Stack does not export BedrockModelIds and BedrockGeoRegion, so the granted '
-        + 'set cannot be enumerated. Redeploy to surface them; until then this check is '
-        + 'skipped rather than assuming a list.',
+      detail: `Stack does not export ${missing}, so the granted inference profiles cannot be `
+        + 'enumerated. Redeploy to surface what is missing; until then this check is skipped '
+        + 'rather than assuming a value.',
     };
   }
 

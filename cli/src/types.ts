@@ -167,6 +167,8 @@ export interface ErrorClassification {
 
 /** Task detail returned by GET /v1/tasks/{task_id}. */
 export interface TaskDetail {
+  /** Configured MicroVM approval-wait delay; 0 disables sleep. Absent on legacy records. */
+  readonly microvm_sleep_after_s?: number;
   readonly task_id: string;
   readonly status: TaskStatusType;
   /** ``null`` for a repo-less workflow (#248 Phase 3). */
@@ -196,13 +198,20 @@ export interface TaskDetail {
   readonly updated_at: string;
   readonly started_at: string | null;
   readonly completed_at: string | null;
-  /** ISO timestamp of the agent's last heartbeat (45 s cadence, every compute
-   *  backend); ``null`` before the first beat or on tasks that never ran. The
+  /** ISO timestamp of the agent's last heartbeat (45 s cadence on agentcore and
+   *  lambda-microvm, once at start on ecs); ``null`` before the first beat or on
+   *  tasks that never ran. The
    *  platform's only in-guest liveness signal, surfaced through the API as of
    *  ADR-021 P2r2-F11 — it was written and consumed internally but hidden from
    *  every operator, which produced a wrong live-verification conclusion. Mirrors
    *  ``cdk/src/handlers/shared/types.ts::TaskDetail``. */
   readonly agent_heartbeat_at: string | null;
+  /** The compute backend the task's session was started on; ``null`` before a
+   *  session starts and on records that predate the field. What a heartbeat
+   *  says differs by backend, so a reader of ``agent_heartbeat_at`` needs it.
+   *  Inlined, like ``errorClass`` above: the CDK types file does not export
+   *  the union's name. */
+  readonly compute_type: 'agentcore' | 'ecs' | 'lambda-microvm' | null;
   readonly duration_s: number | null;
   readonly cost_usd: number | null;
   readonly build_passed: boolean | null;
@@ -213,14 +222,16 @@ export interface TaskDetail {
   readonly otel_trace_id: string | null;
   readonly max_turns: number | null;
   readonly max_budget_usd: number | null;
-  /** Rev-5 DATA-1: attempts counter from the SDK (may be `max_turns + 1`
-   *  when `agent_status='error_max_turns'` — the aborted attempt is
-   *  counted). Required to match ``cdk/src/handlers/shared/types.ts``
-   *  (server always emits the field, defaulted to ``null`` in
-   *  ``toTaskDetail`` when absent on the record). */
+  /** Rev-5 DATA-1: the Claude Code CLI's own turn count, kept for
+   *  debugging. Not the count `max_turns` limits, and it can exceed the
+   *  limit on a task that never reached it: see ``TaskResult`` in
+   *  ``agent/src/models.py``. Required to match
+   *  ``cdk/src/handlers/shared/types.ts`` (server always emits the field,
+   *  defaulted to ``null`` in ``toTaskDetail`` when absent on the record). */
   readonly turns_attempted: number | null;
-  /** Rev-5 DATA-1: turns that actually completed (clamped to
-   *  `max_turns` when the cap tripped). Required; see
+  /** Rev-5 DATA-1: turns that actually completed: the model's answers,
+   *  which is what `max_turns` limits (clamped to it). ``bgagent status``
+   *  shows it against the limit once the task has finished. Required; see
    *  ``turns_attempted`` above. */
   readonly turns_completed: number | null;
   /** Whether the task was submitted with ``--trace``. Surfaces in
@@ -360,6 +371,10 @@ export interface TaskSummary {
    * other package's `types.ts`.
    */
   readonly agent_heartbeat_at: string | null;
+  /** The compute backend the task's session was started on; ``null`` before a
+   *  session starts and on records that predate the field. On the summary beside
+   *  ``agent_heartbeat_at``, because what a heartbeat says differs by backend. */
+  readonly compute_type: 'agentcore' | 'ecs' | 'lambda-microvm' | null;
   /**
    * Estimated spend in USD (null until the agent reports one). On the summary so a
    * cost view can total a page of tasks without one detail call per task.
@@ -393,6 +408,97 @@ export interface PersonalBudgetStatus {
   readonly hard_stop_active: boolean;
 }
 
+/** What a finished task counts as on the scoreboard. `failed`, `cancelled` and `timed_out` are the statuses of those names; `verified_pr`, `unverified_pr` and `no_new_pr` split the completed tasks. */
+export type TaskOutcome = 'verified_pr' | 'unverified_pr' | 'no_new_pr' | 'failed' | 'cancelled' | 'timed_out';
+
+/** A place the work waited for, or was redirected by, a person. `approve` counts approval requests, whatever the answer. */
+export type TouchpointKind = 'approve' | 'clarify' | 'follow_up' | 'cancel';
+
+/** The state on GitHub of a new pull request that ABCA follows, as its reads recorded it. `unread`: no read has recorded one yet, or a read found no pull request of the task under the recorded number and does not ask again. In `pull_requests` it is the state at the period's end: a merge or a close after that end counts as `open`. */
+export type PullRequestState = 'merged' | 'closed' | 'open' | 'unread';
+
+/** How far back a scoreboard looks: that many days up to now. */
+export type ScoreboardRange = '7d' | '30d';
+
+/** `count` of `total`. A rate is count / total; with a total of 0 there is none. */
+export interface Fraction {
+  readonly count: number;
+  readonly total: number;
+}
+
+/** A count, with the ids of up to 10 of the tasks behind it. */
+export interface Flagged {
+  readonly count: number;
+  readonly task_ids: readonly string[];
+}
+
+/** The median and the 90th percentile of durations in whole seconds, and how many durations there are. */
+export interface DurationSummary {
+  readonly p50: number;
+  readonly p90: number;
+  readonly count: number;
+}
+
+/** The scoreboard's numbers over the tasks that finished in one period. */
+export interface ScoreboardPeriod {
+  /** ISO bounds: tasks that finished at or after `from` and before `to`. The current period has no upper test: a finish time ahead of the clock belongs to it. */
+  readonly from: string;
+  readonly to: string;
+  /** Tasks that reached a terminal state, and their split. */
+  readonly finished: number;
+  readonly outcomes: Readonly<Record<TaskOutcome, number>>;
+  /** Seconds from task creation to a verified pull request; null when there is none. With fewer than 10 values, `p90` is the largest or close to it. */
+  readonly time_to_verified_pr_s: DurationSummary | null;
+  /** Median seconds from creation to the start of the session, time in the admission queue included, over the verified pull requests above whose start is known; null when there is none. */
+  readonly wait_p50_s: number | null;
+  /** Tasks that waited in the admission queue, of the tasks that waited or ran. */
+  readonly queued: Fraction;
+  /** Verified pull requests, of the tasks that asked for a new pull request. */
+  readonly verified: Fraction;
+  /** New pull requests with no follow-up task before the period's end (a follow-up known to have changed no code is not one), of the new pull requests whose number is known. */
+  readonly not_reworked: Fraction;
+  /** Verified pull requests whose task never stopped for a person, of the tasks that asked for a new pull request. */
+  readonly untouched: Fraction;
+  /** Touchpoints on coding tasks. Shown per verified pull request: divide the sum by `outcomes.verified_pr`. */
+  readonly touchpoints: Readonly<Record<TouchpointKind, number>>;
+  /** Recorded spend of coding tasks, all outcomes, to the micro-dollar. Shown per verified pull request: divide by `outcomes.verified_pr`. */
+  readonly spend_usd: number;
+  /** Coding tasks that ran and recorded no cost: `spend_usd` under-counts by them. */
+  readonly uncosted: number;
+  /** Finished tasks of any kind, not only coding tasks, that a guardrail stopped; newest first. Each is also one of `outcomes.failed`. */
+  readonly guardrail_stops: Flagged;
+  /** Finished tasks of any kind that were submitted with every approval granted in advance; newest first. */
+  readonly blanket_approvals: Flagged;
+  /** Coding tasks that stopped for at least one approval request, of the coding tasks that ran. */
+  readonly gated: Fraction;
+  /** The new pull requests of the period that ABCA follows, by their state at the period's end: the four add up to those pull requests. A pull request opened by a task of an orchestration is not followed, and is in none of them. Shown as the merged share: `merged` of `merged` + `closed` + `open`, with `unread` outside it. */
+  readonly pull_requests: Readonly<Record<PullRequestState, number>>;
+  /** Merged pull requests nobody sent back first (no change request by a reviewer with write access, no reworking follow-up before the merge), of the merged ones. */
+  readonly merged_clean: Fraction;
+  /** Seconds from task creation to the merge, over the pull requests merged before the period's end; null when none was merged. */
+  readonly time_to_merge_s: DurationSummary | null;
+  /** Seconds from the end of the task to the first review of its pull request by a person with write access to the repository, other than the pull request's author, over the merged ones that had one; null when none had. A review before that end counts as 0. */
+  readonly first_review_s: DurationSummary | null;
+}
+
+/** GET /v1/tasks?view=scoreboard: the caller's scoreboard for a range. */
+export interface Scoreboard {
+  readonly range: ScoreboardRange;
+  /** The read hit its cap inside the current period: `current` starts later than the range asked for, and `previous` is null. */
+  readonly truncated: boolean;
+  readonly current: ScoreboardPeriod;
+  /** The period of equal length before `current`; null when the read did not cover it. */
+  readonly previous: ScoreboardPeriod | null;
+  /**
+   * New pull requests that ABCA follows and that were open at its last read more than 7 days
+   * after their task finished, oldest first, over the tasks of both periods. Null when the
+   * count is not known: the read did not cover the earlier period, so the pull requests of
+   * the tasks it left out would be missing; or some pull requests are that old and ABCA has
+   * read none of them on GitHub.
+   */
+  readonly open_over_7d: Flagged | null;
+}
+
 /** Task event returned by GET /v1/tasks/{task_id}/events. */
 export interface TaskEvent {
   readonly event_id: string;
@@ -404,25 +510,6 @@ export interface TaskEvent {
   readonly user_id?: string;
   readonly repo?: string;
   readonly trace_id?: string;
-}
-
-/**
- * Query parameters accepted by GET /v1/tasks/{task_id}/events.
- *
- * ``after`` and ``next_token`` are mutually exclusive — if both are sent the
- * server prefers ``after`` (and logs a warning). ``after`` is a ULID event_id
- * cursor used by the CLI to catch up on the next polling iteration. Keep in
- * sync with ``cdk/src/handlers/shared/types.ts``.
- */
-export interface GetTaskEventsQuery {
-  readonly limit?: number;
-  readonly next_token?: string;
-  readonly after?: string;
-  /**
-   * When ``"1"``, requests events in descending ``event_id`` order
-   * (newest first). Mutually exclusive with ``after`` on the server.
-   */
-  readonly desc?: string;
 }
 
 /** Wire format — parsed from untrusted JSON. Validate before use. */
@@ -462,6 +549,8 @@ export interface CreateTaskResponse extends TaskDetail {
 
 /** Create task request body for POST /v1/tasks. */
 export interface CreateTaskRequest {
+  /** MicroVM approval-wait seconds before sleep (0 = off, omitted = the platform default). Does not extend approval deadlines. */
+  readonly microvm_sleep_after_s?: number;
   /** Optional since #248 Phase 3: repo-less workflows submit without it. */
   readonly repo?: string;
   readonly issue_number?: number;
@@ -568,6 +657,8 @@ export interface CreateWebhookResponse {
   readonly webhook_id: string;
   readonly name: string;
   readonly secret: string;
+  /** URL that external systems post tasks to; the same for every webhook of a deployment. */
+  readonly webhook_url: string;
   readonly created_at: string;
 }
 
@@ -702,6 +793,9 @@ export interface CliConfig {
   readonly region: string;
   readonly user_pool_id: string;
   readonly client_id: string;
+  /** Stack the config was read from (`bgagent setup`, `configure --stack-name`); lets
+   *  feature guards check a stack when a subcommand takes no `--stack-name`. */
+  readonly stack_name?: string;
 }
 
 /** Cached credentials stored in ~/.bgagent/credentials.json.
@@ -717,7 +811,7 @@ export interface Credentials {
 }
 
 /** Terminal task statuses. */
-export const TERMINAL_STATUSES = ['COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT'] as const;
+export const TERMINAL_STATUSES: readonly TaskStatusType[] = ['COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT'];
 
 /**
  * Default coding workflow id. A bare ``bgagent submit --repo X --task Y``
@@ -747,14 +841,6 @@ export type ApprovalScope =
   | `bash_pattern:${string}`
   | `write_path:${string}`
   | `rule:${string}`;
-
-/** Approval row terminal / pending status. */
-export type ApprovalStatus =
-  | 'PENDING'
-  | 'APPROVED'
-  | 'DENIED'
-  | 'TIMED_OUT'
-  | 'STRANDED';
 
 /** POST /v1/tasks/{task_id}/approve request body. */
 export interface ApprovalRequest {
@@ -849,8 +935,10 @@ export const APPROVAL_TIMEOUT_S_MIN = 30;
 /** Upper bound on approval_timeout_s submission (before maxLifetime clip). */
 export const APPROVAL_TIMEOUT_S_MAX = 3600;
 
-/** Default approval_timeout_s when the submit payload omits it. */
-export const APPROVAL_TIMEOUT_S_DEFAULT = 300;
+/** Per-task MicroVM sleep delay bounds; zero disables automatic sleep. */
+export const MICROVM_SLEEP_AFTER_S_MIN = 0;
+export const MICROVM_SLEEP_AFTER_S_MAX = 3600;
+export const MICROVM_SLEEP_AFTER_S_DEFAULT = 60;
 
 /** Minimum allowed max_budget_usd (1 cent).
  *  Sourced from ``contracts/constants.json`` via cdk types.ts (#258). */

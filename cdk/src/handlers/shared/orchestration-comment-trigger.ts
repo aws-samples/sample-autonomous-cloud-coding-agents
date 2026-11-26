@@ -50,10 +50,11 @@ export interface CommentTrigger {
  * critically, on the agent's OWN progress comments which never contain the
  * mention token):
  *  - Must contain ``@bgagent`` (case-insensitive), as a token boundary so
- *    ``@bgagentx`` / an email-like ``foo@bgagent.io`` do NOT trigger.
+ *    ``@bgagentx`` / an email-like ``foo@bgagent.io`` do NOT trigger. A mention
+ *    that ends a sentence (``… onto main, @bgagent.``) does.
  *  - The instruction is everything after stripping the token (all occurrences),
- *    collapsed/trimmed. A bare ``@bgagent`` with no text still triggers
- *    (instruction === '').
+ *    trimmed, with its line breaks and indentation kept. A bare ``@bgagent``
+ *    with no text still triggers (instruction === '').
  */
 export function parseCommentTrigger(body: string | undefined | null): CommentTrigger {
   if (!body) return { triggered: false, instruction: '' };
@@ -68,11 +69,17 @@ export function parseCommentTrigger(body: string | undefined | null): CommentTri
   // we test the trimmed start.) Keep this list in sync with the rendered
   // comment prefixes (panel, acks, disambiguation, agent progress).
   if (isBotAuthoredComment(body)) return { triggered: false, instruction: '' };
-  // Token-boundary match: @bgagent not immediately followed by a word char or
-  // a '.' (so it won't fire on @bgagentbot or an @bgagent.io address).
-  const re = /@bgagent(?![\w.])/gi;
+  // Token-boundary match: @bgagent not immediately followed by a word char, nor
+  // by a '.' that starts one (so it won't fire on @bgagentbot or an @bgagent.io
+  // address). The match takes the full stops that only end the sentence and one
+  // space on each side, and a single space replaces it. The rest of the comment
+  // stays as the reviewer wrote it: line breaks and indentation carry the
+  // meaning of a list or a code block. (` ?`, not ` *`: an unbounded run in
+  // front of the token would be scanned again from each of its spaces.)
+  const re = / ?@bgagent(?!\w|\.\w)\.* ?/gi;
   if (!re.test(body)) return { triggered: false, instruction: '' };
-  const instruction = body.replace(/@bgagent(?![\w.])/gi, ' ').replace(/\s+/g, ' ').trim();
+  // replace() restarts a global pattern from index 0, whatever test() left.
+  const instruction = body.replace(re, ' ').trim();
   return { triggered: true, instruction };
 }
 
@@ -119,9 +126,9 @@ const NEAR_MISS_MENTION_PATTERNS: readonly RegExp[] = [
   // @abca (+ optional :suffix) — the label-name confusion.
   /@abca\b/i,
   // @bgagent immediately followed by a word char — a boundary-miss that
-  // parseCommentTrigger's `@bgagent(?![\w.])` deliberately does NOT trigger
-  // (@bgagentbot, @bgagentx). NOT `@bgagent ` (a space → real trigger) nor
-  // `@bgagent.` (an email-like foo@bgagent.io → not a mention).
+  // parseCommentTrigger's `@bgagent(?!\w|\.\w)` deliberately does NOT trigger
+  // (@bgagentbot, @bgagentx). NOT `@bgagent ` or a sentence-ending `@bgagent.`
+  // (real triggers) nor `@bgagent.io` (an email-like foo@bgagent.io → not a mention).
   /@bgagent\w/i,
   // Hyphen/underscore variants. The separator is REQUIRED (not optional) so these
   // match @bg-agent / @bg_agent but NOT the canonical @bgagent (which parses as a

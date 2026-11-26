@@ -30,42 +30,20 @@ from pydantic import BaseModel
 
 import task_state
 from config import resolve_github_token
+from microvm_http import microvm_resume, microvm_suspend
+from microvm_lifecycle import (
+    LifecycleUnavailable,
+    get_context,
+    get_registered_context,
+    register_task,
+    reseed_random,
+    unregister_task,
+)
 from models import TaskResult
 from observability import propagate_correlation_context
 from pipeline import run_task
 from shared_constants import SHARED_CONSTANTS
-
-# --- _debug_cw / _warn_cw failure counter -------------------------------
-# Shared counter for BOTH the debug and warn CloudWatch writers. AgentCore
-# doesn't forward container stdout to APPLICATION_LOGS, so a broken writer
-# is invisible except for this metric. Single counter = single alarm
-# surface — the trade-off is that the alarm can't distinguish which writer
-# is broken (see Chunk 7c review notes). Defined BEFORE any function that
-# references it (including ``_debug_cw`` / ``_warn_cw``) so the ordering is
-# import-time safe: a daemon thread spawned from a write-blocking function
-# can never race with module-level globals still being assigned.
-_debug_cw_failures = 0
-_debug_cw_failures_lock = threading.Lock()
-_DEBUG_CW_FAILURE_EMIT_EVERY = 5
-
-# Only redact secrets at least this long — replacing very short strings
-# would mangle unrelated text that happens to contain them.
-_MIN_REDACTABLE_SECRET_LEN = 12
-
-
-def _redact_cached_credentials(text: str) -> str:
-    """Remove cached env secrets from debug text before stdout / CloudWatch."""
-    out = text
-    for env_key in (
-        "GITHUB_TOKEN",
-        "LINEAR_API_TOKEN",
-        "JIRA_API_TOKEN",
-        "JIRA_APP_ACTOR_SHARED_SECRET",
-    ):
-        secret = os.environ.get(env_key) or ""
-        if len(secret) >= _MIN_REDACTABLE_SECRET_LEN:
-            out = out.replace(secret, f"<{env_key}_REDACTED>")
-    return out
+from shell import redact_secrets
 
 
 def _emit_stdout_line(stamped: str) -> None:
@@ -75,7 +53,7 @@ def _emit_stdout_line(stamped: str) -> None:
     instead of ``print``/``sys.stdout.write`` keeps lines visible in
     local runs without tripping CodeQL's cleartext-logging sinks (which
     model print and TextIOWrapper.write only) — callers MUST have
-    already routed content through ``_redact_cached_credentials``.
+    already routed content through ``shell.redact_secrets``.
     """
     line = (stamped + "\n").encode("utf-8", errors="replace")
     try:
@@ -99,7 +77,7 @@ def _debug_cw(msg: str, *, task_id: str | None = None) -> None:
     Always prints to stdout so local docker-compose runs see the line
     immediately. CloudWatch writes are best-effort fire-and-forget.
     """
-    msg = _redact_cached_credentials(msg)
+    msg = redact_secrets(msg)
     stamped = f"[server/debug] {msg}"
     _emit_stdout_line(stamped)
 
@@ -132,25 +110,25 @@ def _warn_cw(msg: str, *, task_id: str | None = None) -> None:
     """Emit a server-level warning to stdout AND CloudWatch.
 
     Chunk 7c — AgentCore doesn't forward container stdout to
-    APPLICATION_LOGS (see the ``_debug_cw`` comment block above), so
-    warning ``print`` calls about malformed invocation payloads are
-    effectively invisible in production. Route them through the same
-    daemon-thread CloudWatch writer used by ``_debug_cw`` (writing to
-    the ``server_warn/<task_id>`` stream so operators can alarm on
-    warn traffic separately from debug noise).
+    APPLICATION_LOGS, so warning ``print`` calls about malformed
+    invocation payloads are effectively invisible in production. Route
+    them through the same daemon-thread CloudWatch writer used by
+    ``_debug_cw`` (writing to the ``server_warn/<task_id>`` stream so
+    operators can alarm on warn traffic separately from debug noise).
 
     The stdout emission is preserved so local ``docker-compose`` runs
     and the ``capfd``-based unit tests still observe the line.
-    CloudWatch delivery is fire-and-forget — failures bump the
-    shared ``_debug_cw_failures`` counter via ``_warn_cw_write_blocking``
-    so a silently broken writer still surfaces via that single metric.
+    CloudWatch delivery is fire-and-forget: a failed write leaves one
+    ``[server/warn/self] CloudWatch write failed`` line on stdout
+    (``_warn_cw_write_blocking``). Nothing counts those lines, and no
+    metric or alarm is fed by them.
     """
     # Redact cached credentials and emit via the same os.write path as
     # ``_debug_cw``: warn messages can embed payload fragments, so they
     # get the same sanitizer + non-print sink treatment (CodeQL
     # clear-text-logging models print/TextIOWrapper.write only; content
     # is redacted above regardless).
-    msg = _redact_cached_credentials(msg)
+    msg = redact_secrets(msg)
     stamped = f"[server/warn] {msg}"
     _emit_stdout_line(stamped)
 
@@ -172,9 +150,8 @@ def _warn_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) -
 
     Mirrors ``_debug_cw_write_blocking`` but writes to the
     ``server_warn/<task_id>`` stream so warn-level traffic is easy to
-    alarm on independently of debug breadcrumbs. Failures bump the
-    shared ``_debug_cw_failures`` counter — a single alarm surface
-    covers both writers.
+    alarm on independently of debug breadcrumbs. A failed write is
+    reported on stdout only, like a failed debug write.
     """
     try:
         from aws_session import platform_client
@@ -192,9 +169,6 @@ def _warn_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) -
             logEvents=[{"timestamp": int(_time_for_debug.time() * 1000), "message": stamped}],
         )
     except Exception as _exc:
-        global _debug_cw_failures
-        with _debug_cw_failures_lock:
-            _debug_cw_failures += 1
         print(
             f"[server/warn/self] CloudWatch write failed: {type(_exc).__name__}: {_exc}",
             flush=True,
@@ -219,28 +193,11 @@ def _debug_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) 
             logEvents=[{"timestamp": int(_time_for_debug.time() * 1000), "message": stamped}],
         )
     except Exception as _exc:
-        # Never let debug logging break the request path. Bump the failure
-        # counter so operators can alarm on a blind debug path.
-        global _debug_cw_failures
-        with _debug_cw_failures_lock:
-            _debug_cw_failures += 1
+        # Never let debug logging break the request path.
         print(
             f"[server/debug/self] CloudWatch write failed: {type(_exc).__name__}: {_exc}",
             flush=True,
         )
-
-
-# Log the active event loop policy at import time.
-# CRITICAL: use plain ``print`` here, NOT ``_debug_cw``, to avoid spawning a
-# daemon thread during module import. In-container, that thread's first
-# boto3 call contends with uvicorn's startup for the single scarce CPU
-# slot and can make ``GET /ping`` return slow enough for AgentCore's
-# health-check to fail.
-_policy = asyncio.get_event_loop_policy()
-print(
-    f"[server/debug] boot: event_loop_policy={type(_policy).__module__}.{type(_policy).__name__}",
-    flush=True,
-)
 
 
 # Suppress noisy /ping health check access logs from uvicorn
@@ -273,7 +230,16 @@ def _heartbeat_worker(task_id: str, stop: threading.Event) -> None:
     """Periodically refresh ``agent_heartbeat_at`` so the orchestrator can detect crashes."""
     while not stop.wait(timeout=_HEARTBEAT_INTERVAL_SECONDS):
         try:
-            task_state.write_heartbeat(task_id)
+            lifecycle = get_context(task_id)
+            if lifecycle:
+                with lifecycle.activity():
+                    task_state.write_heartbeat(task_id)
+            else:
+                task_state.write_heartbeat(task_id)
+        except LifecycleUnavailable:
+            # An approval waiter has no liveness obligation while frozen.
+            # Resume must refresh credentials before another heartbeat writes.
+            continue
         except Exception as e:
             print(
                 f"[heartbeat] write_heartbeat error (will retry): {type(e).__name__}: {e}",
@@ -417,6 +383,7 @@ def _run_task_background(
     workload_access_token: str = "",
     attachments: list[dict] | None = None,
     resolved_assets: list[dict] | None = None,
+    microvm_id: str = "",
 ) -> None:
     """Run the agent task in a background thread."""
     global _background_pipeline_failed
@@ -456,6 +423,14 @@ def _run_task_background(
         task_id=task_id,
     )
 
+    lifecycle = register_task(task_id, microvm_id) if microvm_id else None
+    if lifecycle is not None:
+        # Sockets idle across a long suspend can be dropped silently (VPC
+        # endpoint/NAT idle timeout is 350 s), so the first model call after
+        # wake can wait for headers that never arrive. Claude Code's default
+        # wait is 300 s; fail fast and retry instead. Streamed bodies keep
+        # their own idle watchdog, so long generations are unaffected.
+        os.environ.setdefault("API_TIMEOUT_MS", "120000")
     stop_heartbeat = threading.Event()
     hb_thread: threading.Thread | None = None
     if task_id:
@@ -521,9 +496,17 @@ def _run_task_background(
             )
             task_state.write_terminal(task_id, "FAILED", backup.model_dump())
     finally:
+        if lifecycle:
+            unregister_task(lifecycle)
         stop_heartbeat.set()
         if hb_thread is not None and hb_thread.is_alive():
             hb_thread.join(timeout=3)
+        # After the last write for this task: a reused server must be able to
+        # build the next task's session (#904 review).
+        if task_id:
+            from aws_session import release_session
+
+            release_session(task_id)
 
 
 def _extract_invocation_params(inp: dict, request: Request) -> dict:
@@ -856,6 +839,11 @@ async def invoke_agent(request: Request, body: InvocationRequest):
 # hooks served here.
 MICROVM_HOOK_PREFIX = "/aws/lambda-microvms/runtime/v1"
 
+# ADR-021 P3: the guest answers /suspend and /resume (microvm_http). An unsafe
+# suspend is declined with 200 so the service never terminates the worker.
+app.add_api_route(f"{MICROVM_HOOK_PREFIX}/suspend", microvm_suspend, methods=["POST"])
+app.add_api_route(f"{MICROVM_HOOK_PREFIX}/resume", microvm_resume, methods=["POST"])
+
 #: ``s3://`` scheme prefix for the out-of-band payload pointer.
 _S3_URI_SCHEME = "s3://"
 
@@ -890,7 +878,7 @@ _S3_URI_SCHEME = "s3://"
 # compile-time enforcement of the key names via ``resolveJsonModule``) rather
 # than re-declaring the key names. ``mise run check:constants-sync``
 # (``scripts/check-constants-sync.ts``) validates this block's shape and rejects a
-# literal re-declaration of either constant below in the Python consumers.
+# literal re-declaration of any of the four constants below in the Python consumers.
 _PLATFORM_CONFIG_CONTRACT: dict[str, Any] = SHARED_CONSTANTS["microvm_platform_config"]
 
 #: ``platform_config`` key (snake_case) → environment variable it becomes.
@@ -1173,8 +1161,9 @@ def _reject_foreign_arns(resolved: dict[str, str]) -> None:
     differ on that axis in this system — IAM is global (empty region field), and a
     cross-Region secret is a supported deployment shape — so requiring agreement
     would reject valid configurations while adding nothing: the execution role's
-    grants are account-scoped, so an in-account cross-Region ARN reaches nothing
-    the in-Region one does not. Partition + account is the boundary this checks.
+    Secrets Manager grants are Region-scoped (each names the Region of the secrets
+    it covers), so IAM already refuses an in-account ARN in a Region no grant
+    names. Partition + account is the boundary this checks.
     """
     anchor_value = resolved.get(MICROVM_PLATFORM_CONFIG_ACCOUNT_ANCHOR_KEY, "")
     # The anchor is contract-guaranteed REQUIRED (asserted at import), so by the
@@ -1356,7 +1345,7 @@ def _aws_silent_log(msg: str, *, tag: str) -> None:
     Routes through the same ``os.write`` sink and credential redaction as
     ``_debug_cw``, so local runs and the ``capfd``-based tests still see the line.
     """
-    _emit_stdout_line(f"[server/{tag}] {_redact_cached_credentials(msg)}")
+    _emit_stdout_line(f"[server/{tag}] {redact_secrets(msg)}")
 
 
 def _build_hook_log(msg: str) -> None:
@@ -1368,9 +1357,8 @@ def _build_hook_log(msg: str) -> None:
     1. The build role's Logs grant is scoped to the service's own
        ``/aws/lambda-microvms/*`` namespace, so a write to any OTHER
        ``LOG_GROUP_NAME`` — e.g. an APPLICATION_LOGS group baked into a legacy or
-       hand-built image — can only FAIL. That failure bumps the shared
-       ``_debug_cw_failures`` counter, i.e. such an image build would poison the
-       "debug path is blind" signal with a false positive.
+       hand-built image — can only FAIL, and all it would leave is a
+       ``CloudWatch write failed`` line on stdout per attempt.
     2. ``boto3.DEFAULT_SESSION`` created during ``/ready`` freezes the BUILD role's
        CREDENTIALS into the snapshot, where every launched MicroVM would inherit
        them (region is re-resolved per client; credentials are not — see
@@ -1444,6 +1432,7 @@ def _parse_terminate_microvm_id(raw: bytes) -> str:
         # Not silent: an unreadable body is worth a breadcrumb even though it
         # cannot change the outcome.
         _emit_stdout_line(f"[server/warn] /terminate hook body is not JSON ({exc}); ignoring it")
+        # nosemgrep: py-silent-success-masking -- /terminate must answer 200 for ANY body (see docstring); "" is the EXPECTED production id, raising would report a hook failure for a teardown that succeeded, and the unreadable body is logged above  # noqa: E501
         return ""
     if not isinstance(parsed, dict):
         _emit_stdout_line(
@@ -1895,10 +1884,10 @@ def microvm_validate():
 
     It must also not touch credential resolution: ``platform_config`` has not
     arrived yet (it comes with ``/run``), and any client built here would leave a
-    resolved boto3 session — with the build role's credentials and the build
-    region — frozen in the snapshot for every MicroVM launched from it. Hence
-    ``_build_hook_log`` instead of ``_debug_cw``, and no import of
-    ``aws_session``.
+    resolved boto3 session — with the build role's credentials — frozen in the
+    snapshot for every MicroVM launched from it (credentials only: the region is
+    re-resolved per client, see ``_aws_silent_log``). Hence ``_build_hook_log``
+    instead of ``_debug_cw``, and no import of ``aws_session``.
 
     What it CAN prove, all in-process:
 
@@ -1929,7 +1918,8 @@ def microvm_validate():
     would fail every build. Names only — never values.
     """
     expected_routes = {
-        f"{MICROVM_HOOK_PREFIX}/{hook}" for hook in ("ready", "validate", "run", "terminate")
+        f"{MICROVM_HOOK_PREFIX}/{hook}"
+        for hook in ("ready", "validate", "run", "terminate", "suspend", "resume")
     }
     registered = {getattr(route, "path", None) for route in app.routes}
     missing_routes = sorted(expected_routes - registered)
@@ -1939,6 +1929,12 @@ def microvm_validate():
         "hook_routes_registered": not missing_routes,
         "python_version_supported": sys.version_info[:2] >= _MIN_PYTHON_VERSION,
         "platform_config_contract_loaded": bool(MICROVM_PLATFORM_CONFIG_ENV_BY_KEY),
+        # Absent markers support ordinary/legacy images. A marked image must
+        # actually contain the protocol it advertises, before AWS snapshots it.
+        "image_lifecycle_protocol_supported": os.environ.get(
+            SHARED_CONSTANTS["microvm_lifecycle"]["image_protocol_env"]
+        )
+        in (None, str(SHARED_CONSTANTS["microvm_lifecycle"]["protocol_version"])),
     }
     failed = sorted(name for name, ok in checks.items() if not ok)
 
@@ -1983,6 +1979,11 @@ def microvm_validate():
     return body
 
 
+# The terminate body is only optional correlation data. Leave ample headroom
+# inside the image's 15-second hook timeout if the service stream stalls.
+_TERMINATE_BODY_BUDGET_SECONDS = 1.0
+
+
 @app.post(f"{MICROVM_HOOK_PREFIX}/terminate")
 async def microvm_terminate(request: Request):
     """MicroVM ``/terminate`` runtime hook — best-effort flush, always 200.
@@ -2017,10 +2018,20 @@ async def microvm_terminate(request: Request):
     than a flush loop. (ADR-021 sub-decision 2's "flush progress events before
     returning 200" applies to ``/suspend`` in P3 for the same reason: durability
     is per-write, so the hook only has to observe it.)
+
+    P3: close the local coding barrier first, so a slow suspend/resume thread
+    cannot release coding during teardown, and bound the body read.
     """
+    try:
+        lifecycle = get_registered_context()
+        if lifecycle is not None:
+            lifecycle.close()
+    except Exception as exc:
+        _emit_stdout_line(f"[server/warn] /terminate barrier close failed: {type(exc).__name__}")
     raw = b""
     try:
-        raw = await request.body()
+        async with asyncio.timeout(_TERMINATE_BODY_BUDGET_SECONDS):
+            raw = await request.body()
     except Exception as exc:
         # A truncated/aborted body must not become a 5xx: the VM is going away and
         # the id is only a correlation string. Logged, not swallowed.
@@ -2239,7 +2250,8 @@ def microvm_run(request: Request, body: MicrovmRunHookRequest):
             },
         )
 
-    _spawn_background(params)
+    reseed_random()
+    _spawn_background({**params, "microvm_id": body.microvmId})
     task_id = params["task_id"]
     # Carries microvm_id as well as task_id: the "/run hook received" line that
     # used to correlate the two is stdout-only now (pre-install), so this is the

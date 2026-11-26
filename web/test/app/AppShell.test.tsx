@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { fireEvent, screen, waitFor } from '@testing-library/react';
+import { createEvent, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 import { afterEach, describe, expect, it } from 'vitest';
 import { MOCK_IDS } from '../../src/mocks/fixtures';
@@ -37,9 +37,30 @@ describe('AppShell', () => {
 
     await waitFor(() => expect(first('Notifications: 1 approval request')).toBeInTheDocument());
     fireEvent.click(first('Notifications: 1 approval request'));
-    const item = await screen.findByText('Infrastructure changes require approval');
+    const item = await screen.findByText('Soft-deny: terraform_apply');
     fireEvent.click(item);
     await waitFor(() => expect(router.state.location.pathname).toBe(`/tasks/${MOCK_IDS.awaiting}`));
+  });
+
+  it('lists the scoreboard between repositories and costs, and marks it on its own page', async () => {
+    renderRoute('/scoreboard');
+    await screen.findByRole('heading', { name: 'Scoreboard', level: 1 });
+    const entries = within(screen.getByRole('navigation')).getAllByRole('link').map((link) => link.textContent);
+    expect(entries).toEqual(['Factory', 'Overview', 'Tasks', 'Repositories', 'Scoreboard', 'Costs']);
+    expect(screen.getByRole('link', { name: 'Scoreboard' })).toHaveAttribute('aria-current', 'page');
+    expect(screen.getByRole('link', { name: 'Costs' })).not.toHaveAttribute('aria-current');
+  });
+
+  it('keeps a click on the console title inside the app', async () => {
+    const { router } = renderRoute('/tasks');
+    await screen.findByRole('heading', { name: 'Tasks', level: 1 });
+    // The title is a link to "/": a click the app does not take over makes the browser load
+    // the whole console again.
+    const title = screen.getByRole('link', { name: 'ABCA Operator Console' });
+    const click = createEvent.click(title);
+    fireEvent(title, click);
+    expect(click.defaultPrevented).toBe(true);
+    await waitFor(() => expect(router.state.location.pathname).toBe('/'));
   });
 
   it('says so when nothing is waiting', async () => {

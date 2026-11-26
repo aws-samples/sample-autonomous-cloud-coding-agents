@@ -23,11 +23,13 @@
 //
 //   - namespace-in-`name` encoding (Option A): Agent Registry has no namespace, so we
 //     fold `kind/namespace/name` into the record `name` and split on read.
-//   - native-vs-CUSTOM storage: purist native descriptors (MCP/SKILL)
-//     by default, carrying ABCA runtime config in a `_meta` block; `custom:true`
-//     stores a verbatim CUSTOM body instead.
+//   - native-vs-CUSTOM storage: purist native descriptors (MCP/SKILL) by default,
+//     each carrying the ABCA runtime config where its format has room for it: MCP in
+//     a `_meta` block of server.json, SKILL in the `x-abca-runtime` frontmatter key
+//     of SKILL.md. `custom:true` stores a verbatim CUSTOM body instead.
 //   - 3-call publish: CreateRegistryRecord is async and lands in DRAFT even with
-//     registry autoApproval; `autoApprove` drives create→submit→approve.
+//     registry autoApproval. Create and submit always run, so the record reaches
+//     PENDING_APPROVAL; `autoApprove` gates only the third call, the approval.
 //   - resolve ranks semver in code (Agent Registry stores a plain version string).
 
 import {
@@ -68,7 +70,11 @@ import {
 
 const NAME_SEP = '/';
 const RECORD_CREATE_POLL_MS = 2000;
-const RECORD_CREATE_MAX_POLLS = 30;
+// 20 s of waiting. The publish Lambda, the only caller, has 28 s for this wait and
+// the calls around it (REGISTRY_PUBLISH_TIMEOUT_SECONDS in constructs/registry-api.ts).
+// A wait the function cannot outlive ends in a gateway error that names no record,
+// instead of the RegistryPublishIncompleteError below.
+const RECORD_CREATE_MAX_POLLS = 10;
 
 /** True when a runtime payload is a non-empty object — the fail-closed gate that
  *  keeps `resolve` from returning a record whose runtime is missing/`{}` (which
@@ -202,7 +208,14 @@ function parseSkillFrontmatter(skillMd: string): Record<string, unknown> {
   if (!m) return {};
   let parsed: unknown;
   try {
-    parsed = yaml.load(m[1], { json: true });
+    // `loadAll` plus a count rather than `load`: since js-yaml 5, `load` throws on a block
+    // with no document in it (empty, blank lines, only comments), which 4.x answered with
+    // undefined. Such a block is handled below; several documents remain an error.
+    const documents = yaml.loadAll(m[1], { json: true });
+    if (documents.length > 1) {
+      throw new Error('expected a single document in the stream, but found more');
+    }
+    parsed = documents[0];
   } catch (err) {
     throw new RegistryRecordMalformedError(
       'MALFORMED_FRONTMATTER',
@@ -431,7 +444,7 @@ export class AgentRegistryClient implements RegistryClient {
   ): Promise<RegistryRecord | null> {
     // Agent Registry keys records by opaque id, not our coordinates, and List is
     // eventually consistent — so scan the (small) record set and match.
-    const entries = await this.loadEntries({ kind, namespace });
+    const entries = await this.loadEntries({ kind, namespace, name });
     const match = entries.find(
       (e) => entryCoords(e).name === name && entryCoords(e).version === version,
     );
@@ -482,7 +495,9 @@ export class AgentRegistryClient implements RegistryClient {
 
   /** Load every record matching `filter` as an entry that is either a parsed
    *  record or a malformed marker. O(n): List + one GetRegistryRecord per
-   *  summary, and every read path (resolve/show/getRecord) funnels through here.
+   *  summary that passes the filter (the summary carries the record name, so a
+   *  record of another kind, namespace or asset costs no round trip), and every
+   *  read path (resolve/show/getRecord) funnels through here.
    *  Fine at MVP catalog sizes; revisit with a secondary coordinate index if
    *  large catalogs make the per-record round trips material. */
   private async loadEntries(filter?: ListFilter): Promise<RecordEntry[]> {
@@ -500,6 +515,7 @@ export class AgentRegistryClient implements RegistryClient {
         const decoded = this.decodeName(summary.name ?? '');
         if (filter?.kind && decoded.kind !== filter.kind) continue;
         if (filter?.namespace && decoded.namespace !== filter.namespace) continue;
+        if (filter?.name && decoded.name !== filter.name) continue;
         const recordId = summary.recordArn ? this.idFromArn(summary.recordArn) : summary.recordId;
         if (!recordId) continue;
         const entry = await this.loadRecordById(recordId);
@@ -517,7 +533,7 @@ export class AgentRegistryClient implements RegistryClient {
     // Consider malformed entries as candidates too: a malformed record still has
     // a readable version/status from its envelope, so if it is the winning
     // version we must reject it rather than silently downgrade to a lower one.
-    const all = await this.loadEntries({ kind: ref.kind, namespace: ref.namespace });
+    const all = await this.loadEntries({ kind: ref.kind, namespace: ref.namespace, name: ref.name });
     const forName = all.filter((e) => entryCoords(e).name === ref.name);
 
     // Only APPROVED / DEPRECATED are resolution candidates.
@@ -593,18 +609,10 @@ export class AgentRegistryClient implements RegistryClient {
   }
 
   /**
-   * Poll a freshly-created record until it settles into a usable state.
+   * CreateRegistryRecord is async, so `publish` waits until the record leaves `CREATING`.
    *
-   * CreateRegistryRecord is async, so we must confirm the substrate actually
-   * accepted the record before treating publish as successful. Prior behavior
-   * returned on *any* non-`CREATING` status (so `CREATE_FAILED` looked like
-   * success), treated a not-found as success (it's transient right after
-   * create), and treated poll-budget exhaustion as success — any of which let
-   * the handler return 201 for a record that never became usable (#246 review).
-   *
-   * Now: not-found and `CREATING` are transient (keep polling); any `*_FAILED`
-   * status throws with the substrate's statusReason; reaching a usable state
-   * (`DRAFT`/`PENDING_APPROVAL`/`APPROVED`) returns; exhausting the budget throws.
+   * Not-found, `CREATING` and a missing status are transient right after the create.
+   * Reading one as success returns 201 for a record that never became usable (#246).
    */
   private async waitPastCreating(recordId: string): Promise<void> {
     for (let i = 0; i < RECORD_CREATE_MAX_POLLS; i++) {
@@ -618,7 +626,7 @@ export class AgentRegistryClient implements RegistryClient {
             `record ${recordId} entered ${status}${rec.statusReason ? `: ${rec.statusReason}` : ''}`,
           );
         }
-        if (status && status !== 'CREATING') return; // DRAFT / PENDING_APPROVAL / APPROVED
+        if (status && status !== 'CREATING') return; // past CREATING: DRAFT for a new record
       } catch (err) {
         // Transient right after CreateRegistryRecord — the record may not be
         // readable yet. Keep polling rather than declaring success.
@@ -639,7 +647,7 @@ export class AgentRegistryClient implements RegistryClient {
       );
     } catch (err) {
       if (err instanceof ResourceNotFoundException) {
-        return null; // nosemgrep: ts-silent-success-masking -- service 404 is the port's absent-record contract
+        return null; // service 404 is the port's absent-record contract
       }
       throw err;
     }
@@ -673,8 +681,9 @@ export class AgentRegistryClient implements RegistryClient {
     };
   }
 
-  /** Pull the ABCA runtime payload back out of the descriptor (native `_meta` or
-   *  the verbatim CUSTOM body). */
+  /** Pull the ABCA runtime payload back out of the descriptor: the `_meta` block of
+   *  a native MCP server.json, the `x-abca-runtime` frontmatter key of a native
+   *  SKILL.md, or the verbatim CUSTOM body. */
   private extractPayload(raw: Pick<GetRegistryRecordCommandOutput, 'recordType' | 'descriptors'>): {
     runtime: RuntimePayload;
     storageMode: StorageMode;

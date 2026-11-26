@@ -40,8 +40,10 @@ Go to GitHub > **Settings** > **Developer settings** > **Personal access tokens*
 
 | Scope | Reason |
 |-------|--------|
-| `repo` | Full repository access (clone, push, PRs, issues) |
+| `public_repo` (public repositories) or `repo` (private repositories) | Clone, push, PRs and issues. `public_repo` reaches public repositories only; `repo` grants every private repository the token's owner can reach, so use it only when a target repository is private |
 | `read:org` | Resolve org membership for org-owned repos |
+
+A token acts for its owner: whatever the scopes, the owner needs write access to the repository (collaborator or team role) for the agent to push.
 
 Set an expiration (90 days recommended) and store it in Secrets Manager the same way as a fine-grained token.
 
@@ -53,6 +55,22 @@ Set an expiration (90 days recommended) and store it in Secrets Manager the same
 | Collaborator on another user's repo | Classic |
 | Org has not opted in to fine-grained tokens | Classic |
 | Targeting repos across multiple orgs | Classic (single token covers all) |
+
+#### Push check before the agent runs
+
+A token can read a repository and still be refused every push. A classic PAT with no scopes, for instance, still reads public repositories. Once the clone's remote and credential helper are set, the agent runs `git push --dry-run` through the same helper the final push uses. When GitHub refuses it, the task fails within seconds instead of at the final push after the agent's work:
+
+| GitHub's answer | Task error |
+|-----------------|------------|
+| The token may not write | `Token cannot push to <repo>`, naming the token type and the permission to add |
+| No credential accepted (the token was revoked or expired after the clone; an invalid one already fails at `preflight_failed`) | `BLOCKED[auth_failure]`: replace the token secret |
+| The repository is archived | `Repository <repo> is archived on GitHub`: unarchive it or target another repository |
+| The organization enforces SAML single sign-on, or an IP allow list | `GitHub organization policy blocks pushes to <repo>`, naming the policy and its fix |
+| No answer: GitHub or the network down after retries, or no reply within 120 s | `BLOCKED[dependency_unreachable]`, retryable |
+
+The dry run sends no ref update, so the remote is not changed. It checks write access only: branch rules and push protection are evaluated on a real push. Tasks that never push skip the check: read-only workflows (`coding/pr-review-v1`) and repository-bound workflows that deliver an artifact instead of a PR.
+
+Setup also makes every push from the clone use the task's token over HTTPS. It pins the push URL to `https://github.com/<owner>/<repo>.git`, which git's `pushInsteadOf` rules do not rewrite, and stops with an error if an `insteadOf` rule in the machine's git configuration still would. It clears the `github.com` credential helpers the clone would inherit (a saved GitHub login, for instance) before adding `gh`; helpers for other hosts keep working. Tasks whose workflow only looks up an existing pull request (`ensure_pr` with the `resolve` strategy) skip the check, as they never push.
 
 ### AWS Credentials
 
@@ -68,7 +86,7 @@ export AWS_SESSION_TOKEN="..."   # if using temporary credentials
 export AWS_REGION="us-east-1"
 ```
 
-**Option B** — AWS CLI resolution (recommended for SSO): `run.sh` runs `aws configure export-credentials` when the AWS CLI is installed, so you can use `aws sso login` and optionally `AWS_PROFILE` without mounting `~/.aws`.
+**Option B** — AWS CLI resolution (recommended for SSO): `run.sh` runs `aws configure export-credentials` when AWS CLI v2 is installed, so you can use `aws sso login` and optionally `AWS_PROFILE` without mounting `~/.aws`. AWS CLI v1 has no such command: with it, `run.sh` mounts `~/.aws` (Option C).
 
 **Option C** — Mount `~/.aws` read-only (static access keys in files; SSO often does not work inside the container):
 ```bash
@@ -122,16 +140,19 @@ The `run.sh` script overrides the container's default CMD to run `python /app/sr
 | `ANTHROPIC_MODEL` | No | `global.anthropic.claude-opus-5-5` | Bedrock **inference profile** ID for `InvokeModel` (see [inference profiles](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html)). Must be a geo-prefixed profile ID matching the deployment's `bedrockGeoRegion`, not a bare foundation-model ID — see [Model configuration](../docs/guides/DEVELOPER_GUIDE.md#model-configuration) |
 | `MAX_TURNS` | No | `100` | Max agent turns before stopping |
 | `MAX_BUDGET_USD` | No | | **Local batch only** (shell env when running `entrypoint.py` directly). Range 0.01–100; agent stops when the budget is reached. For deployed AgentCore **server** mode and production tasks, set **`max_budget_usd`** on task creation (REST API, CLI `--max-budget`, or Blueprint default); the orchestrator sends it in the `/invocations` JSON body — server mode does not read `MAX_BUDGET_USD` from the environment. |
-| `DRY_RUN` | No | | Set to `1` to validate config and print the prompt without running the agent |
+| `DRY_RUN` | No | | Set to `1` to validate config and print the length and hash of the prompts without running the agent |
 | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | No | `global.anthropic.claude-haiku-5-5` | Bedrock **inference profile** ID for the small/fast auxiliary model — the pre-flight safety check and WebFetch summarization (see below). Set by the CDK stack (`cdk/src/stacks/agent.ts` (the runtime environment block)), which derives the prefix from `bedrockGeoRegion` — a geo prefix is required |
-| `NUDGES_TABLE_NAME` | No | | **Phase 2.** DynamoDB table for mid-task user nudges (`<user_nudge>` XML blocks injected between turns). If unset, the agent runs without nudge support — `nudge_reader.read_pending()` returns `[]` and logs a WARN once. Set automatically by the CDK stack on both AgentCore runtimes. |
+| `NUDGES_TABLE_NAME` | No | | **Phase 2.** DynamoDB table for mid-task user nudges (`<user_nudge>` XML blocks injected between turns). If unset, the agent runs without nudge support — `nudge_reader.read_pending()` returns `[]` and logs a WARN once. Set automatically by the CDK stack on every compute backend: in the AgentCore runtime environment, in the ECS task definitions, and for a Lambda MicroVM through `platform_config`. |
 | `JIRA_APP_ACTOR_PROXY_URL` | No | | Resolved per-task from the Jira tenant secret. Forge v2 web-trigger URL used for app-authored Jira comments and transitions. |
 | `JIRA_APP_ACTOR_SHARED_SECRET` | No | | Resolved per-task from the Jira tenant secret. HMAC key for the Forge proxy; redacted from agent diagnostics. |
 | `JIRA_API_TOKEN` | No | | Legacy per-task Jira 3LO token. Used for outbound writes only when no app actor is configured. |
 
 `run_task` removes all Jira credential variables before every invocation,
 including non-Jira tasks, so a warm AgentCore process cannot expose one
-tenant's OAuth or Forge credential to the next task.
+tenant's OAuth or Forge credential to the next task. When it returns or
+raises, it puts the environment of the process back as it found it, so a
+credential that the task resolved (a Linear token, the Jira variables above)
+is no longer in that environment.
 
 **Bedrock model access (main model):** Configuring `ANTHROPIC_MODEL` and IAM credentials is not enough. Your AWS account must be able to **invoke** that model in Amazon Bedrock: follow [Request access to models](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) (Marketplace permissions on first use, Anthropic first-time use where required, valid payment method for Marketplace-backed models). Always use an inference profile ID such as `global.anthropic.claude-opus-5-5`: a bare foundation-model ID cannot be invoked with on-demand throughput and Bedrock rejects it with `ValidationException`. IAM must also grant the model — see [Model configuration](../docs/guides/DEVELOPER_GUIDE.md#model-configuration) for the full layering. If the CLI stops with a message that the model is not available on your Bedrock deployment, fix model access in the console or switch `ANTHROPIC_MODEL` to an entitled profile, then retry.
 
@@ -142,7 +163,7 @@ tenant's OAuth or Forge credential to the next task.
 ### Examples
 
 ```bash
-# Dry run — validate config, fetch issue, print assembled prompt, then exit
+# Dry run — validate config, fetch issue, print the length and hash of the prompts, then exit
 DRY_RUN=1 ./agent/run.sh "owner/repo" 42
 
 # Run with a specific model (overrides the global.anthropic.claude-opus-5-5 default).
@@ -236,7 +257,7 @@ The warm-up is the *primary* fix; the probe that failed is also now non-fatal. `
 
 **`POST /aws/lambda-microvms/runtime/v1/validate`** — Build hook (P2). A **shallow self-check only**: server alive, every hook route registered, interpreter floor, `platform_config` contract loaded. Returns 200 with the individual check results, or 503 while still initialising (which fails the build if it never clears — the right outcome for a broken snapshot). That 503 branch is a **refactor tripwire**, not a state you can reach today: `_module_initialized` is set as the module's last statement and uvicorn accepts no request until the import completes, so it only becomes reachable once someone moves warm-up work behind the bind — and a hook with only a 200 path would then report a still-initialising snapshot as valid.
 
-It runs under the **build role**, which deliberately holds no Bedrock / Secrets Manager / DynamoDB grants, so it **makes zero AWS API calls and must keep making zero** — including its own logging (both build hooks log to stdout via `_build_hook_log`, never through the CloudWatch writer). Two reasons: a Logs write under the build role can only fail, and each failure pollutes the shared `_debug_cw_failures` alarm signal; and `boto3.client(...)` populates `boto3.DEFAULT_SESSION`, a module global holding a resolved credential chain plus the build-time region, which the snapshot would then freeze in for every MicroVM launched from that image version. "Deeper warm-up assertions" (Bedrock reachability, Memory access, tool availability) are therefore *not* implementable here. The one member of that list that turned out to be partly implementable — proving the local `claude` binary execs — lives on `/ready` instead, as a side effect of warming it (above): a local `exec` is not an AWS call, and it belongs to the hook whose 200 gates the snapshot.
+It runs under the **build role**, which deliberately holds no Bedrock / Secrets Manager / DynamoDB grants, so it **makes zero AWS API calls and must keep making zero** — including its own logging (both build hooks log to stdout via `_build_hook_log`, never through the CloudWatch writer). Two reasons: a Logs write outside the service's `/aws/lambda-microvms/*` namespace (the build role's only Logs grant) can only fail, leaving nothing but a `CloudWatch write failed` line on stdout; and `boto3.client(...)` populates `boto3.DEFAULT_SESSION`, a module global holding a resolved credential chain, which the snapshot would then freeze in for every MicroVM launched from that image version (credentials only: clients still re-resolve the region). "Deeper warm-up assertions" (Bedrock reachability, Memory access, tool availability) are therefore *not* implementable here. The one member of that list that turned out to be partly implementable — proving the local `claude` binary execs — lives on `/ready` instead, as a side effect of warming it (above): a local `exec` is not an AWS call, and it belongs to the hook whose 200 gates the snapshot.
 
 Baked secrets are **reported, not enforced**: `warnings` lists the names (never values) of any credential-shaped env var present in the snapshot, because the build environment's own credentials may legitimately be in that env and failing here would fail every build.
 
@@ -270,7 +291,7 @@ On AgentCore and ECS the agent's non-secret platform env arrives as runtime env 
 { "platform_config": { "task_table_name": "…", "github_token_secret_arn": "arn:…" } }
 ```
 
-Each snake_case key installs into its UPPER_SNAKE env var, and a payload value **wins** over any image/pre-existing value (the payload describes the live deployment; the snapshot describes a past one). Installation happens **before** any credential or pipeline initialisation — the very next step resolves the GitHub token from `GITHUB_TOKEN_SECRET_ARN`. Everything the hook logs before that point goes to stdout only (`[server/run-pre-config]`), for the same reason the build hooks do: the CloudWatch writer resolves AWS credentials and pins `boto3.DEFAULT_SESSION` (region included), and until the install has run the only environment available is whatever the snapshot baked. The single AWS call allowed before the install is the S3 payload fetch, because the config is inside the object being fetched. The allowlist lives in `contracts/constants.json` → `microvm_platform_config` (produced by the orchestrator, consumed here; shape enforced by `mise run check:constants-sync`):
+Each snake_case key installs into its UPPER_SNAKE env var, and a payload value **wins** over any image/pre-existing value (the payload describes the live deployment; the snapshot describes a past one). Installation happens **before** any credential or pipeline initialisation — the very next step resolves the GitHub token from `GITHUB_TOKEN_SECRET_ARN`. Everything the hook logs before that point goes to stdout only (`[server/run-pre-config]`), for the same reason the build hooks do: the CloudWatch writer resolves AWS credentials and pins `boto3.DEFAULT_SESSION` (its credentials; the region is re-resolved per client), and until the install has run the only environment available is whatever the snapshot baked. The single AWS call allowed before the install is the S3 payload fetch, because the config is inside the object being fetched. The allowlist lives in `contracts/constants.json` → `microvm_platform_config` (produced by the orchestrator, consumed here; shape enforced by `mise run check:constants-sync`):
 
 | Key | Env var | Required |
 |---|---|---|
@@ -292,7 +313,7 @@ Values are **non-secret identifiers only** — secrets are still fetched at `/ru
 
 Rejections are structured so they are readable in the MicroVM log group: `400 MICROVM_RUN_PAYLOAD_INVALID` (unusable envelope — retrying the same body cannot help), `500 MICROVM_RUN_PAYLOAD_UNREADABLE` (the S3 fetch failed), `400 MICROVM_RUN_PLATFORM_CONFIG_INVALID` (key off the allowlist, non-object block, or non-string value — fix the producer), `400 MICROVM_RUN_PLATFORM_CONFIG_INCOMPLETE` (a required key missing or blank — fix the deployment wiring), `400 TASK_RECORD_INCOMPLETE` (same validator and vocabulary as `/invocations`).
 
-`/suspend` and `/resume` are deliberately **not** served — declaring a hook nothing answers fails the corresponding lifecycle transition, so the CDK construct declares exactly the hooks the agent serves. They land in P3 with the ComputeStrategy interface widening.
+**`POST /aws/lambda-microvms/runtime/v1/suspend`** and **`/resume`** — Runtime hooks (P3, `microvm_http.py`). `/suspend` drains acknowledged progress and verifies the task is safely parked at its approval gate within the hook budget; when that is unsafe it answers **200 `declined`** and the guest keeps working, because any non-200 answer makes the service terminate the VM. `/resume` refreshes task-scoped and ambient credentials, re-reads the gate and reseeds CSPRNGs before the coding barrier opens; after a declined suspend it answers 200 `not-suspended`. `/terminate` closes the coding barrier first. Inside the guest, the Claude CLI gets credentials from a loopback container-credential broker (`microvm_credentials.py`) that renews them before signing with expired keys.
 
 ### Testing Server Mode Locally
 
@@ -385,6 +406,19 @@ The agent pipeline (shared by both modes). Behavior varies by task type (`new_ta
 7. **Status resolution** — `_resolve_overall_task_status()` maps the agent outcome (success/end_turn/error/unknown) and build gate into a final task status. `agent_status=unknown` (SDK stream ended without a ResultMessage) always fails — success is never inferred from PR or build alone. If a post-hook raises after the agent ran, `_chain_prior_agent_error()` preserves the agent-layer error so it is not masked by the later exception.
 8. **Metrics** — returns duration, disk usage, turn count, cost, and PR URL
 
+### Commit trailers
+
+The `prepare-commit-msg` hook (`prepare-commit-msg.sh`, installed into the clone at the end of the pre-hooks) adds attribution trailers to every commit made in the clone from then on: the agent's commits, and the safety-net commit of work the agent left uncommitted. It reads the values from environment variables that the agent sets itself (they are not inputs of `run.sh`):
+
+| Trailer | Example | Meaning | Variable, and what sets it |
+|---------|---------|---------|----------------------------|
+| `Task-Id` | `01KRPZ3PF8ZBRZ2600GRJS2VF7` | The task that made the commit | `TASK_ID`: the pipeline, before the pre-hooks |
+| `Prompt-Version` | `1c9c10e027a2` | The task's `prompt_version`: 12 hex digits of a hash over the constant `system_prompt_v1` and the Blueprint's `system_prompt_overrides`, not over the prompt's text. No trailer when the task was given none | `PROMPT_VERSION`: the pipeline, before the pre-hooks |
+| `Workflow-Id` | `coding/new-task-v1` | The workflow the task runs | `WORKFLOW_ID`: the workflow step runner, when a step starts |
+| `Workflow-Step` | `implement` | The workflow step that was running: the step's `name`, else its `kind` | `WORKFLOW_STEP`: the workflow step runner, when a step starts |
+
+For a task with a repository the step runner runs the agent step only, so the commits of a task name that step (`implement` for `coding/new-task-v1`), the safety-net commit included: it follows the agent step and saves that step's work. A trailer the message already has is kept, so an amended commit keeps the step it was first made in.
+
 ## Metrics
 
 After the agent completes, a summary report is printed:
@@ -420,8 +454,9 @@ These map to AgentCore Runtime constraints:
 ## Building Manually
 
 ```bash
-# Build for ARM64 (AgentCore Runtime target)
-docker buildx build --platform linux/arm64 -t bgagent-local --load ./agent
+# Build for ARM64 (AgentCore Runtime target). Run from the repository root:
+# the Dockerfile copies agent/ and contracts/ from there.
+docker buildx build --platform linux/arm64 -f agent/Dockerfile -t bgagent-local --load .
 
 # Check image size
 docker images bgagent-local --format "{{.Size}}"
@@ -466,19 +501,23 @@ agent/
 ├── scripts/diagnostics/ Optional ops diagnostics (not bundled in the production image)
 │   ├── test_sdk_smoke.py        Minimal SDK smoke test (ClaudeSDKClient → CLI → Bedrock)
 │   └── test_subprocess_threading.py  Subprocess-in-background-thread verification
-├── prepare-commit-msg.sh Git hook (Task-Id / Prompt-Version trailers on commits)
+├── prepare-commit-msg.sh Git hook (Task-Id / Prompt-Version / Workflow-Id / Workflow-Step trailers on commits)
 ├── run.sh               Build + run helper for local/server mode with AgentCore constraints
 ├── tests/               pytest unit tests (pythonpath: src/)
 │   ├── test_config.py       Config validation and workflow-resolution tests (requires_repo / read_only / is_pr_workflow, load-failure fallback)
 │   ├── test_hooks.py        PreToolUse hook and hook matcher tests
 │   ├── test_models.py       Pydantic model tests (construction, validation, frozen enforcement, model_dump)
 │   ├── test_policy.py       Cedar policy engine tests (fail-closed, deny-list)
-│   ├── test_pipeline.py     Pipeline tests (cedar_policies injection, _resolve_overall_task_status, _chain_prior_agent_error)
+│   ├── test_pipeline.py     Pipeline tests (run_task with the agent, the repository setup and the post-hooks stubbed)
+│   ├── test_pipeline_outcomes.py  Outcome tests (_resolve_overall_task_status, _chain_prior_agent_error, delivery gate)
 │   ├── test_shell.py        Shell utility tests (slugify, redact_secrets, truncate, format_bytes)
 │   └── ...
+├── tests_emulator/      Emulator-backed tests: real agent code against a local AWS Emulator (`mise run test:integration`; not collected by the unit run)
 ```
 
 The container **CMD** runs the app under `opentelemetry-instrument` with **uvicorn** using the **asyncio** event loop (not uvloop), avoiding known subprocess issues with uvloop.
+
+The image sets `OTEL_PYTHON_DISABLED_INSTRUMENTATIONS`, so the `requests` and `urllib3` instrumentation stays off: it would copy the trace context and the task's correlation baggage into the headers of the agent's requests to Linear and Atlassian. A value given at run time replaces the image's; keep both names in it.
 
 **Diagnostics:** `scripts/diagnostics/` holds optional smoke tests for local AgentCore debugging. They are not copied into the production Docker image.
 

@@ -107,7 +107,7 @@ editing the stack and redeploying.
    });
    ```
 
-3. Redeploy: `mise //cdk:compile` → `mise //cdk:diff` (show the diff) → `mise //cdk:deploy -- --require-approval never`.
+3. Redeploy with the `deploy` skill: `bgagent setup` with the stack's current features (`DeploymentFeatures` output) and `--yes`. Setup shows the diff and refuses to delete data without the user's confirmation.
 
 > **Sample-repo shortcut:** the stack's AgentPlugins blueprint resolves its `repo` from
 > `BLUEPRINT_REPO` (env) → CDK context `blueprintRepo` → default `awslabs/agent-plugins`.
@@ -189,11 +189,12 @@ platform default, and treat "add model X" as a separate, later change.
 | `model_id` | AI model for tasks (inference profile ID) | Platform default (Opus 5.5, as `<BedrockGeoRegion>.anthropic.claude-opus-5-5`) |
 | `max_turns` | Turn limit per task | 100 |
 | `max_budget_usd` | Cost ceiling per task | Unlimited |
+| `memory_token_budget` | Token budget for the memory context loaded into the agent's prompt | 2000 |
 | `system_prompt_overrides` | Custom system instructions | None |
 | `github_token_secret_arn` | Repo-specific GitHub token | Platform default |
 | `poll_interval_ms` | Completion polling frequency | 30000ms |
 
-Task-level parameters override per-repo defaults; if neither specifies a value, platform defaults apply.
+Task-level parameters override per-repo defaults where one exists (`memory_token_budget` has none); if neither specifies a value, platform defaults apply.
 
 ## Common issues
 

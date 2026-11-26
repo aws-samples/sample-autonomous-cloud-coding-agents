@@ -90,9 +90,8 @@ export function makeJiraChannel(registryTableName: string): Channel {
 
     // Remaining optional capabilities are intentionally omitted: no reaction API
     // (reactToComment, replaceCommentReaction, replaceIssueReaction), no guarded
-    // revertState, no threaded-reply helper
-    // (postThreadedReply, upsertThreadedReply), no note sweep (sweepNotes), and
-    // the sub-issue DAG isn't derived from Jira (fetchChildGraph). The engine
+    // revertState, and no threaded-reply helper
+    // (postThreadedReply, upsertThreadedReply). The engine
     // checks for each method and skips it, so the same orchestration core drives
     // Jira without Jira-specific branching. Implementing one here is additive:
     // no engine change is needed to pick it up.

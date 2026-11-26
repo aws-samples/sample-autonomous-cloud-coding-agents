@@ -45,6 +45,7 @@ import type {
   DynamoDBRecord,
   DynamoDBStreamEvent,
 } from 'aws-lambda';
+import { TaskStatus, TERMINAL_STATUSES } from '../constructs/task-status';
 import { clearTokenCache, resolveGitHubToken } from './shared/context-hydration';
 import { classifyError } from './shared/error-classifier';
 import { renderFailureReply } from './shared/failure-reply';
@@ -54,23 +55,38 @@ import { renderMaturingReply } from './shared/iteration-reply';
 import { claimTerminalReply, releaseReplyClaim, terminalReplyClaimed } from './shared/iteration-reply-claim';
 import {
   buildAdfDocument,
+  parseMarkdownBlocks,
   postIssueCommentAdf,
+  type AdfBlock,
 } from './shared/jira-feedback';
-import { updateJiraIterationComment } from './shared/jira-preview';
+import { updateJiraIterationComment } from './shared/jira-iteration-comment';
 import {
+  jiraIterationFrame,
   renderJiraFinalStatusComment,
   renderJiraFinishedPointer,
   type JiraFinishedPointerKind,
 } from './shared/jira-status-comment';
-import { EMOJI_FAILURE, EMOJI_NEEDS_INPUT, EMOJI_SUCCESS, postIssueComment, swapCommentReaction, upsertThreadedReply } from './shared/linear-feedback';
+import { addAgentSessionExternalUrl, emitAgentActivity, type AgentActivityContent } from './shared/linear-agent-session';
+import { isLinearAgentSessionsEnabled, SESSION_STOP_CANCELLED_VIA } from './shared/linear-agent-session-event';
+import {
+  EMOJI_FAILURE,
+  EMOJI_NEEDS_INPUT,
+  EMOJI_SUCCESS,
+  postIssueComment,
+  resolveToken,
+  swapCommentReaction,
+  upsertThreadedReply,
+  type LinearFeedbackContext,
+  type LinearPostResult,
+} from './shared/linear-feedback';
 import { logger } from './shared/logger';
 import { coerceNumericOrNull } from './shared/numeric';
 import { loadRepoConfig } from './shared/repo-config';
 import { encodeMarkdownUrl } from './shared/screenshot-url';
+import { prNumberFromTask } from './shared/task-pr-number';
 import type { ChannelConfig, TaskNotificationsConfig, TaskRecord } from './shared/types';
 import { makeDocClient } from './shared/ua';
 import { dispatchSlackEvent, SlackApiError } from './slack-notify';
-import { TaskStatus } from '../constructs/task-status';
 
 // Re-export the shared types so existing test imports (and any future
 // caller that only imports from the handler module) continue to work.
@@ -84,6 +100,9 @@ const TERMINAL_EVENT_TYPES = [
   'task_cancelled',
   'task_stranded',
 ] as const;
+
+/** Agent event the session keep-alive rides on (subscribed only with the flag on). */
+const LINEAR_SESSION_HEARTBEAT_EVENT = 'agent_turn';
 
 /**
  * Cedar HITL approval milestones (design §11.1 + fan-out rules in §11.2).
@@ -166,12 +185,13 @@ export const CHANNEL_DEFAULTS: Record<NotificationChannel, ReadonlySet<string>> 
     'approval_requested',
   ]),
   // GitHub edits a single issue comment in place (§6.4) covering
-  // pr_created + terminal — including cancellations and strands so
-  // the comment reflects the task's final outcome. Approval signals
-  // are intentionally NOT posted to GitHub: the issue comment is
-  // for progress, not synchronous gating.
+  // pr_created + terminal, including cancellations, strands, and
+  // timeouts so the comment reflects the task's final outcome. Approval
+  // signals are intentionally NOT posted to GitHub: the issue comment
+  // is for progress, not synchronous gating.
   github: new Set<string>([
     ...TERMINAL_EVENT_TYPES,
+    'task_timed_out',
     'pr_created',
   ]),
   // Linear posts deterministic status comments on the platform tier
@@ -197,6 +217,11 @@ export const CHANNEL_DEFAULTS: Record<NotificationChannel, ReadonlySet<string>> 
     // fanout plane). Without it a timed-out iteration's threaded reply matured to
     // 🔄 and never resolved. Matches the Jira/Slack defaults, which already have it.
     'task_timed_out',
+    // Agent-session channel (ADR-018 Phase 2): per-turn events drive the throttled
+    // keep-alive activity that stops a long run's Linear session going `stale`
+    // (30 min idle). Subscribed only with the flag on, so a default deployment
+    // does not pay a task read per agent turn.
+    ...(isLinearAgentSessionsEnabled() ? [LINEAR_SESSION_HEARTBEAT_EVENT] : []),
   ]),
   // Jira posts a single deterministic final-status comment on terminal
   // events — the Jira analogue of the Linear default above.
@@ -695,6 +720,19 @@ async function saveLinearPrCommentState(taskId: string, eventId: string): Promis
   });
 }
 
+/** Persist the post-once marker after the PR link is attached to a Linear agent session. */
+async function saveLinearSessionPrLinkState(taskId: string, eventId: string): Promise<void> {
+  await saveDispatchMarker({
+    taskId,
+    updateExpression: 'SET linear_session_pr_link_event_id = :eid',
+    conditionExpression: 'attribute_exists(task_id) AND attribute_not_exists(linear_session_pr_link_event_id)',
+    values: { ':eid': eventId },
+    channel: 'linear',
+    errorId: 'FANOUT_LINEAR_SESSION_LINK_PERSIST_FAILED',
+    logContext: { event_id: eventId },
+  });
+}
+
 /**
  * Persist the post-once marker after a successful ordinary Jira final-status
  * comment (see ``dispatchToJira``). Iteration comments are edited in place and
@@ -721,6 +759,21 @@ async function saveJiraCommentState(taskId: string, eventId: string): Promise<vo
  */
 function resolveCommentTarget(task: TaskRecord): number | null {
   return task.pr_number ?? task.issue_number ?? null;
+}
+
+/**
+ * The PR link to show for an event. The agent stores ``pr_url`` on the task
+ * only with its terminal status, after it wrote the ``pr_created`` milestone,
+ * so the task read made for that milestone often comes too early. The
+ * milestone carries the URL itself, as its ``details`` text
+ * (``agent/src/pipeline.py``), so that is the fallback.
+ */
+function prUrlFor(task: TaskRecord, event: FanOutEvent): string | null {
+  if (task.pr_url) return task.pr_url;
+  const details = event.metadata?.details;
+  return effectiveEventType(event) === 'pr_created' && typeof details === 'string' && /^https:\/\/\S+$/.test(details)
+    ? details
+    : null;
 }
 
 /**
@@ -834,9 +887,9 @@ async function dispatchToGitHubComment(event: FanOutEvent): Promise<void> {
     repo: task.repo,
     latestEventType: renderedEventType,
     latestEventAt: event.timestamp,
-    prUrl: task.pr_url ?? null,
-    // DDB returns numeric attributes as strings at the Document-client
-    // boundary (see ``shared/numeric.ts``). Without coercion
+    prUrl: prUrlFor(task, event),
+    // The agent stores these fields as DynamoDB strings (see
+    // ``shared/numeric.ts``). Without coercion
     // ``costUsd.toFixed(4)`` throws ``TypeError`` and the dispatcher
     // is rejected for every terminal event.
     durationS: coerceNumericOrNull(
@@ -880,7 +933,29 @@ async function dispatchToGitHubComment(event: FanOutEvent): Promise<void> {
       });
       clearTokenCache();
       const freshToken = await resolveGitHubToken(tokenArn);
-      result = await upsertTaskComment({ ...upsertParams, token: freshToken });
+      try {
+        result = await upsertTaskComment({ ...upsertParams, token: freshToken });
+      } catch (retryErr) {
+        // The freshly read token is refused as well, so it is expired or
+        // revoked: redelivering the record cannot change that. Channel-
+        // terminal like the 4xx answers below; anything else is rethrown.
+        if (
+          !(retryErr instanceof Error)
+          || retryErr.name !== 'GitHubCommentError'
+          || (retryErr as { httpStatus?: unknown }).httpStatus !== 401
+        ) {
+          throw retryErr;
+        }
+        logger.warn('[fanout/github] 401 from GitHub with a fresh token too — swallowing per channel policy', {
+          event: 'fanout.github.api_error',
+          task_id: event.task_id,
+          event_id: event.event_id,
+          http_status: 401,
+          token_arn: tokenArn,
+          error: retryErr.message,
+        });
+        return;
+      }
     } else if (
       isGhErr
       && typeof httpStatus === 'number'
@@ -1059,7 +1134,7 @@ export function renderLinearFinalStatusComment(args: {
     header = `⚠️ **Shipped a PR but stopped early${reason}** — review and decide if more work is needed`;
   } else {
     const reason = args.errorTitle ? `: ${args.errorTitle}` : '';
-    header = `❌ **Task ${args.eventType.replace(/^task_/, '')}${reason}**`;
+    header = `❌ **Task ${args.eventType.replace(/^task_/, '').replace(/_/g, ' ')}${reason}**`;
   }
 
   const costStr = args.costUsd != null ? `$${args.costUsd.toFixed(2)}` : '—';
@@ -1148,7 +1223,17 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
     return;
   }
 
+  // Per-turn events reach this dispatcher for EVERY task once the session flag
+  // is on. Decide from memory before paying a task read: a task known not to
+  // be a session task never heartbeats, and a session task inside its
+  // keep-alive window has nothing to post yet.
+  const isHeartbeat = event.event_type === LINEAR_SESSION_HEARTBEAT_EVENT;
+  if (isHeartbeat && heartbeatCanSkipTaskRead(event.task_id)) return;
+
   const task = await loadTaskForComment(event.task_id);
+  // Only a row that was actually read says what kind of task this is: a miss
+  // (not replicated yet, a transient read) must not switch its keep-alive off.
+  if (isHeartbeat && task) rememberHeartbeatTask(event.task_id, task);
   if (!task) {
     logger.warn('[fanout/linear] task not found — skipping comment', {
       event: 'fanout.linear.task_missing',
@@ -1176,6 +1261,20 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
     });
     return;
   }
+
+  // Agent-session tasks (ADR-018 Phase 2) report through typed activities in
+  // their Linear session instead of issue comments — Linear renders the
+  // session's final `response` as the thread comment itself.
+  const agentSessionId = task.channel_metadata?.linear_agent_session_id;
+  if (agentSessionId) {
+    await dispatchToLinearAgentSession(event, task, agentSessionId, {
+      linearWorkspaceId: workspaceId,
+      registryTableName,
+    });
+    return;
+  }
+  // The per-turn heartbeat only matters to session tasks.
+  if (event.event_type === LINEAR_SESSION_HEARTBEAT_EVENT) return;
 
   // Iteration-UX: this task is a comment-iteration when it carries a maturing
   // reply id (set at trigger time). For those, the progress + terminal status
@@ -1226,9 +1325,10 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
       return;
     }
     // First-run PR-opened comment. Skip if we've already posted it, or if
-    // there's no PR URL yet (nothing to link).
-    if (task.linear_pr_comment_event_id || !task.pr_url) return;
-    const prBody = renderLinearPrOpenedComment(task.pr_url, task.pr_number ?? null);
+    // neither the task nor the milestone gives a PR URL (nothing to link).
+    const prUrl = prUrlFor(task, event);
+    if (task.linear_pr_comment_event_id || !prUrl) return;
+    const prBody = renderLinearPrOpenedComment(prUrl, task.pr_number ?? null);
     const prResult = await postIssueComment(
       { linearWorkspaceId: workspaceId, registryTableName },
       issueId,
@@ -1279,57 +1379,12 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
     return;
   }
 
-  // Derive an error title from `error_message` via the shared classifier.
-  // Same data the API surfaces as `error_classification.title` —
-  // "Hit max-turns cap", "Insufficient GitHub permissions", etc.
-  //
-  // Returns null only when error_message is empty/undefined (the
-  // task_completed case). For any non-empty error_message that doesn't
-  // match a known pattern, returns the UNKNOWN_CLASSIFICATION fallback
-  // ("Unexpected error") — so a generic failure still gets a structured
-  // title rather than nothing. See error-classifier.ts.
-  const classification = classifyError(task.error_message);
-
   // Iteration-UX: an iteration's outcome + cost goes into the matured threaded
   // reply (below), NOT a fresh top-level "Task completed" comment — that
   // top-level comment is the clutter we're removing. Only the FIRST task (and
   // any non-iteration Linear task) posts the headline top-level status comment.
   if (!isIteration) {
-    const body = renderLinearFinalStatusComment({
-      eventType: event.event_type,
-      prUrl: task.pr_url ?? null,
-      // Clarify-before-spend: a new_task run that HELD to ask a question
-      // carries code_changed===false + answer_text (the question) and made no PR.
-      // Surface it as a 💬 question, not a ✅ "Task completed" (which would read as
-      // "done" when nothing shipped). Only the no-PR + code_changed===false shape.
-      needsInput: task.code_changed === false && !task.pr_url,
-      answerText: typeof task.answer_text === 'string' ? task.answer_text : null,
-      // DDB returns numeric attributes as strings at the Document-client
-      // boundary; coerce so toFixed/comparisons work. Same pattern the
-      // GitHub dispatcher uses.
-      costUsd: coerceNumericOrNull(
-        task.cost_usd,
-        { field: 'cost_usd', task_id: task.task_id, event_id: event.event_id },
-        logger,
-      ),
-      turns: coerceNumericOrNull(
-        task.turns_attempted,
-        { field: 'turns_attempted', task_id: task.task_id, event_id: event.event_id },
-        logger,
-      ),
-      maxTurns: coerceNumericOrNull(
-        task.max_turns,
-        { field: 'max_turns', task_id: task.task_id, event_id: event.event_id },
-        logger,
-      ),
-      durationS: coerceNumericOrNull(
-        task.duration_s,
-        { field: 'duration_s', task_id: task.task_id, event_id: event.event_id },
-        logger,
-      ),
-      taskId: task.task_id,
-      errorTitle: classification?.title ?? null,
-    });
+    const body = renderLinearFinalStatusComment(linearFinalStatusArgs(task, event));
 
     const postResult = await postIssueComment(
       { linearWorkspaceId: workspaceId, registryTableName },
@@ -1385,11 +1440,282 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
 }
 
 /**
+ * What this container remembers about a task for the per-turn heartbeat:
+ * whether it is an agent-session task at all (fixed at creation), and when its
+ * keep-alive window was last claimed. Only ever used to SKIP work — the
+ * conditional write in ``emitLinearSessionHeartbeat`` stays the throttle.
+ */
+interface HeartbeatTaskMemo {
+  readonly sessionTask: boolean;
+  readonly heartbeatAtMs: number;
+}
+const HEARTBEAT_MEMO_MAX_ENTRIES = 2000;
+const heartbeatMemo = new Map<string, HeartbeatTaskMemo>();
+
+function heartbeatCanSkipTaskRead(taskId: string): boolean {
+  const memo = heartbeatMemo.get(taskId);
+  if (!memo) return false;
+  return !memo.sessionTask || Date.now() - memo.heartbeatAtMs < LINEAR_SESSION_HEARTBEAT_INTERVAL_MS;
+}
+
+function rememberHeartbeatTask(taskId: string, task: TaskRecord, heartbeatAtMs?: number): void {
+  // Bounded: a warm container sees many tasks. Dropping everything is fine —
+  // a forgotten task costs one read to relearn.
+  if (heartbeatMemo.size >= HEARTBEAT_MEMO_MAX_ENTRIES && !heartbeatMemo.has(taskId)) heartbeatMemo.clear();
+  const recorded = task.linear_session_heartbeat_at ? Date.parse(task.linear_session_heartbeat_at) : 0;
+  heartbeatMemo.set(taskId, {
+    sessionTask: task.channel_source === 'linear' && Boolean(task.channel_metadata?.linear_agent_session_id),
+    heartbeatAtMs: heartbeatAtMs ?? (Number.isFinite(recorded) ? recorded : 0),
+  });
+}
+
+/** Test seam: forget what this container learned about tasks' heartbeats. */
+export function resetLinearHeartbeatMemoForTests(): void {
+  heartbeatMemo.clear();
+}
+
+/**
+ * Minimum gap between keep-alive activities. Linear marks a session `stale`
+ * after 30 minutes without an activity; 10 minutes keeps a long run visibly
+ * alive with ample margin for a slow turn, at ≤6 activities per hour.
+ */
+const LINEAR_SESSION_HEARTBEAT_INTERVAL_MS = 10 * 60 * 1000;
+/** Every event that settles a session task (the Linear default's terminal set). */
+const LINEAR_SESSION_TERMINAL_EVENTS: ReadonlySet<string> = new Set([...TERMINAL_EVENT_TYPES, 'task_timed_out']);
+
+/**
+ * Agent-session dispatcher (ADR-018 Phase 2). Maps task progress onto the
+ * session the task was started from:
+ *
+ *  - ``pr_created`` → the PR is attached to the session header
+ *    (``addedExternalUrls``) and announced as an ``action``.
+ *  - ``agent_turn`` → a throttled, ephemeral ``thought`` so a long run never
+ *    lets the session go ``stale``.
+ *  - terminal → one final activity carrying the same outcome / cost / turns /
+ *    duration body as the comment channel: ``response`` on success or cancel,
+ *    ``elicitation`` when the run held to ask a question, ``error`` otherwise.
+ *
+ * Idempotency reuses the comment channel's post-once markers (a session task
+ * never posts those comments). Retryable Linear failures throw so the record
+ * lands in ``batchItemFailures``, exactly like ``dispatchToLinear``; the
+ * heartbeat is best-effort and never throws.
+ */
+async function dispatchToLinearAgentSession(
+  event: FanOutEvent,
+  task: TaskRecord,
+  agentSessionId: string,
+  ctx: LinearFeedbackContext,
+): Promise<void> {
+  const effective = effectiveEventType(event);
+  const isTerminalEvent = LINEAR_SESSION_TERMINAL_EVENTS.has(effective);
+  if (effective !== 'pr_created' && effective !== LINEAR_SESSION_HEARTBEAT_EVENT && !isTerminalEvent) return;
+  const logCtx = { task_id: task.task_id, linear_agent_session_id: agentSessionId, event_type: effective };
+
+  if (effective === LINEAR_SESSION_HEARTBEAT_EVENT) {
+    await emitLinearSessionHeartbeat(event, task, agentSessionId, ctx);
+    return;
+  }
+  if (effective === 'task_cancelled' && event.metadata?.cancelled_via === SESSION_STOP_CANCELLED_VIA) {
+    // The stop handler already posted "Stopped." — that IS the session's close.
+    // Stamp the post-once marker so a later terminal event for the same task
+    // (a reconciler `task_failed` / `task_stranded`, a second `task_cancelled`)
+    // short-circuits below instead of posting a second closing activity.
+    logger.info('[fanout/linear-session] cancel came from a session stop — confirmation already posted', logCtx);
+    if (!task.linear_final_comment_event_id) await saveLinearCommentState(task.task_id, event.event_id);
+    return;
+  }
+  // After a stop the session must stay quiet; the PR link still rides the final status.
+  if (effective === 'pr_created'
+    && (task.linear_pr_comment_event_id || !task.pr_url || task.status === TaskStatus.CANCELLED)) return;
+  if (isTerminalEvent && task.linear_final_comment_event_id) {
+    logger.info('[fanout/linear-session] final activity already emitted — skipping (idempotent retry)', logCtx);
+    return;
+  }
+
+  const token = await resolveToken(ctx);
+  if (!token) {
+    logger.warn('[fanout/linear-session] no Linear token for workspace — skipping', {
+      ...logCtx, error_id: 'FANOUT_LINEAR_SESSION_NO_TOKEN',
+    });
+    return;
+  }
+
+  let result: LinearPostResult;
+  if (effective === 'pr_created') {
+    const prUrl = task.pr_url!;
+    const label = typeof task.pr_number === 'number' ? `Pull request #${task.pr_number}` : 'Pull request';
+    // Own marker: `addedExternalUrls` appends, so repeating it on a retry of the
+    // activity below would duplicate the header link, and a failed attach has
+    // to be retried on its own.
+    if (!task.linear_session_pr_link_event_id) {
+      const link = await addAgentSessionExternalUrl(token, agentSessionId, { label, url: prUrl });
+      if (link.ok) {
+        await saveLinearSessionPrLinkState(task.task_id, event.event_id);
+      } else {
+        logger.warn('[fanout/linear-session] could not attach PR link to session', { ...logCtx, retryable: link.retryable });
+        if (link.retryable) {
+          throw new Error(
+            `[fanout/linear-session] transient Linear PR-link failure for task ${task.task_id} — escalating for batch retry`,
+          );
+        }
+      }
+    }
+    result = await emitAgentActivity(token, agentSessionId, {
+      type: 'action', action: 'Opened pull request', parameter: prUrl,
+    });
+    if (result.ok) await saveLinearPrCommentState(task.task_id, event.event_id);
+  } else {
+    result = await emitAgentActivity(token, agentSessionId, linearSessionTerminalActivity(task, event));
+    if (result.ok) await saveLinearCommentState(task.task_id, event.event_id);
+  }
+
+  if (result.ok) {
+    logger.info('[fanout/linear-session] activity dispatched', logCtx);
+    return;
+  }
+  logger.warn('[fanout/linear-session] activity emit failed', {
+    ...logCtx, error_id: 'FANOUT_LINEAR_SESSION_EMIT_FAILED', retryable: result.retryable,
+  });
+  if (result.retryable) {
+    // Same contract as dispatchToLinear: the marker was not persisted, so a
+    // batch retry re-emits or short-circuits on a concurrent run's marker.
+    throw new Error(
+      `[fanout/linear-session] transient Linear activity failure for task ${task.task_id} — escalating for batch retry`,
+    );
+  }
+}
+
+/** The session's final activity for a terminal event. */
+export function linearSessionTerminalActivity(task: TaskRecord, event: FanOutEvent): AgentActivityContent {
+  const args = linearFinalStatusArgs(task, event);
+  const body = renderLinearFinalStatusComment(args);
+  if (event.event_type === 'task_completed') {
+    return args.needsInput ? { type: 'elicitation', body } : { type: 'response', body };
+  }
+  if (event.event_type === 'task_cancelled') return { type: 'response', body };
+  return { type: 'error', body };
+}
+
+/**
+ * Claim the heartbeat window with a conditional write, then emit an ephemeral
+ * ``thought``. The claim (not the emit) is the throttle, so concurrent batches
+ * and redeliveries cannot double-post; a lost emit just waits for the next
+ * window. Never throws.
+ */
+async function emitLinearSessionHeartbeat(
+  event: FanOutEvent,
+  task: TaskRecord,
+  agentSessionId: string,
+  ctx: LinearFeedbackContext,
+): Promise<void> {
+  const tableName = process.env.TASK_TABLE_NAME;
+  if (!tableName || TERMINAL_STATUSES.includes(task.status)) return;
+  const now = Date.now();
+  const cutoffIso = new Date(now - LINEAR_SESSION_HEARTBEAT_INTERVAL_MS).toISOString();
+  // Cheap pre-check on the record already loaded: most turns land inside the
+  // window, and a failed conditional write still costs a write unit.
+  if (task.linear_session_heartbeat_at && task.linear_session_heartbeat_at >= cutoffIso) return;
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: tableName,
+      Key: { task_id: task.task_id },
+      UpdateExpression: 'SET linear_session_heartbeat_at = :now',
+      ConditionExpression: 'attribute_exists(task_id) AND (attribute_not_exists(linear_session_heartbeat_at) OR linear_session_heartbeat_at < :cutoff)',
+      ExpressionAttributeValues: {
+        ':now': new Date(now).toISOString(),
+        ':cutoff': cutoffIso,
+      },
+    }));
+  } catch (err) {
+    if ((err as Error)?.name !== CONDITIONAL_CHECK_FAILED) {
+      logger.warn('[fanout/linear-session] heartbeat claim failed', {
+        task_id: task.task_id, error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    // Lost the claim to another container: its window is as good as ours.
+    if ((err as Error)?.name === CONDITIONAL_CHECK_FAILED) rememberHeartbeatTask(task.task_id, task, now);
+    return;
+  }
+  rememberHeartbeatTask(task.task_id, task, now);
+  const token = await resolveToken(ctx);
+  if (!token) return;
+  const turn = typeof event.metadata?.turn === 'number' ? event.metadata.turn : null;
+  const result = await emitAgentActivity(
+    token,
+    agentSessionId,
+    { type: 'thought', body: turn !== null ? `Still working (turn ${turn}).` : 'Still working.' },
+    { ephemeral: true },
+  );
+  if (!result.ok) {
+    logger.warn('[fanout/linear-session] heartbeat emit failed', {
+      task_id: task.task_id, linear_agent_session_id: agentSessionId, retryable: result.retryable,
+    });
+  }
+}
+
+/**
+ * Inputs for ``renderLinearFinalStatusComment`` from the task record. Shared by
+ * the comment dispatcher and the agent-session dispatcher so both report the
+ * same outcome, cost, turns and duration.
+ */
+function linearFinalStatusArgs(
+  task: TaskRecord,
+  event: FanOutEvent,
+): Parameters<typeof renderLinearFinalStatusComment>[0] {
+  // Derive an error title from `error_message` via the shared classifier.
+  // Same data the API surfaces as `error_classification.title` —
+  // "Hit max-turns cap", "Insufficient GitHub permissions", etc.
+  //
+  // Returns null only when error_message is empty/undefined (the
+  // task_completed case). For any non-empty error_message that doesn't
+  // match a known pattern, returns the UNKNOWN_CLASSIFICATION fallback
+  // ("Unexpected error") — so a generic failure still gets a structured
+  // title rather than nothing. See error-classifier.ts.
+  const classification = classifyError(task.error_message);
+  return {
+    eventType: event.event_type,
+    prUrl: task.pr_url ?? null,
+    // Clarify-before-spend: a new_task run that HELD to ask a question
+    // carries code_changed===false + answer_text (the question) and made no PR.
+    // Surface it as a 💬 question, not a ✅ "Task completed" (which would read as
+    // "done" when nothing shipped). Only the no-PR + code_changed===false shape.
+    needsInput: task.code_changed === false && !task.pr_url,
+    answerText: typeof task.answer_text === 'string' ? task.answer_text : null,
+    // DDB returns numeric attributes as strings at the Document-client
+    // boundary; coerce so toFixed/comparisons work. Same pattern the
+    // GitHub dispatcher uses.
+    costUsd: coerceNumericOrNull(
+      task.cost_usd,
+      { field: 'cost_usd', task_id: task.task_id, event_id: event.event_id },
+      logger,
+    ),
+    turns: coerceNumericOrNull(
+      task.turns_attempted,
+      { field: 'turns_attempted', task_id: task.task_id, event_id: event.event_id },
+      logger,
+    ),
+    maxTurns: coerceNumericOrNull(
+      task.max_turns,
+      { field: 'max_turns', task_id: task.task_id, event_id: event.event_id },
+      logger,
+    ),
+    durationS: coerceNumericOrNull(
+      task.duration_s,
+      { field: 'duration_s', task_id: task.task_id, event_id: event.event_id },
+      logger,
+    ),
+    taskId: task.task_id,
+    errorTitle: classification?.title ?? null,
+  };
+}
+
+/**
  * Post the threaded ✅/❌ reply for a standalone comment-triggered
  * iteration. Idempotent: claims the one reply by conditionally stamping
  * ``ack_replied_at`` on the task record, so a redelivered terminal stream
  * record never double-replies (mirrors the reconciler's orchestration-iteration
- * ack). Best-effort — never throws into the dispatcher.
+ * ack). Best-effort, with one exception: a reply that failed while attempts
+ * remain throws, so that the stream record is delivered again.
  */
 async function replyToStandaloneTrigger(
   event: FanOutEvent,
@@ -1416,9 +1742,7 @@ async function replyToStandaloneTrigger(
   // (consistent with the reconciler's success gate).
   const completed = event.event_type === 'task_completed';
   const succeeded = completed && task.build_passed !== false;
-  const prNumber = typeof task.pr_number === 'number'
-    ? task.pr_number
-    : (typeof task.pr_url === 'string' ? Number(task.pr_url.match(/\/pull\/(\d+)\b/)?.[1]) || null : null);
+  const prNumber = prNumberFromTask(task);
 
   // Iteration-UX: cumulative cost across ALL iteration tasks on this PR/issue
   // (incl. this one), so the reply shows a running total over many rounds.
@@ -1492,18 +1816,26 @@ async function replyToStandaloneTrigger(
     // both a redelivery from retrying AND the progress writers from touching the
     // reply again (they read the claim as "an outcome has landed"), leaving the
     // human's request looking unanswered forever. Hand it back — but only while
-    // attempts remain, since each release re-wakes this handler via the task
-    // record's own stream.
+    // attempts remain, so a reply that can never land is not retried without end.
     const release = await releaseReplyClaim(ddb, tableName, task.task_id, claim.stamp);
     if (release !== 'exhausted') {
-      // A retry is still coming. Return before the reaction swap so the comment
-      // does not read ✅ next to a reply that still says "On it".
+      // Stop before the reaction swap so the comment does not read ✅ next to a
+      // reply that still says "On it".
       logger.warn('[fanout/linear] terminal reply edit failed — deferring to another attempt', {
         event: 'fanout.linear.terminal_reply_failed',
         task_id: task.task_id,
         issue_id: issueId,
         release,
       });
+      if (release === 'released') {
+        // The retry has to be asked for: the release is a write to the task table,
+        // and this Lambda reads only the stream of the task EVENTS table. Reporting
+        // the record as failed is what delivers the event again. ('not_ours' means
+        // another delivery owns the reply, so there is nothing to retry.)
+        throw new Error(
+          `[fanout/linear] terminal reply failed for task ${task.task_id} — escalating for batch retry`,
+        );
+      }
       return;
     }
     // No attempt is coming, so fall through and let the reaction carry the
@@ -1551,6 +1883,38 @@ async function sumIterationCostForIssue(
 }
 
 export { renderJiraFinalStatusComment };
+
+/**
+ * Clarify-and-hold on a Jira issue: the first run stopped to ask a question
+ * and shipped nothing (``code_changed === false``, no PR), so the comment is
+ * that question — "✅ Task completed" would read as done. Null for any other
+ * outcome, including an iteration that answered without changing code. Jira
+ * has no reply-to-resume path (Linear has one), hence the closing line.
+ *
+ * The question is the agent's own text and may spell out the ``@bgagent``
+ * mention, and Jira attributes this comment to the user who authorized the
+ * app. So it opens with ``🤖 ABCA ``, a marker ``isKnownAbcaComment``
+ * (``shared/comment-trigger.ts``) refuses to read as a trigger, with the
+ * emoji outside the bold run so the marker survives a wiki-text body too.
+ */
+function renderJiraHoldQuestion(task: TaskRecord, event: FanOutEvent): ReadonlyArray<AdfBlock> | null {
+  if (
+    task.channel_metadata?.trigger_comment_id
+    || event.event_type !== 'task_completed'
+    || task.code_changed !== false
+    || task.pr_url
+  ) {
+    return null;
+  }
+  const question = typeof task.answer_text === 'string' ? task.answer_text.trim() : '';
+  return [
+    [{ text: '🤖 ' }, { text: 'ABCA has a question before it starts', strong: true }],
+    // Rendered from the Markdown the agent wrote it in.
+    ...parseMarkdownBlocks(question || 'Could you share a bit more detail so I build the right thing?'),
+    [{ text: 'Add the details to the issue, then re-apply the trigger label to run it again.' }],
+    [{ text: `task ${task.task_id}`, em: true }],
+  ];
+}
 
 /**
  * Jira dispatcher — posts a deterministic final-status comment when a
@@ -1640,13 +2004,23 @@ async function dispatchToJira(event: FanOutEvent): Promise<void> {
   // Same classifier the Linear dispatcher + API surface use — "Hit max-turns
   // cap", "Insufficient GitHub permissions", etc. Returns null only when
   // error_message is empty (the task_completed case).
-  const classification = classifyError(task.error_message);
+  const classifiedTitle = classifyError(task.error_message)?.title ?? null;
 
-  const paragraphs = renderJiraFinalStatusComment({
-    eventType: event.event_type,
+  // A completed iteration whose build is red is not a clean success: it gets
+  // the failure pointer and frame, with the reason, as it does on Linear, in
+  // the reconciler and when ``jira-iteration-comment.ts`` re-renders the
+  // comment. Not here when it changed no code: it answered a question, the
+  // build was red before it, and the failure frame would leave its answer
+  // out. The first run of an issue is rendered from the event alone.
+  const { eventType, errorTitle } = isIteration && task.code_changed !== false
+    ? jiraIterationFrame(event.event_type, task.build_passed, classifiedTitle)
+    : { eventType: event.event_type, errorTitle: classifiedTitle };
+
+  const paragraphs = renderJiraHoldQuestion(task, event) ?? renderJiraFinalStatusComment({
+    eventType,
     prUrl: task.pr_url ?? null,
-    // DDB returns numeric attributes as strings at the Document-client
-    // boundary; coerce so toFixed/comparisons work. Same pattern the
+    // The agent stores cost, duration and the turn counters as DynamoDB
+    // strings; coerce so toFixed/comparisons work. Same pattern the
     // GitHub + Linear dispatchers use.
     costUsd: coerceNumericOrNull(
       task.cost_usd,
@@ -1669,7 +2043,10 @@ async function dispatchToJira(event: FanOutEvent): Promise<void> {
       logger,
     ),
     taskId: task.task_id,
-    errorTitle: classification?.title ?? null,
+    errorTitle,
+    // An iteration that answered a question: the pointer below says "answer
+    // posted below", so the result carries what the agent said.
+    answerText: task.answer_text,
   });
 
   if (isIteration && iterationReplyId) {
@@ -1683,7 +2060,7 @@ async function dispatchToJira(event: FanOutEvent): Promise<void> {
     );
     if (!claim.won) return;
 
-    const pointerKind: JiraFinishedPointerKind = event.event_type !== 'task_completed'
+    const pointerKind: JiraFinishedPointerKind = eventType !== 'task_completed'
       ? 'details'
       : (task.code_changed === false ? 'answer' : 'result');
     const updateResult = await updateJiraIterationComment(
@@ -1694,12 +2071,13 @@ async function dispatchToJira(event: FanOutEvent): Promise<void> {
       { body: buildAdfDocument(renderJiraFinishedPointer(pointerKind)), terminal: true },
     );
     if (!updateResult.ok) {
-      const release = await releaseReplyClaim(
-        ddb,
-        tableName,
-        task.task_id,
-        claim.stamp,
-      );
+      // A transient failure hands the claim back and retries the record while
+      // attempts remain. A status comment that cannot be edited at all (it was
+      // deleted, or the attempts are spent) must not take the outcome with it:
+      // the claim stays and the result is posted below as its own comment.
+      const release = updateResult.retryable
+        ? await releaseReplyClaim(ddb, tableName, task.task_id, claim.stamp)
+        : undefined;
       logger.warn('[fanout/jira] iteration pointer update failed (non-fatal)', {
         event: 'fanout.jira.iteration_pointer_failed',
         task_id: task.task_id,
@@ -1713,7 +2091,6 @@ async function dispatchToJira(event: FanOutEvent): Promise<void> {
           `[fanout/jira] transient Jira iteration pointer failure for task ${task.task_id}`,
         );
       }
-      return;
     }
 
     const finalResult = await postIssueCommentAdf(
@@ -1960,10 +2337,11 @@ export async function routeEvent(
  *     future refactor (e.g. a stricter ``parseStreamRecord``) from
  *     crashing the whole batch.
  *
- * On any caught throw we push ``{ itemIdentifier: record.eventID }`` so
- * Lambda retries ONLY that record, isolating the poison pill per
- * design §6 + §8.9 expectations. Successful records are NOT in
- * ``batchItemFailures`` and advance the stream checkpoint normally.
+ * On any caught throw we push the record's stream sequence number as the
+ * ``itemIdentifier``: it is the only value Lambda can checkpoint a shard
+ * on. Lambda checkpoints at the lowest one reported and retries from
+ * there — the failed record and those after it, not the ones before it —
+ * which isolates the poison pill per design §6 + §8.9 expectations.
  *
  * Two review findings shaped this shape: the fanout handler used to return
  * ``void`` despite ``reportBatchItemFailures: true``, and a ``routeEvent``
@@ -1993,6 +2371,7 @@ export const handler = async (
 
   for (const record of event.Records) {
     processed++;
+    const sequenceNumber = record.dynamodb?.SequenceNumber;
     try {
       const ev = parseStreamRecord(record);
       if (!ev) {
@@ -2028,8 +2407,8 @@ export const handler = async (
       // attempt has a chance to succeed. Without this push, a transient
       // failure would be silently dropped — the regression that
       // motivated this fix.
-      if (outcome.infraRejections.length > 0 && record.eventID !== undefined) {
-        batchItemFailures.push({ itemIdentifier: record.eventID });
+      if (outcome.infraRejections.length > 0 && sequenceNumber !== undefined) {
+        batchItemFailures.push({ itemIdentifier: sequenceNumber });
       }
     } catch (err) {
       // Poison-pill isolation: one record's unhandled throw must not
@@ -2037,21 +2416,20 @@ export const handler = async (
       // paths that can reach here (notably AccessDeniedException from
       // ``resolveTokenSecretArn``).
       //
-      // ``eventID`` is the stream-record identifier Lambda uses for the
-      // retry cursor; on Kinesis-style event-source-mappings with
+      // The sequence number is the stream-record identifier Lambda uses
+      // for the retry cursor; on Kinesis-style event-source-mappings with
       // ``reportBatchItemFailures: true`` the service retries all
       // records at-or-after the lowest-sequence failure. Returning even
       // one failed itemIdentifier is enough to preserve ordering across
       // the whole batch for that task.
-      const eventID = record.eventID;
       logger.warn('[fanout] record threw — flagging for partial-batch retry', {
         event: 'fanout.record.failed',
-        event_id: eventID,
+        event_id: record.eventID,
         error: err instanceof Error ? err.message : String(err),
         error_name: err instanceof Error ? err.name : undefined,
       });
-      if (eventID !== undefined) {
-        batchItemFailures.push({ itemIdentifier: eventID });
+      if (sequenceNumber !== undefined) {
+        batchItemFailures.push({ itemIdentifier: sequenceNumber });
       }
     }
   }

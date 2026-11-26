@@ -17,18 +17,18 @@
  *  SOFTWARE.
  */
 
-import { ApiKeyDetail, CreateApiKeyResponse, CreateWebhookResponse, DEFAULT_CODING_WORKFLOW_ID, ReplayBundle, TaskDetail, TaskEvent, TaskSummary, TERMINAL_STATUSES, WebhookDetail } from './types';
+import { ApiKeyDetail, CreateApiKeyResponse, CreateWebhookResponse, DEFAULT_CODING_WORKFLOW_ID, PaginatedResponse, ReplayBundle, TaskDetail, TaskEvent, TaskSummary, TERMINAL_STATUSES, WebhookDetail } from './types';
 
 /** Decimal places when rendering USD cost figures (tenth of a cent matters for LLM spend). */
 export const COST_USD_DECIMALS = 4;
 
 /** Render a USD cost as ``$0.0000`` (shared by the detail view and replay bundle). */
-export function formatCostUsd(cost: number | string): string {
+function formatCostUsd(cost: number | string): string {
   return `$${Number(cost).toFixed(COST_USD_DECIMALS)}`;
 }
 
 /** Render a pass/fail gate verdict; ``dash`` for a null (gate did not run). */
-export function formatVerdict(passed: boolean | null, dash = '—'): string {
+function formatVerdict(passed: boolean | null, dash = '—'): string {
   return passed === null ? dash : passed ? 'PASSED' : 'FAILED';
 }
 
@@ -101,10 +101,12 @@ export function formatTaskDetail(task: TaskDetail, now: number = Date.now()): st
   // going: that is the window in which "is the agent alive?" is a live question,
   // and where a stale value is the actionable signal — the orchestrator's own hang
   // detector reads the same field. On a terminal task the last beat is just noise
-  // next to Completed/Duration. The relative age is what an operator actually
-  // needs, so it is rendered alongside the timestamp rather than instead of it.
-  if (task.agent_heartbeat_at && !isTerminalStatus(task.status)) {
-    lines.push(`Heartbeat:   ${task.agent_heartbeat_at} (${heartbeatAge(task.agent_heartbeat_at, now)})`);
+  // next to Completed/Duration, and on `ecs` its age is no signal. The relative age
+  // is what an operator actually needs, so it is rendered alongside the timestamp
+  // rather than instead of it.
+  const heartbeat = liveHeartbeat(task);
+  if (heartbeat) {
+    lines.push(`Heartbeat:   ${heartbeat} (${heartbeatAge(heartbeat, now)})`);
   }
   if (task.duration_s !== null) {
     lines.push(`Duration:    ${task.duration_s}s`);
@@ -146,6 +148,7 @@ export function formatTaskList(tasks: TaskSummary[], now: number = Date.now()): 
     if (t.resolved_workflow?.id === 'coding/pr-iteration-v1' && t.pr_number !== null) {
       desc = `PR #${t.pr_number}` + (t.task_description ? `: ${t.task_description}` : '');
     }
+    const heartbeat = liveHeartbeat(t);
     return [
       t.task_id,
       t.status,
@@ -154,12 +157,10 @@ export function formatTaskList(tasks: TaskSummary[], now: number = Date.now()): 
       t.created_at,
       // In-guest liveness, at LIST level: "is anything still alive?" is asked
       // across tasks, and one `bgagent status` at a time is how a hung task goes
-      // unnoticed. Suppressed on a terminal task (the last beat is noise beside a
-      // final status) and where the agent has not beaten — same rule as the detail
-      // view, so the two never disagree.
-      t.agent_heartbeat_at && !isTerminalStatus(t.status)
-        ? `${heartbeatAge(t.agent_heartbeat_at, now)} ago`
-        : PLACEHOLDER,
+      // unnoticed. A dash where the age is no signal: on a terminal task (the last
+      // beat is noise beside a final status), on `ecs`, and where the agent has not
+      // beaten — same rule as the detail view, so the two never disagree.
+      heartbeat ? `${heartbeatAge(heartbeat, now)} ago` : PLACEHOLDER,
       truncate(desc, DESCRIPTION_COLUMN_WIDTH),
     ];
   });
@@ -286,9 +287,10 @@ export function formatStatusSnapshot(
   // the task; `Heartbeat:` says when the agent last said it was alive — the same
   // field the orchestrator's hang detector reads, on a fixed 45 s cadence, so its
   // AGE is the diagnostic. Suppressed on a terminal task (the last beat is noise
-  // beside a final status) and when the agent has not beaten yet.
-  if (task.agent_heartbeat_at && !isTerminalStatus(task.status)) {
-    const age = relativeTime(task.agent_heartbeat_at, now) ?? PLACEHOLDER;
+  // beside a final status), on `ecs`, and when the agent has not beaten yet.
+  const heartbeat = liveHeartbeat(task);
+  if (heartbeat) {
+    const age = relativeTime(heartbeat, now) ?? PLACEHOLDER;
     lines.push(`  Heartbeat:     ${age} ago`);
   }
   lines.push(`  Last event:    ${lastEventLine}`);
@@ -351,7 +353,7 @@ function formatDescriptionLines(description: string): string[] {
  *  only useful diagnostic. */
 function describeReason(task: TaskDetail): string | null {
   if (task.status === 'COMPLETED') return null;
-  if (!(TERMINAL_STATUSES as readonly string[]).includes(task.status)) return null;
+  if (!TERMINAL_STATUSES.includes(task.status)) return null;
   const cls = task.error_classification;
   const msg = task.error_message?.trim();
   if (cls && cls.category !== 'unknown') {
@@ -393,14 +395,20 @@ export function formatEvents(events: TaskEvent[]): string {
 
 /** Format a newly created webhook (includes the one-time secret). */
 export function formatWebhookCreated(res: CreateWebhookResponse): string {
-  return [
+  const lines = [
     `Webhook:     ${res.webhook_id}`,
     `Name:        ${res.name}`,
     `Created:     ${res.created_at}`,
-    '',
-    'Secret (store securely — shown only once):',
-    res.secret,
-  ].join('\n');
+  ];
+  // An API deployed before `webhook_url` existed does not return it.
+  if (res.webhook_url) {
+    lines.push(
+      `URL:         ${res.webhook_url}`,
+      '             (the endpoint to enter in the webhook settings of the external system)',
+    );
+  }
+  lines.push('', 'Secret (store securely — shown only once):', res.secret);
+  return lines.join('\n');
 }
 
 /** Format a list of WebhookDetail as an aligned table. */
@@ -485,6 +493,36 @@ export function formatApiKeyDetail(key: ApiKeyDetail): string {
     lines.push(`Revoked:     ${key.revoked_at}`);
   }
   return lines.join('\n');
+}
+
+/** Rows a `list` command returns when --limit is not given: the page size the API defaults to. */
+const DEFAULT_LIST_LIMIT = 20;
+
+/**
+ * The rows a `list` command prints: its first page and the pages that follow. The API reads a
+ * bounded number of rows per request, so a page can hold fewer rows than asked for, or none,
+ * while more exist: follow next_token until the rows asked for are there or the list ends.
+ * Each further request asks only for the rows still missing, so that the last token resumes
+ * right after the last row. `maxRequests` counts the first request too: a list that never
+ * ends cannot keep the command running.
+ *
+ * It stands here and not next to the client because the command tests replace the client's
+ * module whole, and this loop is what they check.
+ */
+export async function followPages<T>(
+  first: PaginatedResponse<T>,
+  limit: number | undefined,
+  fetchNext: (rows: number, nextToken: string) => Promise<PaginatedResponse<T>>,
+  maxRequests = 100,
+): Promise<PaginatedResponse<T>> {
+  // A --limit that is no positive number counts as none given.
+  const wanted = limit !== undefined && limit > 0 ? limit : DEFAULT_LIST_LIMIT;
+  let result = first;
+  for (let request = 1; request < maxRequests && result.data.length < wanted && result.pagination.next_token; request += 1) {
+    const next = await fetchNext(wanted - result.data.length, result.pagination.next_token);
+    result = { data: [...result.data, ...next.data], pagination: next.pagination };
+  }
+  return result;
 }
 
 /** Format data as JSON. */
@@ -576,10 +614,6 @@ function truncate(text: string, maxLen: number): string {
 
 const PLACEHOLDER = '—';
 
-function isTerminalStatus(status: string): boolean {
-  return (TERMINAL_STATUSES as readonly string[]).includes(status);
-}
-
 function elapsedDescription(task: TaskDetail, now: number): string {
   // Use ``started_at`` → ``completed_at`` (or ``now``) as the primary
   // elapsed-time source. This matches what the user observed during the
@@ -591,7 +625,7 @@ function elapsedDescription(task: TaskDetail, now: number): string {
   const start = task.started_at ?? task.created_at;
   const startMs = Date.parse(start);
   if (Number.isNaN(startMs)) {
-    if (isTerminalStatus(task.status) && task.duration_s != null) {
+    if (TERMINAL_STATUSES.includes(task.status) && task.duration_s != null) {
       return `${humanizeSeconds(task.duration_s)} total`;
     }
     return PLACEHOLDER;
@@ -599,21 +633,20 @@ function elapsedDescription(task: TaskDetail, now: number): string {
   const endMs = task.completed_at ? Date.parse(task.completed_at) : now;
   if (Number.isNaN(endMs)) return PLACEHOLDER;
   const diffS = Math.max(0, Math.round((endMs - startMs) / 1000));
-  const suffix = isTerminalStatus(task.status) ? 'total' : 'elapsed';
+  const suffix = TERMINAL_STATUSES.includes(task.status) ? 'total' : 'elapsed';
   return `${humanizeSeconds(diffS)} ${suffix}`;
 }
 
 function describeTurn(task: TaskDetail, turnEvent: TaskEvent | null): string {
-  // Prefer the live ``turn`` from the most recent ``agent_turn`` event
-  // over the persisted ``turns_attempted`` — the former updates mid-task
-  // (the latter is written on terminal completion in most paths).
-  const liveTurn = readNumberField(turnEvent?.metadata, 'turn');
-  const currentTurn = liveTurn ?? task.turns_attempted ?? null;
+  // A finished task shows its record, because the turn event may have left the event window.
+  // A recorded 0 stands for no count. ``turns_attempted`` can exceed the limit (see ``TaskDetail``).
+  const recorded = TERMINAL_STATUSES.includes(task.status) ? task.turns_completed : null;
+  const currentTurn = recorded || readNumberField(turnEvent?.metadata, 'turn');
   const maxTurns = task.max_turns ?? null;
   if (currentTurn == null && maxTurns == null) return PLACEHOLDER;
   const left = currentTurn == null ? PLACEHOLDER : String(currentTurn);
   const right = maxTurns == null ? PLACEHOLDER : String(maxTurns);
-  return `${left} / ~${right}`;
+  return `${left} / ${right}`;
 }
 
 function describeMilestone(milestoneEvent: TaskEvent | null, now: number): string {
@@ -639,7 +672,7 @@ function describeBlocker(blockerEvent: TaskEvent | null, now: number): string | 
 }
 
 function describeCurrent(task: TaskDetail, activity: TaskEvent | null): string {
-  if (isTerminalStatus(task.status)) {
+  if (TERMINAL_STATUSES.includes(task.status)) {
     return `task ${task.status.toLowerCase()}`;
   }
   if (!activity) return PLACEHOLDER;
@@ -694,6 +727,19 @@ function readNumberField(meta: Record<string, unknown> | undefined, key: string)
   if (!meta) return null;
   const v = meta[key];
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+
+/**
+ * The agent's last heartbeat while its age says whether the agent is alive, else null:
+ * the task is still going, the agent has beaten, and its backend keeps beating. On `ecs`
+ * it does not: the agent runs the pipeline directly there, without the server that beats
+ * every 45 s, and writes one heartbeat at its start. The age of that one only grows on a
+ * healthy task, and the orchestrator does not go by it. One rule for the list, the detail
+ * view and the status snapshot, so that the three never disagree.
+ */
+function liveHeartbeat(task: Pick<TaskSummary, 'status' | 'agent_heartbeat_at' | 'compute_type'>): string | null {
+  if (TERMINAL_STATUSES.includes(task.status) || task.compute_type === 'ecs') return null;
+  return task.agent_heartbeat_at;
 }
 
 /**

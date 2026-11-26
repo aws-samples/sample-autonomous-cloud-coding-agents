@@ -159,8 +159,28 @@ def _enabled(channel_source: str, channel_metadata: dict[str, str] | None) -> st
     return channel_metadata.get("linear_issue_id") or None
 
 
-def _graphql(query: str, variables: dict[str, Any]) -> dict[str, Any] | None:
+def _is_agent_session(channel_metadata: dict[str, str] | None) -> bool:
+    """Whether the task was started from a native Linear agent session.
+
+    A session shows the run's state itself (ADR-018 Phase 2), so the 👀/✅/❌
+    issue reactions would only repeat it and notify the issue's subscribers a
+    second time. Workflow-state transitions still apply: the session does not
+    move the issue.
+    """
+    return bool(channel_metadata and channel_metadata.get("linear_agent_session_id"))
+
+
+def _masked(text: str, token: str) -> str:
+    """``text`` with ``token``, when one was handed to the call, replaced by ``***``.
+    ``shell.log`` only knows the tokens that are in the environment."""
+    return text.replace(token, "***") if token else text
+
+
+def _graphql(query: str, variables: dict[str, Any], token: str = "") -> dict[str, Any] | None:
     """POST a GraphQL query. Return parsed data on success, None on any failure.
+
+    The request is authenticated with ``token`` when one is given, and with
+    ``LINEAR_API_TOKEN`` of the environment otherwise.
 
     Swallows network / auth / schema errors with a WARN log — reactions are
     advisory and never gate the pipeline. After
@@ -176,8 +196,8 @@ def _graphql(query: str, variables: dict[str, Any]) -> dict[str, Any] | None:
         log("DEBUG", "linear_reactions: auth circuit still open; short-circuiting call")
         return None
 
-    token = os.environ.get("LINEAR_API_TOKEN", "")
-    if not token:
+    authorization = token or os.environ.get("LINEAR_API_TOKEN", "")
+    if not authorization:
         log("WARN", "linear_reactions: LINEAR_API_TOKEN not set; skipping reaction")
         return None
 
@@ -186,13 +206,13 @@ def _graphql(query: str, variables: dict[str, Any]) -> dict[str, Any] | None:
             LINEAR_GRAPHQL_URL,
             json={"query": query, "variables": variables},
             headers={
-                "Authorization": token,
+                "Authorization": authorization,
                 "Content-Type": "application/json",
             },
             timeout=REQUEST_TIMEOUT_SECONDS,
         )
     except requests.RequestException as e:
-        log("WARN", f"linear_reactions: request failed ({type(e).__name__}): {e}")
+        log("WARN", _masked(f"linear_reactions: request failed ({type(e).__name__}): {e}", token))
         # nosemgrep: py-silent-success-masking -- Linear reactions are best-effort on network blips
         return None
 
@@ -226,15 +246,25 @@ def _graphql(query: str, variables: dict[str, Any]) -> dict[str, Any] | None:
     with _auth_state_lock:
         _consecutive_auth_failures = 0
 
-    body = resp.json() if resp.content else {}
+    # A 200 whose body is not a JSON object (a proxy's HTML page, ``null``, a list)
+    # is one more failure of an advisory call. Raised out of here, the parse error
+    # or the ``.get`` below leaves the pipeline hook and the task is written FAILED.
+    try:
+        body = resp.json() if resp.content else {}
+    except ValueError:
+        body = None
+    if not isinstance(body, dict):
+        log("WARN", "linear_reactions: HTTP 200 from Linear without a JSON object in the body")
+        return None
+
     if body.get("errors"):
-        log("WARN", f"linear_reactions: GraphQL errors: {body['errors']}")
+        log("WARN", _masked(f"linear_reactions: GraphQL errors: {body['errors']}", token))
         return None
 
     return body.get("data") or {}
 
 
-def _get_viewer_id() -> str | None:
+def _get_viewer_id(token: str) -> str | None:
     """Return the API-token owner's user id, cached for the container lifetime.
 
     Used by ``_sweep_stale_reactions`` to scope deletes to bgagent-owned
@@ -244,7 +274,7 @@ def _get_viewer_id() -> str | None:
     global _viewer_id_cache
     if _viewer_id_cache:
         return _viewer_id_cache
-    data = _graphql(_VIEWER_QUERY, {})
+    data = _graphql(_VIEWER_QUERY, {}, token=token)
     if not data:
         return None
     viewer_id = (data.get("viewer") or {}).get("id")
@@ -287,7 +317,7 @@ def _transition_issue_state(issue_id: str, target_type: str, preferred_names: li
         if target:
             break
     if target is None:
-        target = sorted(of_type, key=lambda s: s.get("position", 0))[0]
+        target = min(of_type, key=lambda s: s.get("position", 0))
 
     current = issue.get("state") or {}
     if current.get("id") == target.get("id"):
@@ -310,7 +340,7 @@ def _transition_issue_state(issue_id: str, target_type: str, preferred_names: li
         log("TASK", f"linear_reactions: issue {issue_id} → {target.get('name')!r}")
 
 
-def _sweep_stale_reactions_safe(issue_id: str, exclude_id: str | None = None) -> None:
+def _sweep_stale_reactions_safe(issue_id: str, token: str, exclude_id: str | None = None) -> None:
     """Top-level wrapper for the sweep daemon thread.
 
     Catches everything so an unexpected ``TypeError`` / ``AttributeError``
@@ -319,15 +349,15 @@ def _sweep_stale_reactions_safe(issue_id: str, exclude_id: str | None = None) ->
     environments.
     """
     try:
-        _sweep_stale_reactions(issue_id, exclude_id=exclude_id)
+        _sweep_stale_reactions(issue_id, token, exclude_id=exclude_id)
     except Exception as e:
         log(
             "ERROR",
-            f"linear_reactions: sweep thread crashed ({type(e).__name__}): {e}",
+            _masked(f"linear_reactions: sweep thread crashed ({type(e).__name__}): {e}", token),
         )
 
 
-def _sweep_stale_reactions(issue_id: str, exclude_id: str | None = None) -> None:
+def _sweep_stale_reactions(issue_id: str, token: str, exclude_id: str | None = None) -> None:
     """Delete bgagent-owned 👀/✅/❌ reactions on the issue.
 
     Called from ``react_task_started`` *after* the new 👀 is posted, so
@@ -345,14 +375,14 @@ def _sweep_stale_reactions(issue_id: str, exclude_id: str | None = None) -> None
     and never gates the pipeline.
     """
     sweep_start = time.monotonic()
-    viewer_id = _get_viewer_id()
+    viewer_id = _get_viewer_id(token)
     if not viewer_id:
         log("WARN", "linear_reactions: skipping sweep — could not resolve viewer id")
         return
 
     viewer_ms = int((time.monotonic() - sweep_start) * 1000)
     reactions_start = time.monotonic()
-    data = _graphql(_ISSUE_REACTIONS_QUERY, {"issueId": issue_id})
+    data = _graphql(_ISSUE_REACTIONS_QUERY, {"issueId": issue_id}, token=token)
     reactions_ms = int((time.monotonic() - reactions_start) * 1000)
     if not data:
         log(
@@ -380,7 +410,7 @@ def _sweep_stale_reactions(issue_id: str, exclude_id: str | None = None) -> None
         if exclude_id is not None and rid == exclude_id:
             # The 👀 we just posted — skip, it's the new marker.
             continue
-        if _graphql(_DELETE_MUTATION, {"id": rid}) is not None:
+        if _graphql(_DELETE_MUTATION, {"id": rid}, token=token) is not None:
             deletes += 1
     deletes_ms = int((time.monotonic() - deletes_start) * 1000)
     total_ms = int((time.monotonic() - sweep_start) * 1000)
@@ -411,6 +441,10 @@ def react_task_started(
     issue_id = _enabled(channel_source, channel_metadata)
     if not issue_id:
         return None
+    if _is_agent_session(channel_metadata):
+        if transition_state:
+            _transition_issue_state(issue_id, "started", ["In Progress"])
+        return None
     log("TASK", f"linear_reactions: react_task_started ENTER issue_id={issue_id}")
     started_at = time.monotonic()
 
@@ -438,10 +472,11 @@ def react_task_started(
     # pipeline doesn't block on Linear API latency. Daemon=True so the
     # thread doesn't keep the container alive past the agent's terminal
     # status. The sweep filters out the just-posted reaction id so it
-    # never deletes itself.
+    # never deletes itself. It is handed the token because it can still be
+    # running when ``run_task`` ends and restores the environment.
     threading.Thread(
         target=_sweep_stale_reactions_safe,
-        args=(issue_id,),
+        args=(issue_id, os.environ.get("LINEAR_API_TOKEN", "")),
         kwargs={"exclude_id": rid},
         daemon=True,
         name="linear-reactions-sweep",
@@ -473,12 +508,13 @@ def react_task_finished(
     issue_id = _enabled(channel_source, channel_metadata)
     if not issue_id:
         return
-    if started_reaction_id:
-        _graphql(_DELETE_MUTATION, {"id": started_reaction_id})
-    _graphql(
-        _CREATE_MUTATION,
-        {"issueId": issue_id, "emoji": EMOJI_SUCCESS if success else EMOJI_FAILURE},
-    )
+    if not _is_agent_session(channel_metadata):
+        if started_reaction_id:
+            _graphql(_DELETE_MUTATION, {"id": started_reaction_id})
+        _graphql(
+            _CREATE_MUTATION,
+            {"issueId": issue_id, "emoji": EMOJI_SUCCESS if success else EMOJI_FAILURE},
+        )
     # Workflow-state transition: on a clean finish, a writeable single task
     # moves the issue to
     # In Review (work done, awaiting human merge) — the same target the

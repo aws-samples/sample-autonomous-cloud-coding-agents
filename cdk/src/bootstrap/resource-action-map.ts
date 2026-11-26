@@ -49,6 +49,7 @@ export const CFN_TYPES_WITHOUT_EXEC_ROLE_IAM = new Set([
  * Parent issue: #350. Full synth-time aspect tracked in #125.
  */
 export const RESOURCE_ACTION_MAP: Record<string, readonly string[]> = {
+  'AWS::SSM::Parameter': ['ssm:PutParameter', 'ssm:GetParameters', 'ssm:DeleteParameter'],
   'AWS::ApiGateway::Authorizer': ['apigateway:POST'],
   'AWS::ApiGateway::Method': ['apigateway:POST'],
   'AWS::ApiGateway::RequestValidator': ['apigateway:POST'],
@@ -161,6 +162,8 @@ export const RESOURCE_ACTION_MAP: Record<string, readonly string[]> = {
   'AWS::StepFunctions::StateMachine': ['states:CreateStateMachine'],
   'AWS::WAFv2::WebACL': ['wafv2:CreateWebACL'],
   'AWS::WAFv2::WebACLAssociation': ['wafv2:AssociateWebACL'],
+  // Custom resources: the execution role only invokes the provider's Lambda.
+  // The provider calls AWS under its own role, so its actions are not listed (#878).
   'Custom::AWS': ['lambda:InvokeFunction'],
   'Custom::AgentRegistry': ['lambda:InvokeFunction'],
   // CDK BucketDeployment's custom resource — ships the static Linear vault consent

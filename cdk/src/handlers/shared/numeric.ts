@@ -20,19 +20,19 @@
 /**
  * Numeric coercion helpers for the DynamoDB / Document-client boundary.
  *
- * Rationale: the AWS SDK v3 Document client deserializes DynamoDB
- * ``Number`` attributes as JavaScript ``string``s in some code paths
- * (notably ``TaskRecord.{duration_s,cost_usd}`` from ``TaskTable``),
- * even though our TypeScript types declare them as ``number | null``.
- * Callers that go on to call ``.toFixed()`` / do arithmetic on those
- * fields silently fail with ``TypeError: input.costUsd.toFixed is not
- * a function`` (Scenario 7-extended deploy validation uncovered this
- * in the GitHub fan-out dispatcher).
+ * Rationale: the Python agent stores ``cost_usd``, ``duration_s`` and the
+ * turn counters on the task row as DynamoDB String attributes
+ * (``agent/src/task_state.py::write_terminal`` passes them through
+ * ``str()``), and the Document client returns a String attribute as a
+ * JavaScript ``string``; only a Number attribute comes back as a ``number``.
+ * A caller that goes on to call ``.toFixed()`` on such a field fails
+ * with ``TypeError: input.costUsd.toFixed is not a function``, and
+ * ``+`` concatenates instead of adding (Scenario 7-extended deploy
+ * validation uncovered the first in the GitHub fan-out dispatcher).
  *
  * Use these helpers at any boundary that passes those fields on to
- * numeric consumers. Adding a third call site is a signal that the
- * underlying type declaration should be widened (``number | string |
- * null``) at the DDB load boundary; for now, coerce locally.
+ * numeric consumers. ``TaskRecord`` declares them ``number | string``,
+ * so ``.toFixed()`` or arithmetic on the raw field does not compile.
  */
 
 export interface CoerceContext {
@@ -49,9 +49,17 @@ export interface CoerceLogger {
 }
 
 /**
+ * How much of a value that is not a number the warning quotes. The value is
+ * read from storage, where it can be as long as its record, and the warning
+ * repeats at every read: the first characters are enough to tell what a
+ * writer stored.
+ */
+const RAW_LOG_CHARS = 100;
+
+/**
  * Coerce a value that should be a number but may arrive as a string
- * (DynamoDB Document-client deserializes ``Number`` attributes as
- * strings) into a finite ``number`` or ``null``.
+ * (the agent stores some task fields as DynamoDB String attributes)
+ * into a finite ``number`` or ``null``.
  *
  * Rules:
  *   - ``null`` / ``undefined`` / empty-string → ``null`` (treated as
@@ -78,7 +86,7 @@ export function coerceNumericOrNull(
     logger.warn('[numeric] non-finite coercion — dropping field', {
       event: 'numeric.coercion_failed',
       field: context.field,
-      raw: String(value),
+      raw: String(value).slice(0, RAW_LOG_CHARS),
       task_id: context.task_id,
       event_id: context.event_id,
     });

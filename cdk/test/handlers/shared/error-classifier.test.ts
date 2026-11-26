@@ -17,9 +17,19 @@
  *  SOFTWARE.
  */
 
-import { classifyError, ErrorCategory, ErrorClass, isTransientError, retryGuidance, type ErrorClassification } from '../../../src/handlers/shared/error-classifier';
+import { classifyError, ErrorCategory, ErrorClass, formatMicrovmTerminalFailure, isTransientError, retryGuidance, type ErrorClassification } from '../../../src/handlers/shared/error-classifier';
 import { LAMBDA_MICROVM_SUPPORTED_REGIONS } from '../../../src/handlers/shared/microvm-regions';
 import { toTaskDetail, type TaskRecord } from '../../../src/handlers/shared/types';
+
+// Persisted agent push preflight refusals, printed from agent/src/repo.py.
+const MSG_CLASSIC = 'PushCapabilityError: Token cannot push to owner/repo: GitHub refused the classic personal access token write access (remote: Permission to owner/repo.git denied to <token user>). To fix it, give the token the `public_repo` scope for a public repository, or `repo` for a private one (`repo` grants every private repository its owner can reach); its owner needs write access to the repository. The task stopped before the agent ran, so no work was lost. Token types and the permissions they need: agent/README.md, GitHub PAT — Minimal Permissions.';
+const MSG_FINE = 'PushCapabilityError: Token cannot push to owner/repo: GitHub refused the fine-grained personal access token write access (remote: Permission to owner/repo.git denied to <token user>). To fix it, include the repository in the token\'s repository access and give it the Contents permission with Read and write access; its owner needs write access to the repository. The task stopped before the agent ran, so no work was lost. Token types and the permissions they need: agent/README.md, GitHub PAT — Minimal Permissions.';
+const MSG_APP = 'PushCapabilityError: Token cannot push to owner/repo: GitHub refused the GitHub App token write access (remote: Permission to owner/repo.git denied to <token user>). To fix it, give the app the Contents permission with Read and write access and install it on the repository. The task stopped before the agent ran, so no work was lost. Token types and the permissions they need: agent/README.md, GitHub PAT — Minimal Permissions.';
+const MSG_UNKNOWN = 'PushCapabilityError: Token cannot push to owner/repo: GitHub refused the GitHub token write access (remote: Permission to owner/repo.git denied to <token user>). To fix it, for a fine-grained personal access token, include the repository in the token\'s repository access and give it the Contents permission with Read and write access; for a classic one, give the token the `public_repo` scope for a public repository, or `repo` for a private one (`repo` grants every private repository its owner can reach); either way, its owner needs write access to the repository. The task stopped before the agent ran, so no work was lost. Token types and the permissions they need: agent/README.md, GitHub PAT — Minimal Permissions.';
+// The longest refusal: a 39 + 1 + 100 character owner/repo, a token of no known type and a
+// full git excerpt, cut to the 1,000 characters the task record keeps (agent/src/task_state.py).
+const MSG_LONGEST = 'PushCapabilityError: Token cannot push to ooooooooooooooooooooooooooooooooooooooo/rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr: GitHub refused the GitHub token write access (remote: Permission to ooooooooooooooooooooooooooooooooooooooo/rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr.git denied to <token user> xxxxxxxxxx). To fix it, for a fine-grained personal access token, include the repository in the token\'s repository access and give it the Contents permission with Read and write access; for a classic one, give the token the `public_repo` scope for a public repository, or `repo` for a private one (`repo` grants every private repository its owner can reach); either way, its owner needs write access to the repository. The task stopped before the agent ran, so no work was lost. Token types and the permissions they need: agent/README.md, GitHub PAT — Minimal Permissions.';
+const MSG_DOTTED = 'PushCapabilityError: Token cannot push to owner/my.repo: GitHub refused the classic personal access token write access (remote: Permission to owner/my.repo.git denied to <token user>). To fix it, give the token the `public_repo` scope for a public repository, or `repo` for a private one (`repo` grants every private repository its owner can reach); its owner needs write access to the repository. The task stopped before the agent ran, so no work was lost. Token types and the permissions they need: agent/README.md, GitHub PAT — Minimal Permissions.';
 
 describe('classifyError', () => {
   // --- Null / empty inputs ---
@@ -34,6 +44,14 @@ describe('classifyError', () => {
 
   test('returns null for empty string', () => {
     expect(classifyError('')).toBeNull();
+  });
+
+  test.each([
+    ['a number', 404],
+    ['a boolean', true],
+    ['a map', { message: 'Guardrail blocked' }],
+  ])('a value that is not text has no classification: %s', (_kind, value) => {
+    expect(classifyError(value as unknown as string)).toBeNull();
   });
 
   // --- Auth errors ---
@@ -66,6 +84,20 @@ describe('classifyError', () => {
       expect(result!.retryable).toBe(false);
     });
 
+    test('classifies a pull request from a fork', () => {
+      const result = classifyError(
+        'Pre-flight check failed: PR_FROM_FORK — PR #42 in owner/repo comes from another repository (a fork): '
+        + 'its branch is not in owner/repo, so it cannot be checked out or pushed to',
+      )!;
+      expect(result.category).toBe(ErrorCategory.AUTH);
+      expect(result.title).toBe('Pull request from a fork');
+      expect(result.retryable).toBe(false);
+      // The request is what has to change: neither a retry nor an admin makes
+      // the branch of a fork a branch of this repository.
+      expect(result.errorClass).toBe(ErrorClass.USER);
+      expect(result.remedy).toContain('branch of the repository itself');
+    });
+
     test('classifies token push scope error (detailed message)', () => {
       const result = classifyError(
         'Pre-flight check failed: INSUFFICIENT_GITHUB_REPO_PERMISSIONS — Token cannot push to owner/repo. Required: push. For fine-grained PATs use Contents Read and write.',
@@ -88,10 +120,102 @@ describe('classifyError', () => {
       expect(result!.title).toBe('Insufficient GitHub token scopes');
     });
 
+    // The errors agent/src/repo.py raises (PushCapabilityError) when GitHub refuses
+    // the dry-run push, verbatim as the pipeline persists them (prefixed with the
+    // exception's type name), printed from the agent code for #801's test cases.
+    test.each([
+      [
+        'a token without write access',
+        MSG_CLASSIC,
+        ErrorCategory.AUTH,
+        'Insufficient GitHub token scopes',
+      ],
+      [
+        'a rejected credential',
+        'PushCapabilityError: BLOCKED[auth_failure]: GitHub did not accept a token for the push (remote: Invalid username or token. Password authentication is not supported.): it is missing, invalid, expired or revoked. Replace the GitHub token secret, then resubmit. The task stopped before the agent ran, so no work was lost. (resource: owner/repo)',
+        ErrorCategory.BLOCKED,
+        'Blocked: authentication rejected',
+      ],
+      [
+        'an archived repository',
+        'PushCapabilityError: Repository owner/repo is archived on GitHub, so it is read-only (remote: This repository was archived so it is read-only.). Unarchive it or target another repository. The task stopped before the agent ran, so no work was lost.',
+        ErrorCategory.CONFIG,
+        'Repository is archived',
+      ],
+      [
+        'SAML SSO enforcement',
+        "PushCapabilityError: GitHub organization policy blocks pushes to owner/repo: it enforces SAML single sign-on and the token is not authorized for it. To fix it, authorize the classic token for the organization (GitHub > Settings > Developer settings > Personal access tokens > Tokens (classic) > Configure SSO) (remote: The 'acme' organization has enabled or enforced SAML SSO.). The task stopped before the agent ran, so no work was lost.",
+        ErrorCategory.AUTH,
+        'GitHub organization policy blocks the token',
+      ],
+      [
+        'an IP allow list',
+        "PushCapabilityError: GitHub organization policy blocks pushes to owner/repo: its IP allow list does not include the agent's address. To fix it, add the agent's egress IP addresses to the organization's IP allow list (remote: Although you appear to have the correct authorization credentials, the `acme` organization has an IP allow list enabled, and your IP address is not permitted to access this resource.). The task stopped before the agent ran, so no work was lost.",
+        ErrorCategory.AUTH,
+        'GitHub organization policy blocks the token',
+      ],
+    ])('classifies the agent push preflight refusal for %s (#801)', (_label, message, category, title) => {
+      // The git line quoted in each ("denied", "403", "credentials") must not move it
+      // to another title, and none gets the scope remedy unless scopes are the cause.
+      const result = classifyError(message);
+      expect(result!.category).toBe(category);
+      expect(result!.title).toBe(title);
+      expect(result!.retryable).toBe(false);
+    });
+
+    // The refusal's fix depends on the token type. The classification (which the
+    // web console's failure banner shows) carries the agent's fix, not the generic
+    // fine-grained-PAT remedy of the orchestrator's message (#801 review).
+    test.each([
+      ['a classic PAT', MSG_CLASSIC, 'owner/repo', ['`public_repo` scope for a public repository', '`repo` for a private one', 'its owner needs write access']],
+      ['a fine-grained PAT', MSG_FINE, 'owner/repo', ['repository access', 'Contents permission with Read and write access']],
+      ['a GitHub App token', MSG_APP, 'owner/repo', ['install it on the repository']],
+      ['an unknown token type', MSG_UNKNOWN, 'owner/repo', ['For a fine-grained personal access token', 'for a classic one']],
+      ['a repository with a dot in its name', MSG_DOTTED, 'owner/my.repo', ['its owner needs write access to the repository']],
+      // The record is cut at 1,000 characters; the sentence the pattern needs must survive (#801 review).
+      ['the longest refusal, as stored', MSG_LONGEST, 'ooooooooooooooooooooooooooooooooooooooo/rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr', ['For a fine-grained personal access token', 'for a classic one']],
+    ])('carries the agent push preflight fix for %s (#801)', (_label, message, repo, fragments) => {
+      const result = classifyError(message);
+      expect(result!.title).toBe('Insufficient GitHub token scopes');
+      expect(result!.description).toContain(repo);
+      for (const fragment of fragments) {
+        expect(result!.remedy).toContain(fragment);
+      }
+      expect(result!.remedy).toMatch(/Then resubmit\.$|Then resubmit\. /);
+      // Not the orchestrator pattern's generic remedy.
+      expect(result!.remedy).not.toContain('Update the PAT with');
+      expect(result!.retryable).toBe(false);
+    });
+
+    test('keeps the generic remedy for the orchestrator preflight message', () => {
+      const result = classifyError('Pre-flight check failed: INSUFFICIENT_GITHUB_REPO_PERMISSIONS — Token cannot push to owner/repo. Required: push.');
+      expect(result!.title).toBe('Insufficient GitHub permissions');
+    });
+
     test('classifies bare "Token cannot interact with pull requests on" without error code', () => {
       const result = classifyError('Token cannot interact with pull requests on owner/repo');
       expect(result!.category).toBe(ErrorCategory.AUTH);
       expect(result!.title).toBe('Insufficient GitHub token scopes');
+    });
+
+    test('classifies a 401 from GitHub as a rejected token, not as an unreachable API', () => {
+      // Pre-flight files every non-2xx answer of /rate_limit under
+      // GITHUB_UNREACHABLE (preflight.test.ts: "rate_limit 401 (revoked token)").
+      // GitHub was reached and refused the credential: no retry helps until an
+      // admin stores a valid token.
+      const result = classifyError(
+        'Pre-flight check failed: GITHUB_UNREACHABLE — GitHub API returned HTTP 401',
+      )!;
+      expect(result.category).toBe(ErrorCategory.AUTH);
+      expect(result.title).toBe('GitHub token rejected');
+      expect(result.retryable).toBe(false);
+      expect(result.errorClass).toBe(ErrorClass.SERVICE);
+      expect(result.remedy).toContain('bgagent github set-token');
+      expect(retryGuidance(result)).not.toMatch(/temporary infrastructure/i);
+      // Only the 401: a 5xx in the same message is still GitHub being down.
+      expect(isTransientError(classifyError(
+        'Pre-flight check failed: GITHUB_UNREACHABLE — GitHub API returned HTTP 503',
+      ))).toBe(true);
     });
   });
 
@@ -206,6 +330,30 @@ describe('classifyError', () => {
       expect(result!.retryable).toBe(true);
     });
 
+    // The stranded-task reconciler finds the same condition as the test above
+    // when the orchestrator is no longer there to notice it. These are the two
+    // messages of `failStrandedTask` in reconcile-stranded-tasks.ts.
+    const stranded = (status: string) =>
+      `Stranded: ${status} for 1260s — no pipeline attached before the stranded-task timeout. `
+      + 'This usually means the orchestrator Lambda crashed before invoking '
+      + 'the runtime, or the agent container crashed during startup.';
+    const approvalStranded = 'Approval stranded: task paused for approval for 7300s with '
+      + 'no resume transition. Typically caused by the agent container being '
+      + 'evicted mid-approval. Resubmit the task if the work is still needed.';
+
+    test.each([
+      { status: 'SUBMITTED', message: stranded('SUBMITTED') },
+      { status: 'HYDRATING', message: stranded('HYDRATING') },
+      { status: 'AWAITING_APPROVAL', message: approvalStranded },
+    ])('classifies a task found stranded in $status as a retryable platform fault', ({ message }) => {
+      const result = classifyError(message)!;
+      expect(result.category).toBe(ErrorCategory.COMPUTE);
+      expect(result.title).toBe('The platform lost track of this task');
+      expect(result.retryable).toBe(true);
+      expect(result.errorClass).toBe(ErrorClass.TRANSIENT);
+      expect(retryGuidance(result)).toMatch(/reply here to try again/i);
+    });
+
     test('classifies agent heartbeat loss', () => {
       const result = classifyError(
         'Agent session lost: no recent heartbeat from the runtime (container may have crashed, been OOM-killed, or stopped)',
@@ -245,6 +393,34 @@ describe('classifyError', () => {
       expect(result!.retryable).toBe(false);
     });
 
+    // The agent finished; the post-agent build gate is what stopped the task
+    // (`_resolve_overall_task_status` in agent/src/pipeline.py). failure-reply.ts
+    // reads the same two messages as "the build/tests didn't pass" and "didn't
+    // finish in time", each followed by "reply with guidance and I'll try again".
+    test.each(['success', 'end_turn'])(
+      'a red build after agent_status=%s is a retryable build failure, not "the agent reported a non-success status"',
+      (agentStatus) => {
+        const result = classifyError(`Task did not succeed (agent_status='${agentStatus}', build_ok=False)`)!;
+        expect(result.category).toBe(ErrorCategory.AGENT);
+        expect(result.title).toBe('Build or tests did not pass');
+        expect(result.description).not.toMatch(/non-success status/i);
+        expect(result.retryable).toBe(true);
+        expect(result.errorClass).toBe(ErrorClass.USER);
+        expect(retryGuidance(result)).toMatch(/extra guidance/i);
+      },
+    );
+
+    test('a build gate that timed out reads as "didn\'t finish in time", not as a red build', () => {
+      const result = classifyError("Task did not succeed (agent_status='success', build_ok=timeout)")!;
+      expect(result.category).toBe(ErrorCategory.TIMEOUT);
+      expect(result.title).toMatch(/build\/tests didn't finish in time/i);
+      expect(result.title).not.toMatch(/did not pass/i);
+      expect(result.retryable).toBe(true);
+      // USER, not TRANSIENT: an unchanged slow build times out again.
+      expect(result.errorClass).toBe(ErrorClass.USER);
+      expect(retryGuidance(result)).toMatch(/extra guidance/i);
+    });
+
     test('build_ok=infra is a retryable COMPUTE fault, not "did not succeed"/build-failed', () => {
       // A build killed by ENOSPC/OOM never verified the code — must read as a
       // transient infra fault (retry / more capacity), NOT the generic
@@ -260,22 +436,35 @@ describe('classifyError', () => {
       expect(result!.remedy).toMatch(/try again|capacity|admin/i);
     });
 
-    test('deliverable=lost is a retryable AGENT fault (work not saved), not the generic did-not-succeed', () => {
-      // A new-work task reported agent-success but no commit reached the branch
-      // and no PR opened — the agent's changes were LOST (nested-clone workspace
-      // fault). Must read as retryable/transient with "not saved" copy, NOT the
-      // non-retryable "Agent task did not succeed". Ordered before the
-      // agent_status catch-all so it wins.
-      const result = classifyError(
-        'Task did not succeed (agent_status=success, deliverable=lost): the coding '
-        + 'task reported success but no commit reached the branch and no PR was opened '
-        + "— the agent's changes did not land in the task's repository.",
-      );
-      expect(result!.category).toBe(ErrorCategory.AGENT);
-      expect(result!.title).toMatch(/not saved/i);
-      expect(result!.retryable).toBe(true);
-      expect(result!.errorClass).toBe(ErrorClass.TRANSIENT);
-      expect(result!.remedy).toMatch(/try again/i);
+    // A task record written by an earlier agent image carries the first wording.
+    // The API classifies a record when it is read, so both wordings classify alike.
+    const deliveredNothing = 'Task did not succeed (agent_status=success, deliverable=lost): the coding '
+      + 'task reported success but no commit reached the branch and no PR was opened — ';
+
+    test.each([
+      {
+        writer: 'an earlier agent image',
+        message: `${deliveredNothing}the agent's changes did not land in the task's repository.`,
+      },
+      {
+        writer: 'the agent',
+        message: `${deliveredNothing}either the agent made no change, or its changes did not land in the task's repository.`,
+      },
+    ])('deliverable=lost, as $writer words it, names both lost work and a run that changed nothing', ({ message }) => {
+      const result = classifyError(message)!;
+      expect(result.category).toBe(ErrorCategory.AGENT);
+      expect(result.title).toBe('No change was delivered');
+      expect(result.description).toMatch(/nothing to change/i);
+      expect(result.description).toMatch(/lost/i);
+      expect(result.remedy).toMatch(/already has what you asked for/i);
+      expect(result.remedy).toMatch(/try again/i);
+      expect(`${result.description} ${result.remedy}`).not.toMatch(/transient/i);
+      expect(result.retryable).toBe(true);
+      // USER, not TRANSIENT: a retry cannot help a run that changed nothing.
+      expect(result.errorClass).toBe(ErrorClass.USER);
+      expect(isTransientError(result)).toBe(false);
+      expect(retryGuidance(result)).toMatch(/extra guidance/i);
+      expect(retryGuidance(result)).not.toMatch(/temporary infrastructure/i);
     });
 
     test('deliverable=no_pr says the work is SAFE on the branch (the pull request just did not open)', () => {
@@ -434,6 +623,44 @@ describe('classifyError', () => {
       expect(result!.retryable).toBe(true);
     });
 
+    // A repository on a compute backend the stack does not deploy. The pin is
+    // refused when the blueprint loads (`resolveRepositoryBackend` in
+    // compute-backend.ts); a stack that selects the backend but cannot start a
+    // session on it yet fails in the strategy (for lambda-microvm: the documented
+    // state between the first deploy and the one that adds the image). The
+    // messages are the literal ones, as `failTask` persists them.
+    test.each([
+      {
+        where: 'the pin is refused when the blueprint loads',
+        message: "Blueprint config load failed: Error: Repository compute_type 'ecs' is not deployed; "
+          + "this stack deploys only 'agentcore'. Update the repository configuration before submitting tasks.",
+      },
+      {
+        where: 'the MicroVM strategy has no image to run',
+        message: 'Session start failed: Error: This repository is configured compute_type=lambda-microvm, but this stack was deployed without the '
+          + 'Lambda MicroVMs substrate (missing MICROVM_IMAGE_IDENTIFIER/MICROVM_EXECUTION_ROLE_ARN/'
+          + 'MICROVM_EGRESS_CONNECTOR_ARNS/MICROVM_PAYLOAD_BUCKET). Redeploy the stack with '
+          + '`--context compute_type=lambda-microvm` to provision the MicroVM substrate, or set this repo to '
+          + 'compute_type=agentcore (bgagent repo onboard <repo> --compute-type agentcore).',
+      },
+      {
+        where: 'the ECS strategy has no cluster to run on',
+        message: 'Session start failed: Error: This repository is configured compute_type=ecs, but this stack was deployed without the ECS '
+          + 'substrate (missing ECS_CLUSTER_ARN/ECS_TASK_DEFINITION_ARN/ECS_SUBNETS/ECS_SECURITY_GROUP). '
+          + 'Redeploy the stack with `--context compute_type=ecs` to provision the Fargate substrate, or '
+          + 'set this repo to compute_type=agentcore (bgagent repo onboard <repo> --compute-type agentcore).',
+      },
+    ])('classifies a backend the stack does not deploy as a non-retryable config fault ($where)', ({ message }) => {
+      const result = classifyError(message)!;
+      expect(result.category).toBe(ErrorCategory.CONFIG);
+      expect(result.title).toBe('The repository\'s compute backend is not deployed in this stack');
+      expect(result.retryable).toBe(false);
+      expect(result.errorClass).toBe(ErrorClass.SERVICE);
+      // Neither wrapper's own copy: a retry cannot work, and the cluster is not unhealthy.
+      expect(result.remedy).not.toMatch(/AgentCore Runtime or ECS cluster health|RepoTable/);
+      expect(retryGuidance(result)).not.toMatch(/temporary infrastructure/i);
+    });
+
     test('classifies hydration failure (non-guardrail)', () => {
       const result = classifyError(
         'Hydration failed: Error: Failed to fetch issue body',
@@ -459,27 +686,69 @@ describe('classifyError', () => {
       expect(result!.retryable).toBe(false);
     });
 
-    test('classifies a build/verify command TIMEOUT distinctly from a crash', () => {
-      // A repo's full `mise run build` exceeded the 600s cap → Python
+    test.each([
+      'Orchestrator poll timeout exceeded',
+      // On records written before the approval wait got its own message.
+      'Orchestrator poll timeout exceeded while awaiting approval',
+      // What finalizeTask writes now when the window closes on an approval wait.
+      'Task execution limit reached while waiting for approval. The task has closed; submit a new task to continue.',
+    ])('does not answer "%s" with "temporary infrastructure issue, reply to retry"', (message) => {
+      // The task used the whole polling window (about 8.5 hours), or its approval
+      // never came. Neither answer is retryable, so the next-step line must not
+      // invite a plain retry.
+      const result = classifyError(message)!;
+      expect(result.retryable).toBe(false);
+      expect(result.errorClass).toBe(ErrorClass.USER);
+      expect(retryGuidance(result)).toMatch(/may not resolve this/i);
+      expect(retryGuidance(result)).not.toMatch(/temporary infrastructure/i);
+    });
+
+    test.each([
+      {
+        command: 'gh repo clone',
+        message: "TimeoutExpired: Command '['gh', 'repo', 'clone', '--no-upstream', 'acme/monorepo', '/workspace/01KX']' timed out after 600 seconds",
+      },
+      {
+        command: 'mise install',
+        message: "TimeoutExpired: Command '['mise', 'install']' timed out after 600 seconds",
+      },
+      {
+        command: 'git push',
+        message: "TimeoutExpired: Command '['git', 'push', '-u', 'origin', 'bgagent/01KX/fix']' timed out after 600 seconds",
+      },
+    ])('classifies an uncaught $command TIMEOUT distinctly from a crash, and not as a slow build', ({ message }) => {
+      // A command of the agent exceeded `run_cmd`'s 600s cap → Python
       // TimeoutExpired. Before this pattern it fell to "Unexpected error"; now it
-      // reads as a build-time-out (user-actionable: retry / raise the cap), not a
-      // mysterious crash.
-      const result = classifyError(
-        "TimeoutExpired: Command '['bash', '-lc', 'mise run install && MISE_EXPERIMENTAL=1 mise run build']' timed out after 600 seconds",
-      );
+      // reads as a time-out (user-actionable: retry), not a mysterious crash. The
+      // build and lint commands catch their own time-out (a timed-out build gate
+      // arrives as `build_ok=timeout`), so what reaches this entry is a command
+      // around the agent's work: clone, fetch, tool install, push.
+      const result = classifyError(message);
       expect(result!.category).toBe(ErrorCategory.TIMEOUT);
       expect(result!.title).toMatch(/didn't finish in time|timed out/i);
-      // A timeout is user-actionable (retry / raise the cap), not a hard failure.
+      // A timeout is user-actionable (retry), not a hard failure.
       expect(result!.retryable).toBe(true);
       expect(result!.errorClass).toBe(ErrorClass.USER);
       // Must NOT fall through to the generic Unexpected error.
       expect(result!.title).not.toMatch(/Unexpected error/i);
+      // The command that timed out is not a build, so nothing may send the reader to a slow build.
+      expect(`${result!.title} ${result!.description} ${result!.remedy}`).not.toMatch(/build|tests/i);
     });
   });
 
   // --- Lambda MicroVMs (ADR-021) ---
 
   describe('Lambda MicroVMs errors', () => {
+    test('an unknown start requires investigation even when its detail describes a transient failure', () => {
+      const result = classifyError(
+        'Session start failed: MICROVM_START_OUTCOME_UNKNOWN: MicroVM RunMicrovm failed: TimeoutError: response lost [auto-retried]',
+      )!;
+      expect(result.retryable).toBe(false);
+      expect(result.errorClass).toBe(ErrorClass.SERVICE);
+      expect(retryGuidance(result, true)).toMatch(/needs your ABCA admin/);
+      expect(result.remedy).toMatch(/before submitting another task/);
+    });
+
     test('classifies regional unavailability as a non-retryable CONFIG fault with the supported-Region list', () => {
       // ADR-021: "If startSession fails because the MicroVM service is unavailable
       // in the stack region, then the orchestrator shall classify the failure with
@@ -498,7 +767,7 @@ describe('classifyError', () => {
         expect(result.remedy).toContain(region);
       }
       expect(result.remedy).toContain('--compute-type agentcore');
-      expect(result.remedy).toContain('microvm-regions.ts');
+      expect(result.remedy).toContain('contracts/deployment-capabilities.json');
     });
 
     test('classifies regional unavailability from the raw (unwrapped) SDK error too', () => {
@@ -575,8 +844,7 @@ describe('classifyError', () => {
     });
 
     test('classifies a MicroVM substrate-failure reason written by the orchestrator', () => {
-      // Must stay in lockstep with the reason string
-      // `reconcileMicrovmSubstrateState` persists.
+      // Retain classification of legacy messages persisted by the P2 reconciler.
       const result = classifyError(
         'MicroVM substrate terminated before the agent wrote a terminal status: substrate state completed',
       )!;
@@ -589,7 +857,7 @@ describe('classifyError', () => {
     // --- lifecycle-hook 4xx: non-retryable, and it must OUTRANK the generic entry ---
     //
     // The service reports a guest 4xx in `stateReason`, which
-    // `reconcileMicrovmSubstrateState` appends to the persisted message — so BOTH
+    // the P2 reconciler appended to its persisted message — so BOTH
     // the generic `MicroVM substrate terminated` string and the hook-status string
     // are present in one `error_message` and ORDER decides the answer. These tests
     // exist because the wrong order is invisible to a message-only assertion.
@@ -598,10 +866,93 @@ describe('classifyError', () => {
     const hookReason = (status: number) =>
       `Run lifecycle hook returned HTTP status ${status}. `
       + 'Please check your hook endpoint and application logs for more details.';
-    /** ...as `reconcileMicrovmSubstrateState` persists it. */
+    /** Legacy persisted form; current finalization also supplies stable MICROVM_* codes. */
     const reconciled = (reason: string) =>
       'MicroVM substrate terminated before the agent wrote a terminal status: '
       + `substrate state completed (${reason})`;
+
+    test.each([
+      'Resume lifecycle hook failed. Please check your hook endpoint and application logs for more details.',
+      'Resume lifecycle hook connection was refused. Please check your hook endpoint and application logs for more details.',
+      'Resume lifecycle hook timed out. Please check your hook endpoint and application logs for more details.',
+      'Resume lifecycle hook returned HTTP status 503.',
+      'Resume lifecycle hook returned HTTP status 409.',
+    ])('gives actionable wake diagnostics for %s', reason => {
+      const persisted = formatMicrovmTerminalFailure('substrate state completed', reason);
+      expect(persisted).toMatch(/^MICROVM_RESUME_HOOK_FAILED: /);
+      expect(persisted).toContain(reason);
+      for (const message of [persisted, reconciled(reason), reason]) {
+        const result = classifyError(message)!;
+        expect(result.title).toBe('The MicroVM could not wake after being paused');
+        expect(result.errorClass).toBe(ErrorClass.SERVICE);
+        expect(result.retryable).toBe(false);
+        expect(result.remedy).toContain('AWS request ID');
+        expect(result.remedy).toContain('before starting a replacement');
+        expect(retryGuidance(result)).toMatch(/needs your ABCA admin/i);
+      }
+    });
+
+    test('keeps unknown wording generic and honors persisted codes ahead of diagnostic words', () => {
+      expect(formatMicrovmTerminalFailure('completed', 'diagnostic: Resume lifecycle hook connection was refused.'))
+        .toMatch(/^MICROVM_SUBSTRATE_TERMINATED: /);
+      expect(classifyError(`MICROVM_SUBSTRATE_TERMINATED: ${reconciled('Resume lifecycle hook connection was refused.')}`)!.errorClass)
+        .toBe(ErrorClass.TRANSIENT);
+      expect(classifyError('MICROVM_RESUME_HOOK_FAILED: concurrency limit; missing_secret')!.errorClass)
+        .toBe(ErrorClass.SERVICE);
+    });
+
+    test.each([
+      'MicroVM host unavailable.',
+      'MicroVM capacity unavailable in this Availability Zone.',
+      'MicroVM host unavailable in this region.',
+    ])('does not mistake "%s" for an unsupported region', (reason) => {
+      for (const message of [reason, reconciled(reason)]) {
+        const result = classifyError(message)!;
+        expect(result.category).toBe(ErrorCategory.COMPUTE);
+        expect(result.errorClass).toBe(ErrorClass.TRANSIENT);
+        expect(result.retryable).toBe(true);
+        expect(retryGuidance(result)).toMatch(/reply here to try again/i);
+      }
+    });
+
+    test.each([
+      'MicroVM host unavailable.',
+      'MicroVM unavailable in this region.',
+      'INSUFFICIENT_GITHUB_REPO_PERMISSIONS',
+      'concurrency limit reached',
+      'BLOCKED[missing_secret]: diagnostic text',
+      'Run lifecycle hook returned HTTP status 400.',
+    ])('a stable terminal code cannot be reclassified by diagnostic text: %s', (reason) => {
+      const result = classifyError(`MICROVM_SUBSTRATE_TERMINATED: ${reconciled(reason)}`)!;
+      expect(result.title).toBe('The MicroVM stopped before the agent reported a result');
+      expect(result.category).toBe(ErrorCategory.COMPUTE);
+      expect(result.errorClass).toBe(ErrorClass.TRANSIENT);
+    });
+
+    test('a stable hook-rejection code keeps configuration guidance despite other diagnostic words', () => {
+      const result = classifyError(
+        `MICROVM_RUN_HOOK_REJECTED: ${reconciled('MicroVM host unavailable; concurrency limit')}`,
+      )!;
+      expect(result.category).toBe(ErrorCategory.CONFIG);
+      expect(result.retryable).toBe(false);
+      expect(retryGuidance(result)).toMatch(/needs your ABCA admin/i);
+    });
+
+    test.each(['AccessDeniedException', 'UnauthorizedException'])(
+      'does not retry a marked %s when starting a MicroVM', (name) => {
+        const result = classifyError(`Session start failed: MicroVM RunMicrovm failed: ${name}: denied`)!;
+        expect(result.category).toBe(ErrorCategory.AUTH);
+        expect(result.errorClass).toBe(ErrorClass.SERVICE);
+        expect(result.retryable).toBe(false);
+      },
+    );
+
+    test.each(['ValidationException', 'InvalidParameterValueException'])('does not retry MicroVM %s', (name) => {
+      const result = classifyError(`Session start failed: MicroVM RunMicrovm failed: ${name}: invalid connector`)!;
+      expect(result.category).toBe(ErrorCategory.CONFIG);
+      expect(result.errorClass).toBe(ErrorClass.SERVICE);
+      expect(result.retryable).toBe(false);
+    });
 
     test.each([400, 403, 404, 422, 499])(
       'classifies a lifecycle-hook %i as a NON-retryable config fault',
@@ -612,6 +963,7 @@ describe('classifyError', () => {
         // generic COMPUTE/TRANSIENT entry whose remedy is "reply here to try
         // again" — an invitation to loop forever on a version-skewed deployment.
         const result = classifyError(reconciled(hookReason(status)))!;
+        expect(classifyError(hookReason(status))).toEqual(result);
         expect(result.category).toBe(ErrorCategory.CONFIG);
         expect(result.retryable).toBe(false);
         expect(result.errorClass).toBe(ErrorClass.SERVICE);
@@ -626,7 +978,7 @@ describe('classifyError', () => {
 
     test('a lifecycle-hook 5xx stays RETRYABLE — MICROVM_RUN_PAYLOAD_UNREADABLE is a 500', () => {
       // The scoping that makes the entry above safe. The agent answers 500 for a
-      // truncated/racing S3 payload, which a retry genuinely can fix, so the 4xx
+      // failed S3 read, which a retry may fix, so the 4xx
       // pattern must not swallow the 5xx family.
       const result = classifyError(reconciled(hookReason(500)))!;
       expect(result.category).toBe(ErrorCategory.COMPUTE);
@@ -644,6 +996,35 @@ describe('classifyError', () => {
       expect(result.retryable).toBe(true);
     });
 
+    test.each(['substrate-read-failed', 'substrate-read-failed-repeatedly'])(
+      'gives operator guidance for supervisor %s without promising cleanup succeeded', (reason) => {
+        const result = classifyError(`MicroVM supervisor: ${reason}`)!;
+        expect(result).toMatchObject({
+          category: ErrorCategory.COMPUTE,
+          title: 'The MicroVM status could not be checked',
+          retryable: false,
+          errorClass: ErrorClass.SERVICE,
+        });
+        expect(result.remedy).toContain('microvm_supervisor_request_failed');
+        expect(result.remedy).toContain('AWS request ID');
+        expect(result.remedy).toContain('Confirm worker termination');
+      },
+    );
+
+    test.each([
+      'AgentCore supervisor: substrate-read-failed',
+      'Agent output mentions MicroVM supervisor: substrate-read-failed',
+      'MicroVM supervisor: substrate-read-failed-unrecognized',
+    ])('does not infer a supervisor failure from unrelated text: %s', (message) => {
+      expect(classifyError(message)!.category).toBe(ErrorCategory.UNKNOWN);
+    });
+
+    test('a persisted terminal code still takes precedence over supervisor wording', () => {
+      const result = classifyError('MICROVM_SUBSTRATE_TERMINATED: MicroVM supervisor: substrate-read-failed')!;
+      expect(result.title).toBe('The MicroVM stopped before the agent reported a result');
+      expect(result.retryable).toBe(true);
+    });
+
     test('every new MicroVM classification carries a full, non-empty guidance shape', () => {
       const messages = [
         'Session start failed: UnknownEndpoint: Inaccessible host: `lambda.eu-central-1.amazonaws.com\'',
@@ -651,6 +1032,7 @@ describe('classifyError', () => {
         'MicroVM RunMicrovm failed: ThrottlingException: Rate exceeded',
         'MicroVM RunMicrovm failed: ResourceNotFoundException: image not found',
         'MicroVM substrate terminated before the agent wrote a terminal status: substrate state completed',
+        'MicroVM supervisor: substrate-read-failed',
         reconciled(hookReason(400)),
       ];
       for (const msg of messages) {
@@ -695,6 +1077,9 @@ describe('classifyError', () => {
       ['ServiceQuotaExceededException: quota exceeded'],
       ['ResourceNotFoundException: Requested resource not found'],
       ['TooManyRequestsException: slow down'],
+      ['AccessDeniedException: denied'],
+      ['UnauthorizedException: denied'],
+      ['ValidationException: invalid'],
     ])('an unmarked "%s" still classifies as UNKNOWN, exactly as before', (message) => {
       const result = classifyError(message)!;
       expect(result.category).toBe(PRE_CHANGE_UNKNOWN.category);
@@ -1019,6 +1404,15 @@ describe('classifyError', () => {
       expect(detail.error_classification!.title).toBe('Concurrency limit reached');
     });
 
+    test('gives the console the token-specific fix of an agent push preflight refusal (#801)', () => {
+      // web/src/core/util/progress.ts shows `${description} What to do: ${remedy}`.
+      const detail = toTaskDetail({ ...baseRecord, error_message: MSG_APP });
+      expect(detail.error_classification!.description).toContain('GitHub App token');
+      expect(detail.error_classification!.remedy).toContain('install it on the repository');
+      expect(detail.error_classification!.remedy).not.toContain('fine-grained');
+      expect(detail.error_classification!.remedy).not.toContain('Update the PAT');
+    });
+
     test('returns null error_classification when error_message is undefined', () => {
       const detail = toTaskDetail(baseRecord);
       expect(detail.error_message).toBeNull();
@@ -1033,11 +1427,12 @@ describe('classifyError', () => {
     });
 
     // Regression: all numeric fields coerce through ``coerceNumericOrNull``
-    // so the DDB Document-client's string-typed Number deserialization
-    // cannot leak into downstream consumers (same bug class as the
+    // so that a string in one of them (the agent stores cost, duration
+    // and the turn counters as strings) cannot leak into downstream
+    // consumers (same bug class as the
     // ``costUsd.toFixed`` crash fixed in commit ``c09bfd7``). The cast
-    // to ``unknown as TaskRecord`` simulates a record produced by the
-    // Document client where ``Number`` attributes came back as strings.
+    // to ``unknown as TaskRecord`` simulates such a record as the
+    // Document client returns it.
     test('coerces string-typed numeric DDB fields to numbers on output', () => {
       const record = {
         ...baseRecord,

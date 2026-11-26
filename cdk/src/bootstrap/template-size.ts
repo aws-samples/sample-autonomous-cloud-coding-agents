@@ -113,6 +113,7 @@ export function cloudFormationBodySize(templatePath: string, cwd: string): numbe
     throw new Error(
       `cdk bootstrap --show-template failed for ${templatePath}: ${e.message ?? 'unknown error'}`
       + (stderr ? `\nCLI stderr:\n${stderr}` : ''),
+      { cause: err },
     );
   }
 

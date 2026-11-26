@@ -1,5 +1,5 @@
 ---
-title: Approval gates (Cedar HITL)
+title: "Approval gates (Cedar HITL)"
 ---
 
 The platform evaluates every tool call the agent is about to make (Bash, Write, Edit, WebFetch, ...) against a Cedar policy set. Most calls resolve to a plain **Allow** or **Deny** with no human involvement. For a small, explicitly-marked set of rules, the decision is **require-approval**: the agent pauses, the task transitions to `AWAITING_APPROVAL`, and you are asked to make the call.
@@ -59,7 +59,7 @@ The `--scope` flag controls how long the approval carries forward within the run
 | `this_call` | Default. Approves only the exact tool call that is waiting. The next matching gate will ask again. |
 | `tool_type_session` | Approves every call to the same tool type (e.g. `Bash`) for the rest of this task. |
 | `tool_type:<name>` | Same as `tool_type_session`, but pinned to a specific tool (`tool_type:Bash`). |
-| `tool_group_session` / `tool_group:<name>` | Same pattern by tool group (`Edit` + `Write` are grouped as file-write, etc.). |
+| `tool_group_session` / `tool_group:<name>` | Same pattern by tool group (`tool_group:file_write` covers `Edit` and `Write`). For a tool that is in no group, `tool_group_session` covers that call only. |
 | `bash_pattern:<glob>` | Approves Bash commands matching a glob (e.g. `bash_pattern:pytest*`). |
 | `write_path:<glob>` | Approves Write/Edit calls whose target path matches the glob (e.g. `write_path:tests/**`). |
 | `rule:<rule_id>` | Approves every future gate fired by a specific rule. |
@@ -76,6 +76,14 @@ node lib/bin/bgagent.js deny <TASK_ID> <REQUEST_ID> --reason-file deny.txt
 ```
 
 The optional `--reason` text is sanitized and truncated server-side, then best-effort injected into the agent's Stop-hook context so it can adapt (try a different approach, ask you a question, or stop gracefully) instead of retrying blindly. Use `--reason-file` when the reason is multi-line and would otherwise require careful shell quoting.
+
+A deny tells the agent to stop trying that kind of action, not only that one call. With the refused call the agent gets your reason, the name of the rule that gated the call, and an instruction not to retry the action with variations. It has to find another way to do the task, or report why it is blocked.
+
+Put what matters most first. With the refused call the agent sees only about the first 200 characters of a long reason (that message is limited to 500 characters). The full text is in the Stop-hook injection described above.
+
+For the next 60 seconds, any other call of the same tool that the same rule gates is refused at once, without a new approval request. `bgagent watch` shows each such refusal as a `policy_decision` milestone. After that window a new attempt opens a new request. A gate that times out does less. The agent then gets no such instruction, and only the identical call is refused for 60 seconds.
+
+If you want the action to go through this time and be asked again the next time, approve it with the default scope `this_call` instead of denying. To stop being asked about a rule for the rest of the task, approve with `--scope rule:<rule_id>`.
 
 ### Discovering repo policies
 
@@ -96,12 +104,24 @@ If you trust a task to make a certain class of changes without interactive confi
 ```bash
 node lib/bin/bgagent.js submit --repo owner/repo --issue 42 \
   --pre-approve tool_type:Bash \
-  --pre-approve write_path:tests/**
+  --pre-approve 'write_path:tests/**'
 
 # Per-task timeout override (platform default is 300s)
 node lib/bin/bgagent.js submit --repo owner/repo --issue 42 --approval-timeout 600
 ```
 
-`--pre-approve` can be repeated up to the platform limit (see `bgagent submit --help` for the current cap). Valid scope forms are the same as the `approve --scope` table above. Hard-deny rules are still enforced — `--pre-approve` only short-circuits soft-deny rules.
+`--pre-approve` can be repeated up to 20 times. Valid scope forms are `all_session` and those of the `approve --scope` table above that name their target: `tool_type:<name>`, `tool_group:<name>`, `bash_pattern:<glob>`, `write_path:<glob>` and `rule:<rule_id>`. `this_call`, `tool_type_session` and `tool_group_session` stand for a call that is waiting for approval and are rejected. Hard-deny rules are still enforced — `--pre-approve` only short-circuits soft-deny rules.
 
 `--approval-timeout` sets the task-wide default; a rule with its own `@approval_timeout_s` annotation still takes the minimum of the two.
+
+For Lambda MicroVM tasks, a waiting approval can put the worker to sleep so it
+stops billing compute. With the defaults (a 300-second approval window and a
+60-second sleep delay) the worker sleeps after one minute and wakes when you
+answer, or 60 seconds before the deadline so a timeout is still recorded
+normally. `--microvm-sleep-after 120` selects two minutes and
+`--microvm-sleep-after off` keeps the worker awake. The delay starts when each
+approval request is created; sleep never extends the approval deadline. The API
+equivalent is `microvm_sleep_after_s` (zero means off), and task details return
+the saved setting. Automatic sleep is disabled by default for new deployments.
+An operator enables it after [verifying the deployed image and
+coordinator](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/docs/verification/README.md#live-acceptance-for-an-installation).

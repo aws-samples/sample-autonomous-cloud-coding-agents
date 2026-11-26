@@ -1,4 +1,4 @@
-"""Fixture-free regression guard for the ECS test-hang scrub (#615 / #616).
+"""Regression guard for the ECS test-hang scrub (#615 / #616), without an autouse fixture.
 
 This module deliberately has NO local autouse fixture. It exists to prove that
 conftest's ``_clean_env`` autouse fixture strips ``AGENT_SESSION_ROLE_ARN`` from
@@ -16,8 +16,8 @@ fixtures run during test *setup*, before the body executes — so a
 ``monkeypatch.setenv`` inside the test can't be scrubbed by them. Poisoning the
 process env at import time (before any fixture runs) means the conftest scrub is
 the only thing that can clear it by the time a test body reads it. Remove the
-``AGENT_SESSION_ROLE_ARN`` line from conftest's ``_AGENT_ENV_VARS`` and BOTH tests
-below fail — a true bidirectional guard.
+``AGENT_SESSION_ROLE_ARN`` line from conftest's ``_AGENT_ENV_VARS`` and the first
+two tests below fail — a true bidirectional guard.
 
 The bug this guards: with ``AGENT_SESSION_ROLE_ARN`` set, ``aws_session``
 resolves a *scoped* session and ``tenant_client`` returns ``session.client(...)``,
@@ -29,6 +29,9 @@ network (no egress) in a socket read SIGALRM can't interrupt — stalling the wh
 
 import os
 
+import pytest
+
+import hooks
 from aws_session import SESSION_ROLE_ARN_ENV, is_scoped
 
 # Poison the process env at import time — BEFORE any fixture runs. The conftest
@@ -48,3 +51,19 @@ def test_session_resolves_unscoped_when_scrubbed():
     # bare get_session() must be unscoped — the path where boto3.client mocks
     # intercept, so no real S3 call is made and nothing hangs.
     assert is_scoped() is False
+
+
+@pytest.fixture(scope="module")
+def _latched_blocker():
+    # The #251 blocker latch, as a clone-failure test in test_repo.py leaves it
+    # for whichever test runs next. Module scope, not autouse: pytest sets it up
+    # just before the function-scoped conftest `_clean_env` of the one test that
+    # requests it, so nothing else can have cleared it when the test body reads it.
+    hooks._record_blocker_reason("egress_denied", "left over from an earlier test", "github.com")
+
+
+def test_conftest_clears_the_blocker_latch(_latched_blocker):
+    # Without the reset in conftest's _clean_env this is the leaked
+    # BLOCKED[egress_denied] reason, and pipeline._resolve_overall_task_status
+    # would report it for an unrelated task.
+    assert hooks.last_blocker_reason() is None

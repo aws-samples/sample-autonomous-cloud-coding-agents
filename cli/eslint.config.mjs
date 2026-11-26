@@ -16,6 +16,7 @@
  *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  *  SOFTWARE.
  */
+import js from '@eslint/js';
 import tseslint from '@typescript-eslint/eslint-plugin';
 import tsparser from '@typescript-eslint/parser';
 import stylistic from '@stylistic/eslint-plugin';
@@ -28,6 +29,25 @@ import { dirname, join } from 'node:path';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+// Every TypeScript extension. ESLint skips a file that no `files` pattern matches
+// without a word, so a .mts or .cts file would sit outside every rule below.
+const TS_FILES = ['src/**/*.{ts,tsx,mts,cts}', 'test/**/*.{ts,tsx,mts,cts}'];
+
+const NO_MD5 = {
+  selector: "CallExpression:matches([callee.name='createHash'], [callee.property.name='createHash']) Literal[value='md5']",
+  message: 'Use the md5hash() function from the core library if you want md5',
+};
+// The name exception is this package's own REST client, which is not an SDK client.
+const NO_NAKED_SDK_CLIENT = {
+  selector: 'NewExpression:matches([callee.name=/^(?!ApiClient$).*Client$/], [callee.property.name=/Client$/])',
+  message: 'Build AWS SDK clients with makeClient(Ctor, cfg) or makeDocClient(cfg) from src/ua.ts: `new XxxClient()` drops the'
+    + ' solution user-agent segment (#319). For a class of this repository whose name merely ends in Client, add the name to'
+    + ' the exception in this selector.',
+};
+const NO_IMPORT_OUTSIDE_PACKAGE = 'The CLI ships only lib/, compiled from cli/src: a file outside the cli package is not part of an'
+  + ' installed CLI. Mirror an API type or constant of the CDK in src/types.ts, which `mise run check:types-sync` compares with the'
+  + ' CDK declaration. Copy any other value into src and pin the copy with a parity test such as test/constants-parity.test.ts.';
 
 export default [
   // Global ignores
@@ -42,15 +62,23 @@ export default [
     ],
   },
 
-  // TypeScript source, test, and build-tools files
+  // Correctness baselines: eslint:recommended and the typescript-eslint recommended
+  // set. They come before the package block so that block wins where both set a rule.
+  { files: TS_FILES, rules: js.configs.recommended.rules },
+  ...tseslint.configs['flat/recommended'].map((config) => ({ ...config, files: TS_FILES })),
+
+  // TypeScript source and test files
   {
-    files: ['src/**/*.ts', 'test/**/*.ts', 'build-tools/**/*.ts'],
+    files: TS_FILES,
     languageOptions: {
       parser: tsparser,
       parserOptions: {
         ecmaVersion: 2018,
         sourceType: 'module',
         project: './tsconfig.dev.json',
+        // Without this, a run without --fix parses the copy on disk, where a shebang is not a
+        // comment, and license-header reports the header of src/bin/bgagent.ts as misplaced (#172).
+        disallowAutomaticSingleRunInference: true,
       },
     },
     plugins: {
@@ -79,7 +107,9 @@ export default [
       '@stylistic/quotes': ['error', 'single', { avoidEscape: true }],
       '@stylistic/comma-dangle': ['error', 'always-multiline'],
       '@stylistic/comma-spacing': ['error', { before: false, after: true }],
-      '@stylistic/no-multi-spaces': ['error', { ignoreEOLComments: false }],
+      // The exceptions of the core rule this replaced: the plugin's own default also lets
+      // two spaces inside an import attribute pass.
+      '@stylistic/no-multi-spaces': ['error', { ignoreEOLComments: false, exceptions: { Property: true, ImportAttribute: false } }],
       '@stylistic/array-bracket-spacing': ['error', 'never'],
       '@stylistic/array-bracket-newline': ['error', 'consistent'],
       '@stylistic/object-curly-spacing': ['error', 'always'],
@@ -100,7 +130,7 @@ export default [
       }],
       '@stylistic/quote-props': ['error', 'consistent-as-needed'],
       '@stylistic/key-spacing': ['error'],
-      '@stylistic/no-multiple-empty-lines': ['error'],
+      '@stylistic/no-multiple-empty-lines': ['error', { max: 1 }],
       '@stylistic/no-trailing-spaces': ['error'],
       '@stylistic/no-extra-semi': ['error'],
       '@stylistic/spaced-comment': ['error', 'always', {
@@ -115,42 +145,38 @@ export default [
 
       // Core ESLint rules
       'curly': ['error', 'multi-line', 'consistent'],
+      'eqeqeq': ['error', 'always', { null: 'ignore' }],
       'no-shadow': ['off'],
       'no-return-await': 'off',
       'dot-notation': ['error'],
       'no-bitwise': ['error'],
       'no-throw-literal': ['error'],
-      'quotes': ['error', 'single', { avoidEscape: true }],
+      // One fixed ceiling on cyclomatic complexity, the same number in cdk, cli and web.
+      // A function above it is split, not exempted. The eslint-disable-next-line
+      // directives in src mark the functions that were above it when it landed. The
+      // first number in the parenthesis of a directive is the record: the value the
+      // function had then, lowered whenever a change makes the function smaller. They
+      // must not grow, and test/eslint-config.test.ts holds each to its record. When a
+      // directive stops applying, as when its function comes to fit, the eslint task
+      // (--fix) deletes it and eslint:check reports it as unused.
+      'complexity': ['error', { max: 40 }],
+      // These two core formatting rules stay on beside their @stylistic forks, which each
+      // leave checks out: the space in `catch (`, and the space after the comma of an
+      // array hole (`[, second]`) and at the trailing comma of a type parameter list.
       'comma-spacing': ['error', { before: false, after: true }],
-      'no-multi-spaces': ['error', { ignoreEOLComments: false }],
-      'array-bracket-spacing': ['error', 'never'],
-      'array-bracket-newline': ['error', 'consistent'],
-      'object-curly-spacing': ['error', 'always'],
-      'object-curly-newline': ['error', { multiline: true, consistent: true }],
-      'object-property-newline': ['error', { allowAllPropertiesOnSameLine: true }],
       'keyword-spacing': ['error'],
-      'brace-style': ['error', '1tbs', { allowSingleLine: true }],
-      'space-before-blocks': 'error',
       'eol-last': ['error', 'always'],
       'no-duplicate-imports': ['error'],
-      'key-spacing': ['error'],
-      'semi': ['error', 'always'],
-      'quote-props': ['error', 'consistent-as-needed'],
-      'no-multiple-empty-lines': ['error', { max: 1 }],
-      'max-len': ['error', {
-        code: 150,
-        ignoreUrls: true,
-        ignoreStrings: true,
-        ignoreTemplateLiterals: true,
-        ignoreComments: true,
-        ignoreRegExpLiterals: true,
-      }],
       'no-console': ['error'],
-      'no-trailing-spaces': ['error'],
-      'no-restricted-syntax': ['error', {
-        selector: "CallExpression:matches([callee.name='createHash'], [callee.property.name='createHash']) Literal[value='md5']",
-        message: 'Use the md5hash() function from the core library if you want md5',
-      }],
+      // A coverage-ignore comment takes code out of what the coverage floors measure:
+      // test the code, or leave it counted as uncovered. These are the spellings that
+      // jest (v8-to-istanbul) and vitest honour.
+      'no-warning-comments': ['error', { terms: ['istanbul ignore', 'c8 ignore', 'v8 ignore', 'node:coverage'], location: 'anywhere' }],
+      'no-restricted-syntax': ['error', NO_MD5],
+      // Rules of the recommended sets that still have findings. Each one stays off
+      // until its findings are fixed; delete the line to turn the rule on.
+      'no-useless-assignment': 'off',
+      'preserve-caught-error': 'off',
 
       // TypeScript rules
       // Dead-code parity with Python ruff F401 (#282): unused imports/locals/params
@@ -206,10 +232,19 @@ export default [
         ],
       }],
       '@typescript-eslint/unbound-method': 'error',
+      // Promise and operator misuse that compiles (type-aware rules).
+      '@typescript-eslint/await-thenable': 'error',
+      '@typescript-eslint/no-misused-promises': 'error',
+      '@typescript-eslint/prefer-promise-reject-errors': 'error',
+      '@typescript-eslint/no-array-delete': 'error',
+      '@typescript-eslint/no-for-in-array': 'error',
+      '@typescript-eslint/no-implied-eval': 'error',
+      '@typescript-eslint/no-unsafe-unary-minus': 'error',
+      '@typescript-eslint/restrict-plus-operands': 'error',
 
       // Import rules (import/ -> import-x/)
       'import-x/no-extraneous-dependencies': ['error', {
-        devDependencies: ['**/test/**', '**/build-tools/**'],
+        devDependencies: ['**/test/**'],
         optionalDependencies: false,
         peerDependencies: true,
       }],
@@ -219,6 +254,10 @@ export default [
         alphabetize: { order: 'asc', caseInsensitive: true },
       }],
       'import-x/no-duplicates': ['error'],
+      // Runtime import cycles; `import type` edges do not count.
+      'import-x/no-cycle': ['error', { ignoreExternal: true }],
+      'import-x/no-self-import': 'error',
+      'import-x/no-useless-path-segments': 'error',
 
       // License header
       'license-header/header': ['error', join(__dirname, 'header.js')],
@@ -230,39 +269,62 @@ export default [
       'jsdoc/check-alignment': ['error'],
 
       // Jest rules
-      'jest/expect-expect': 'off',
+      // A test must call expect() itself.
+      'jest/expect-expect': 'error',
       'jest/no-conditional-expect': 'off',
-      'jest/no-done-callback': 'off',
-      'jest/no-standalone-expect': 'off',
-      'jest/valid-expect': 'off',
+      // An expect() at the top level or in a describe body runs while the file is
+      // loaded, not as part of a test.
+      'jest/no-standalone-expect': 'error',
+      // expect(x) without a matcher, and an async assertion nobody awaits, check
+      // nothing. One idiom is sound and still reported: keep the assertion promise,
+      // advance fake timers, then await it. Mark it with eslint-disable-next-line
+      // and the reason; the rule's autofix would await it on the spot and hang the test.
+      'jest/valid-expect': 'error',
       'jest/valid-title': 'off',
-      'jest/no-identical-title': 'off',
+      'jest/no-identical-title': 'error',
       'jest/no-disabled-tests': 'error',
       'jest/no-focused-tests': 'error',
+      'jest/no-alias-methods': 'error',
+      'jest/no-deprecated-functions': 'error',
+      'jest/no-done-callback': 'error',
+      'jest/no-duplicate-hooks': 'error',
+      'jest/no-export': 'error',
+      'jest/no-interpolation-in-snapshots': 'error',
+      // Jest has no `fail()`: the call is a ReferenceError, which the catch block of
+      // a try/fail/catch test swallows, so the test passes when nothing throws.
+      'jest/no-jasmine-globals': 'error',
+      'jest/no-mocks-import': 'error',
+      'jest/no-test-prefixes': 'error',
+      'jest/valid-describe-callback': 'error',
+      'jest/valid-expect-in-promise': 'error',
     },
   },
 
-  // Override: allow console.log in CLI source files (console output is the product)
   {
-    files: ['src/**/*.ts'],
+    files: ['src/**/*.{ts,tsx,mts,cts}'],
     rules: {
+      // Console output is the product.
       'no-console': 'off',
+      // Every AWS SDK client in src is built by the attributed factory (#319). The whole
+      // list again: a later block replaces a rule's options.
+      'no-restricted-syntax': ['error', NO_MD5, NO_NAKED_SDK_CLIENT],
+      // The compiler (rootDir) refuses only a TypeScript source outside the package, not build
+      // output or a JSON file. The second zone is Yarn's workspace links, which the first lets pass.
+      'import-x/no-restricted-paths': ['error', {
+        basePath: __dirname,
+        zones: [
+          { target: './src', from: '..', except: ['./cli', './node_modules'], message: NO_IMPORT_OUTSIDE_PACKAGE },
+          { target: './src', from: '../node_modules/@abca', except: ['./cli'], message: NO_IMPORT_OUTSIDE_PACKAGE },
+        ],
+      }],
     },
   },
 
-  // Override: tests and build tooling legitimately use inline literals
+  // Override: tests legitimately use inline literals
   {
-    files: ['test/**/*.ts', 'build-tools/**/*.ts'],
+    files: ['test/**/*.{ts,tsx,mts,cts}'],
     rules: {
       '@typescript-eslint/no-magic-numbers': 'off',
-    },
-  },
-
-  // Override: shebang files can't have the license header at line 1
-  {
-    files: ['src/bin/**/*.ts'],
-    rules: {
-      'license-header/header': 'off',
     },
   },
 ];

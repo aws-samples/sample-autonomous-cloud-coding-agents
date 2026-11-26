@@ -1,5 +1,5 @@
 ---
-title: Using the CLI
+title: "Using the CLI"
 ---
 
 The `bgagent` CLI is the recommended way to interact with the platform. It authenticates via Cognito, manages token caching, and provides formatted output.
@@ -108,14 +108,15 @@ Created:     2026-04-01T00:39:51.271Z
 | `--task` | Task description text. |
 | `--pr` | PR number to iterate on. Selects the `coding/pr-iteration-v1` workflow. The agent checks out the PR's branch, reads review feedback, and pushes updates. |
 | `--review-pr` | PR number to review. Selects the `coding/pr-review-v1` workflow. The agent checks out the PR's branch, analyzes changes read-only, and posts structured review comments. |
-| `--workflow` | Workflow to run, as `<id>[@<constraint>]` (e.g. `coding/new-task-v1`). Overrides the workflow implied by `--pr`/`--review-pr`; omit to let the server resolve a default. |
-| `--attachment` | Attach a file or URL (repeatable). Local files ≤ 500 KB are sent inline; larger files use presigned upload. URLs are fetched during hydration. See [Attachments](#attachments) below. |
+| `--workflow` | Workflow to run, as `<id>[@<constraint>]` (e.g. `coding/new-task-v1`). Overrides the workflow implied by `--pr`/`--review-pr`; without any of the three flags the CLI sends `coding/new-task-v1`. |
+| `--attachment` | Attach a local file or URL (repeatable). Local files ≤ 500 KB are sent inline, up to 3 MB in total; the other files use presigned upload. URLs are fetched during hydration. See [Attachments](#attachments) below. |
 | `--max-turns` | Maximum agent turns (1–500). Overrides per-repo Blueprint default. Platform default: 100. |
 | `--max-budget` | Maximum cost budget in USD (0.01–100). Overrides per-repo Blueprint default. No default limit. |
 | `--idempotency-key` | Idempotency key for deduplication. |
 | `--trace` | Enable detailed tracing: raises progress preview cap to 4 KB and uploads full NDJSON trajectory to S3 on completion. Download with `bgagent trace download`. |
-| `--approval-timeout` | Cedar HITL per-task approval timeout in seconds (default 300). A matching rule with its own `@approval_timeout_s` annotation still takes the minimum. See [Approval gates](#approval-gates-cedar-hitl). |
-| `--pre-approve` | Cedar HITL scope to approve up-front (repeatable). Same scope forms as `bgagent approve --scope`. Hard-deny rules are always enforced. |
+| `--approval-timeout` | Cedar HITL per-task approval timeout in seconds (default 300). A matching rule with its own `@approval_timeout_s` annotation still takes the minimum. See [Approval gates](/sample-autonomous-cloud-coding-agents/using/approval-gates-cedar-hitl). |
+| `--microvm-sleep-after` | Seconds to wait for approval before putting a Lambda MicroVM to sleep (default 60; 0–3600 accepted). Use `off` to keep it awake. Requires the deployment's automatic-sleep feature to be enabled; does not change approval deadlines or affect other compute backends. |
+| `--pre-approve` | Cedar HITL scope to approve up-front (repeatable). Scope forms: `all_session`, `tool_type:<name>`, `tool_group:<name>`, `bash_pattern:<glob>`, `write_path:<glob>`, `rule:<rule_id>`. Hard-deny rules are always enforced. |
 | `--wait` | Poll until the task reaches a terminal status. |
 | `--output` | Output format: `text` (default) or `json`. |
 
@@ -144,7 +145,7 @@ Attachments let you provide non-text context to the agent — screenshots of bug
 **Usage:**
 
 ```bash
-# Local file (auto-detects MIME type from content)
+# Local file (the MIME type comes from the file extension)
 node lib/bin/bgagent.js submit --repo owner/repo --task "Fix this layout" \
   --attachment screenshot.png
 
@@ -160,8 +161,8 @@ node lib/bin/bgagent.js submit --repo owner/repo --task "Implement this design" 
 
 The CLI automatically routes attachments through the optimal upload path:
 
-- **Files ≤ 500 KB** are sent inline (base64-encoded in the request body).
-- **Files > 500 KB** use presigned upload (uploaded directly to S3, then confirmed).
+- **Files ≤ 500 KB** are sent inline (base64-encoded in the request body), up to 3 MB in total.
+- **Files > 500 KB**, and smaller files once 3 MB are sent inline, use presigned upload (uploaded directly to S3, then confirmed).
 - **URLs** are validated at submission and fetched during context hydration with SSRF protection.
 
 **Security screening:**
@@ -223,7 +224,7 @@ The table is `TASK ID`, `STATUS`, `REPO`, `CREATED`, `HEARTBEAT`, `DESCRIPTION`.
 While a task is `RUNNING` the agent writes a liveness beat every 45 seconds. `bgagent status` shows it as a `Heartbeat:` line and `bgagent list` as a `HEARTBEAT` column, both as an **age** rather than a timestamp, because the age is the signal:
 
 ```text
-Heartbeat:   2026-04-01T00:41:02.118Z (12s ago)
+  Heartbeat:     12s ago
 ```
 
 - **Under ~1 minute** - healthy; the agent is working.
@@ -251,7 +252,7 @@ node lib/bin/bgagent.js watch <TASK_ID>
 node lib/bin/bgagent.js watch <TASK_ID> --output json
 ```
 
-Exit codes: `0` on `COMPLETED`, `1` on `FAILED` / `CANCELLED` / `TIMED_OUT`. Press Ctrl+C to exit early without affecting the task.
+Exit codes: `0` on `COMPLETED`, `1` on `FAILED` / `CANCELLED` / `TIMED_OUT`, `2` when the CLI gives up because the API kept failing (the task may still be running: run the command again to resume). Press Ctrl+C to exit early without affecting the task.
 
 ### Steering a running task (nudge)
 
@@ -278,7 +279,7 @@ node lib/bin/bgagent.js submit --repo owner/repo --issue 42 --trace
 node lib/bin/bgagent.js trace download <TASK_ID>
 
 # Pipe to jq for analysis
-node lib/bin/bgagent.js trace download <TASK_ID> | gunzip | jq -s .
+node lib/bin/bgagent.js trace download <TASK_ID> | jq -s .
 
 # Save raw gzip to a file
 node lib/bin/bgagent.js trace download <TASK_ID> -o trace.ndjson.gz
@@ -301,3 +302,36 @@ node lib/bin/bgagent.js --verbose submit --repo owner/repo --task "Fix the bug"
 ```bash
 node lib/bin/bgagent.js cancel <TASK_ID>
 ```
+
+### Reading your scoreboard (stats)
+
+`bgagent stats` prints the scoreboard of your own finished tasks: how long the work you handed to agents took, how often it ended in a verified and then a merged pull request, how much of your attention and money it needed, and whether it stayed inside the rules.
+
+```bash
+# Your tasks of the last 30 days
+node lib/bin/bgagent.js stats
+
+# The last 7 days, in one repository
+node lib/bin/bgagent.js stats --range 7d --repo owner/repo
+
+# The same numbers as JSON
+node lib/bin/bgagent.js stats --output json
+```
+
+**Options:**
+
+| Flag | Description |
+|---|---|
+| `--range` | Period the numbers cover: `7d` or `30d` (default). It ends at the moment of the request. |
+| `--repo` | Count the tasks of one repository only (`owner/repo`, in any letter case). |
+| `--output` | Output format: `text` (default) or `json`. `json` prints the scoreboard as the API returns it (see [API_CONTRACT.md](/sample-autonomous-cloud-coding-agents/architecture/api-contract#list-tasks)). |
+
+The numbers stand under four headings, Speed, Quality, Leverage and Trust, and the finished tasks per outcome follow them. Under a number stand the counts it rests on and, for some, the same number for the period of that length before. A number with nothing to compute it from shows `-`, and the line under it says why. The **Scoreboard** page of the operator console shows the same numbers under the same labels.
+
+What a number counts is defined in one document, the observability design: [The numbers](/sample-autonomous-cloud-coding-agents/architecture/observability#the-numbers) has a row for every number, under the label the command prints, [Words](/sample-autonomous-cloud-coding-agents/architecture/observability#words) defines the terms those rows use and the six outcomes, and [Not counted and not measured](/sample-autonomous-cloud-coding-agents/architecture/observability#not-counted-and-not-measured) lists what the scoreboard does not see.
+
+**Limits:**
+
+- **Your own tasks only.** No option shows another user's numbers or a team's; every user's are on the CloudWatch dashboard, in the "Factory scoreboard" row.
+- **7 or 30 days.** The numbers cover the last 7 or 30 days, beside the period of the same length before, and no option reaches further back.
+- **`--repo` filters after the read.** A request reads a bounded number of your task records and then counts those of the repository, so the notice that the numbers cover part of the range can appear for a repository with few tasks.

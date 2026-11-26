@@ -41,6 +41,7 @@ export interface BudgetTableProps {
  * - ``period = CONFIG`` for the recurring limit
  * - ``period = YYYY-MM`` for one month's spend
  * - ``scope_key = TASK#<task-id>, period = ROLLUP`` for stream deduplication
+ * - ``scope_key = TASK#<task-id>, period = METRICS`` for the scoreboard's once-only claim
  */
 export class BudgetTable extends Construct {
   public readonly table: dynamodb.Table;

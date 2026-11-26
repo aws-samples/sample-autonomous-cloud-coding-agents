@@ -22,7 +22,7 @@ import { CreateSecretCommand, DeleteSecretCommand, SecretsManagerClient } from '
 import { PutCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
-import { extractUserId } from './shared/gateway';
+import { extractUserId, getHeader } from './shared/gateway';
 import { logger } from './shared/logger';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import type { CreateWebhookRequest, CreateWebhookResponse, WebhookRecord } from './shared/types';
@@ -36,6 +36,16 @@ const SECRET_PREFIX = 'bgagent/webhook/';
 
 /** Webhook HMAC secret entropy (bytes; 256-bit). */
 const WEBHOOK_SECRET_BYTES = 32;
+
+/**
+ * Assumes that the public path starts with the stage name. It does on the default execute-api
+ * endpoint, the only one the stacks create. Behind a custom domain name it depends on the mapping.
+ */
+function webhookTasksUrl(event: APIGatewayProxyEvent): string {
+  const host = getHeader(event.headers, 'Host');
+  if (!host) throw new Error('The request has no Host header: cannot build the webhook URL.');
+  return `https://${host}/${event.requestContext.stage}/webhooks/tasks`;
+}
 
 /**
  * POST /v1/webhooks — Create a new webhook integration.
@@ -62,6 +72,9 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
         requestId,
       );
     }
+
+    // Built before anything is created, so a request it cannot be built from leaves nothing behind.
+    const webhookUrl = webhookTasksUrl(event);
 
     const webhookId = ulid();
     const secret = crypto.randomBytes(WEBHOOK_SECRET_BYTES).toString('hex');
@@ -117,12 +130,19 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       throw ddbErr;
     }
 
-    logger.info('Webhook created', { webhook_id: webhookId, user_id: userId, request_id: requestId });
+    logger.info('Webhook created', {
+      webhook_id: webhookId,
+      user_id: userId,
+      // Set by the unified authorizer when an API key made the request; absent for a Cognito token.
+      key_id: event.requestContext.authorizer?.keyId,
+      request_id: requestId,
+    });
 
     const response: CreateWebhookResponse = {
       webhook_id: webhookId,
       name: body.name,
       secret,
+      webhook_url: webhookUrl,
       created_at: now,
     };
 

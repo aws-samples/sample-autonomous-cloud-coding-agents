@@ -17,15 +17,15 @@
  *  SOFTWARE.
  */
 
-import { classifyError, type ErrorClassification } from './error-classifier';
-import { logger } from './logger';
-import { coerceNumericOrNull } from './numeric';
-import type { ComputeType } from './repo-config';
 // Cross-language constants — see ``contracts/constants.md``. Imported at
 // TypeScript compile time (resolveJsonModule); esbuild inlines the values
 // into the bundled Lambda artifact, so no runtime FS read is needed.
 import sharedConstants from '../../../../contracts/constants.json';
 import type { TaskStatusType } from '../../constructs/task-status';
+import { classifyError, type ErrorClassification } from './error-classifier';
+import { logger } from './logger';
+import { coerceNumericOrNull } from './numeric';
+import type { ComputeType } from './repo-config';
 
 /**
  * Re-export of {@link TaskStatusType} so the CDK↔CLI type-sync drift
@@ -138,9 +138,6 @@ export type RegistryListEntry = {
 /** Shared across all attachment interfaces. Add new types here (e.g., 'audio'). */
 export type AttachmentType = 'image' | 'file' | 'url';
 
-/** Delivery mechanism — discriminant for the three upload paths. */
-export type AttachmentDelivery = 'inline' | 'presigned' | 'url_fetch';
-
 /**
  * Provenance of a task's submission. Shared across inbound adapters:
  * - ``api``: CLI / Cognito-authenticated submissions
@@ -230,8 +227,10 @@ export interface TaskRecord {
   readonly updated_at: string;
   readonly started_at?: string;
   readonly completed_at?: string;
-  readonly cost_usd?: number;
-  readonly duration_s?: number;
+  /** The agent stores these two and the turn counters below as DynamoDB
+   *  Strings; read them through ``coerceNumericOrNull``. */
+  readonly cost_usd?: number | string;
+  readonly duration_s?: number | string;
   readonly build_passed?: boolean;
   /**
    * A6/#299: whether a PR-iteration advanced the branch HEAD (a real commit) vs.
@@ -279,15 +278,19 @@ export interface TaskRecord {
   /** S3 URI of a repo-less workflow's delivered artifact (deliver_artifact,
    *  #248 Phase 3); absent for coding tasks / comment-only delivery. */
   readonly artifact_uri?: string;
-  /** Rev-5 DATA-1: authoritative SDK counter including the attempt that
-   *  tripped any cap. Equals the legacy `turns` value. */
-  readonly turns_attempted?: number;
-  /** Rev-5 DATA-1: turns that actually completed (clamped to
-   *  `max_turns` when `agent_status='error_max_turns'`). */
-  readonly turns_completed?: number;
+  /** Rev-5 DATA-1: the Claude Code CLI's own turn count, kept raw for
+   *  debugging. Equals the legacy `turns` value. Not the count `max_turns`
+   *  limits, and it can exceed the limit on a task that never reached it:
+   *  see `TaskResult` in `agent/src/models.py`. */
+  readonly turns_attempted?: number | string;
+  /** Rev-5 DATA-1: turns that actually completed: the model's answers, which
+   *  is what `max_turns` limits (clamped to it). */
+  readonly turns_completed?: number | string;
   readonly prompt_version?: string;
   readonly memory_written?: boolean;
   readonly compute_type?: ComputeType;
+  /** Approval-wait seconds before MicroVM sleep; 0 keeps it awake. Captured at submission. */
+  readonly microvm_sleep_after_s?: number;
   readonly compute_metadata?: Record<string, string>;
   readonly ttl?: number;
   /**
@@ -325,6 +328,21 @@ export interface TaskRecord {
    */
   readonly linear_pr_comment_event_id?: string;
   /**
+   * ISO timestamp of the last keep-alive activity the fan-out plane emitted
+   * into this task's Linear agent session (ADR-018 Phase 2). Throttles the
+   * per-turn heartbeat to one activity per window so a long run never lets
+   * the session go ``stale`` (30 min idle) without flooding it. Absent for
+   * non-session tasks.
+   */
+  readonly linear_session_heartbeat_at?: string;
+  /**
+   * Event id of the ``pr_created`` whose PR link was attached to the Linear
+   * agent session's header. Separate from ``linear_pr_comment_event_id``
+   * (the "Opened pull request" activity) so each is retried on its own and the
+   * appended link is never duplicated.
+   */
+  readonly linear_session_pr_link_event_id?: string;
+  /**
    * Event ID of the terminal event whose ordinary Jira final-status comment
    * was successfully posted (fan-out plane). This marker makes that create
    * idempotent across partial-batch Lambda retries. Comment-triggered
@@ -334,8 +352,12 @@ export interface TaskRecord {
   readonly jira_final_comment_event_id?: string;
   /** Durable Jira iteration body, merged with preview metadata by every writer. */
   readonly jira_iteration_status?: { readonly body: Record<string, unknown>; readonly terminal: boolean };
-  /** At-most-once claim for the standalone preview comment POST. */
-  readonly jira_preview_claimed?: boolean;
+  /**
+   * At-most-once claim for the standalone preview comment POST. The claim is
+   * the presence of the attribute (the write is conditional on
+   * ``attribute_not_exists``), so it is never ``false``.
+   */
+  readonly jira_preview_claimed?: true;
   readonly jira_preview_comment_id?: string;
   readonly attachments?: AttachmentRecord[];
   /**
@@ -417,6 +439,28 @@ export interface TaskRecord {
    * Introduced in PR A1; unused at runtime until A3.
    */
   readonly depends_on?: readonly string[];
+  /**
+   * The state on GitHub of the pull request this task opened, as the hourly read
+   * of pull requests last recorded it. Absent until a read records a state, and on
+   * every task whose pull request that read does not follow: one that opened no new
+   * pull request, and one that is part of an orchestration. ``merged`` and
+   * ``closed`` are final: a pull request recorded as either is not read again.
+   * ``not_found`` ends the reading as well, without being a final state: GitHub
+   * had no pull request of this task under the recorded number, and nothing else
+   * is written with it. Internal, like the three fields below: no API mapper
+   * exposes them.
+   */
+  readonly pr_state?: 'open' | 'merged' | 'closed' | 'not_found';
+  /** GitHub's merge time (``merged``) or close time (``closed``), ISO; written with the final state. */
+  readonly pr_closed_at?: string;
+  /**
+   * ISO time of the first review by a person with write access to the repository,
+   * other than the pull request's author; written with the final state, and absent
+   * when there was none by then.
+   */
+  readonly pr_first_review_at?: string;
+  /** Reviews by such people that requested changes, counted when the final state was recorded. */
+  readonly pr_changes_requested?: number;
 }
 
 /** Per-channel override for one notification channel. See
@@ -449,6 +493,8 @@ export interface TaskNotificationsConfig {
  * Strips internal fields not exposed in the API.
  */
 export interface TaskDetail {
+  /** Configured MicroVM approval-wait delay; 0 disables sleep. Absent on legacy records. */
+  readonly microvm_sleep_after_s?: number;
   readonly task_id: string;
   readonly status: TaskStatusType;
   /** ``null`` for a repo-less workflow (#248 Phase 3). */
@@ -477,8 +523,9 @@ export interface TaskDetail {
   readonly completed_at: string | null;
   /**
    * ISO timestamp of the agent's last heartbeat, written by the in-guest pipeline
-   * every 45 s on every compute backend (``agent/src/server.py``
-   * ``_heartbeat_worker``). ``null`` before the first beat, on tasks that never
+   * every 45 s on the agentcore and lambda-microvm backends (``agent/src/server.py``
+   * ``_heartbeat_worker``) and once at start on ecs, which runs the pipeline
+   * without that server. ``null`` before the first beat, on tasks that never
    * ran, and on records predating the field.
    *
    * Surfaced (ADR-021 P2r2-F11) because it was the platform's only in-guest
@@ -491,6 +538,10 @@ export interface TaskDetail {
    * operator can see. Keep in sync with ``cli/src/types.ts::TaskDetail``.
    */
   readonly agent_heartbeat_at: string | null;
+  /** The compute backend the task's session was started on; ``null`` before a
+   *  session starts and on records that predate the field. What a heartbeat
+   *  says differs by backend, so a reader of ``agent_heartbeat_at`` needs it. */
+  readonly compute_type: ComputeType | null;
   readonly duration_s: number | null;
   readonly cost_usd: number | null;
   readonly build_passed: boolean | null;
@@ -501,11 +552,12 @@ export interface TaskDetail {
   readonly otel_trace_id: string | null;
   readonly max_turns: number | null;
   readonly max_budget_usd: number | null;
-  /** Rev-5 DATA-1: SDK-attempted turn count (may exceed `max_turns` by 1
-   *  under `agent_status='error_max_turns'`). */
+  /** Rev-5 DATA-1: the Claude Code CLI's own turn count, kept for debugging.
+   *  Not the count `max_turns` limits, and it can exceed the limit on a task
+   *  that never reached it: see `TaskResult` in `agent/src/models.py`. */
   readonly turns_attempted: number | null;
-  /** Rev-5 DATA-1: actually-completed turns, clamped to `max_turns`
-   *  when the cap tripped. */
+  /** Rev-5 DATA-1: actually-completed turns: the model's answers, which is
+   *  what `max_turns` limits (clamped to it). */
   readonly turns_completed: number | null;
   readonly prompt_version: string | null;
   /** True when the task was submitted with ``--trace`` — surfaces the
@@ -584,6 +636,10 @@ export interface TaskSummary {
    * other package's `types.ts`.
    */
   readonly agent_heartbeat_at: string | null;
+  /** The compute backend the task's session was started on; ``null`` before a
+   *  session starts and on records that predate the field. On the summary beside
+   *  ``agent_heartbeat_at``, because what a heartbeat says differs by backend. */
+  readonly compute_type: ComputeType | null;
   /**
    * Estimated spend in USD (null until the agent reports one). On the summary so a
    * cost view can total a page of tasks without one detail call per task.
@@ -615,6 +671,97 @@ export interface PersonalBudgetStatus {
   readonly hard_stop: boolean;
   /** Whether the configured hard stop is currently blocking new tasks. */
   readonly hard_stop_active: boolean;
+}
+
+/** What a finished task counts as on the scoreboard. `failed`, `cancelled` and `timed_out` are the statuses of those names; `verified_pr`, `unverified_pr` and `no_new_pr` split the completed tasks. */
+export type TaskOutcome = 'verified_pr' | 'unverified_pr' | 'no_new_pr' | 'failed' | 'cancelled' | 'timed_out';
+
+/** A place the work waited for, or was redirected by, a person. `approve` counts approval requests, whatever the answer. */
+export type TouchpointKind = 'approve' | 'clarify' | 'follow_up' | 'cancel';
+
+/** The state on GitHub of a new pull request that ABCA follows, as its reads recorded it. `unread`: no read has recorded one yet, or a read found no pull request of the task under the recorded number and does not ask again. In `pull_requests` it is the state at the period's end: a merge or a close after that end counts as `open`. */
+export type PullRequestState = 'merged' | 'closed' | 'open' | 'unread';
+
+/** How far back a scoreboard looks: that many days up to now. */
+export type ScoreboardRange = '7d' | '30d';
+
+/** `count` of `total`. A rate is count / total; with a total of 0 there is none. */
+export interface Fraction {
+  readonly count: number;
+  readonly total: number;
+}
+
+/** A count, with the ids of up to 10 of the tasks behind it. */
+export interface Flagged {
+  readonly count: number;
+  readonly task_ids: readonly string[];
+}
+
+/** The median and the 90th percentile of durations in whole seconds, and how many durations there are. */
+export interface DurationSummary {
+  readonly p50: number;
+  readonly p90: number;
+  readonly count: number;
+}
+
+/** The scoreboard's numbers over the tasks that finished in one period. */
+export interface ScoreboardPeriod {
+  /** ISO bounds: tasks that finished at or after `from` and before `to`. The current period has no upper test: a finish time ahead of the clock belongs to it. */
+  readonly from: string;
+  readonly to: string;
+  /** Tasks that reached a terminal state, and their split. */
+  readonly finished: number;
+  readonly outcomes: Readonly<Record<TaskOutcome, number>>;
+  /** Seconds from task creation to a verified pull request; null when there is none. With fewer than 10 values, `p90` is the largest or close to it. */
+  readonly time_to_verified_pr_s: DurationSummary | null;
+  /** Median seconds from creation to the start of the session, time in the admission queue included, over the verified pull requests above whose start is known; null when there is none. */
+  readonly wait_p50_s: number | null;
+  /** Tasks that waited in the admission queue, of the tasks that waited or ran. */
+  readonly queued: Fraction;
+  /** Verified pull requests, of the tasks that asked for a new pull request. */
+  readonly verified: Fraction;
+  /** New pull requests with no follow-up task before the period's end (a follow-up known to have changed no code is not one), of the new pull requests whose number is known. */
+  readonly not_reworked: Fraction;
+  /** Verified pull requests whose task never stopped for a person, of the tasks that asked for a new pull request. */
+  readonly untouched: Fraction;
+  /** Touchpoints on coding tasks. Shown per verified pull request: divide the sum by `outcomes.verified_pr`. */
+  readonly touchpoints: Readonly<Record<TouchpointKind, number>>;
+  /** Recorded spend of coding tasks, all outcomes, to the micro-dollar. Shown per verified pull request: divide by `outcomes.verified_pr`. */
+  readonly spend_usd: number;
+  /** Coding tasks that ran and recorded no cost: `spend_usd` under-counts by them. */
+  readonly uncosted: number;
+  /** Finished tasks of any kind, not only coding tasks, that a guardrail stopped; newest first. Each is also one of `outcomes.failed`. */
+  readonly guardrail_stops: Flagged;
+  /** Finished tasks of any kind that were submitted with every approval granted in advance; newest first. */
+  readonly blanket_approvals: Flagged;
+  /** Coding tasks that stopped for at least one approval request, of the coding tasks that ran. */
+  readonly gated: Fraction;
+  /** The new pull requests of the period that ABCA follows, by their state at the period's end: the four add up to those pull requests. A pull request opened by a task of an orchestration is not followed, and is in none of them. Shown as the merged share: `merged` of `merged` + `closed` + `open`, with `unread` outside it. */
+  readonly pull_requests: Readonly<Record<PullRequestState, number>>;
+  /** Merged pull requests nobody sent back first (no change request by a reviewer with write access, no reworking follow-up before the merge), of the merged ones. */
+  readonly merged_clean: Fraction;
+  /** Seconds from task creation to the merge, over the pull requests merged before the period's end; null when none was merged. */
+  readonly time_to_merge_s: DurationSummary | null;
+  /** Seconds from the end of the task to the first review of its pull request by a person with write access to the repository, other than the pull request's author, over the merged ones that had one; null when none had. A review before that end counts as 0. */
+  readonly first_review_s: DurationSummary | null;
+}
+
+/** GET /v1/tasks?view=scoreboard: the caller's scoreboard for a range. */
+export interface Scoreboard {
+  readonly range: ScoreboardRange;
+  /** The read hit its cap inside the current period: `current` starts later than the range asked for, and `previous` is null. */
+  readonly truncated: boolean;
+  readonly current: ScoreboardPeriod;
+  /** The period of equal length before `current`; null when the read did not cover it. */
+  readonly previous: ScoreboardPeriod | null;
+  /**
+   * New pull requests that ABCA follows and that were open at its last read more than 7 days
+   * after their task finished, oldest first, over the tasks of both periods. Null when the
+   * count is not known: the read did not cover the earlier period, so the pull requests of
+   * the tasks it left out would be missing; or some pull requests are that old and ABCA has
+   * read none of them on GitHub.
+   */
+  readonly open_over_7d: Flagged | null;
 }
 
 /**
@@ -718,41 +865,13 @@ export interface ReplayBundle {
 }
 
 /**
- * Query parameters accepted by ``GET /v1/tasks/{task_id}/events``.
- *
- * Pagination is mutually exclusive: prefer ``after`` (a ULID event_id cursor
- * used by CLI polling and webhook replay to resume from a known event id)
- * over ``next_token`` (an opaque DynamoDB pagination token). If both are
- * provided, the handler uses ``after`` and logs a WARN. Neither is required
- * — callers may start from the beginning of the task's event stream.
- *
- * When a page is truncated at ``limit``, the response includes a
- * ``next_token`` so the caller can continue paginating forward regardless
- * of which mode they started with.
- *
- * Keep in sync with ``cli/src/types.ts``.
- */
-export interface GetTaskEventsQuery {
-  readonly limit?: number;
-  readonly next_token?: string;
-  /** ULID event_id cursor. Returns events with ``event_id > after``. */
-  readonly after?: string;
-  /**
-   * When truthy (``"1"`` or ``"true"``), return events in descending
-   * ``event_id`` order (newest first). Used by ``bgagent status`` to
-   * render a recency-biased snapshot without walking the full event
-   * stream. Mutually exclusive with ``after`` — the handler rejects
-   * the combination with 400.
-   */
-  readonly desc?: string;
-}
-
-/**
  * Create task request body.
  *
  * Keep in sync with ``cli/src/types.ts``.
  */
 export interface CreateTaskRequest {
+  /** MicroVM approval-wait seconds before sleep (0 = off, omitted = the contract default). Does not extend approval deadlines. */
+  readonly microvm_sleep_after_s?: number;
   /** Target repository (``owner/repo``). Optional since #248 Phase 3: a
    *  repo-less workflow (``requires_repo: false``) is submitted without it.
    *  Required-ness is enforced conditionally in ``createTaskCore`` based on
@@ -963,12 +1082,12 @@ export interface AgentAttachmentPayload {
 /**
  * Map a DynamoDB task record to the API detail response shape.
  *
- * All numeric fields sourced from the DDB record are routed through
- * ``coerceNumericOrNull`` — the Document-client deserializes DynamoDB
- * ``Number`` attributes as JavaScript ``string``s in some code paths
- * (see ``shared/numeric.ts`` for rationale), and any downstream caller
- * doing arithmetic (``.toFixed``, comparison, math) on a string-typed
- * "number" crashes at runtime. Coercing uniformly here means no caller
+ * The numeric fields that may be stored as strings are routed through
+ * ``coerceNumericOrNull`` — the agent stores some of them as DynamoDB
+ * String attributes, which arrive as JavaScript ``string``s
+ * (see ``shared/numeric.ts`` for rationale), and a downstream caller
+ * that calls ``.toFixed`` on a string-typed "number" crashes at
+ * runtime, while ``+`` concatenates. Coercing uniformly here means no caller
  * has to guess which TaskDetail numeric fields are safe — do not bypass
  * the helper when adding new numeric fields.
  *
@@ -984,6 +1103,9 @@ export function toTaskDetail(
 ): TaskDetail {
   const ctx = { task_id: record.task_id };
   return {
+    ...(typeof record.microvm_sleep_after_s === 'number' && Number.isInteger(record.microvm_sleep_after_s)
+      && record.microvm_sleep_after_s >= MICROVM_SLEEP_AFTER_S_MIN && record.microvm_sleep_after_s <= MICROVM_SLEEP_AFTER_S_MAX
+      && { microvm_sleep_after_s: record.microvm_sleep_after_s }),
     task_id: record.task_id,
     status: record.status,
     repo: record.repo ?? null,
@@ -1006,6 +1128,7 @@ export function toTaskDetail(
     // ADR-021 P2r2-F11: written by every backend, consumed by the orchestrator for
     // hang detection, and — until this line — invisible to every API consumer.
     agent_heartbeat_at: record.agent_heartbeat_at ?? null,
+    compute_type: record.compute_type ?? null,
     duration_s: coerceNumericOrNull(record.duration_s, { ...ctx, field: 'duration_s' }, logger),
     cost_usd: coerceNumericOrNull(record.cost_usd, { ...ctx, field: 'cost_usd' }, logger),
     build_passed: record.build_passed ?? null,
@@ -1146,6 +1269,11 @@ export interface CreateWebhookResponse {
   readonly webhook_id: string;
   readonly name: string;
   readonly secret: string;
+  /**
+   * URL that external systems post tasks to (`POST /webhooks/tasks`). It belongs to the
+   * API deployment, not to the webhook: every webhook of a deployment gets the same URL.
+   */
+  readonly webhook_url: string;
   readonly created_at: string;
 }
 
@@ -1275,6 +1403,7 @@ export function toTaskSummary(record: TaskRecord): TaskSummary {
     created_at: record.created_at,
     updated_at: record.updated_at,
     agent_heartbeat_at: record.agent_heartbeat_at ?? null,
+    compute_type: record.compute_type ?? null,
     cost_usd: coerceNumericOrNull(record.cost_usd, { task_id: record.task_id, field: 'cost_usd' }, logger),
     completed_at: record.completed_at ?? null,
     channel_source: record.channel_source,
@@ -1329,86 +1458,10 @@ export type ApprovalStatus =
  * Cedar HITL severity, surfaced in the CLI approval prompt and used
  * for severity-gated channel routing (§11.2: high-severity rules
  * skip Slack-button auto-approval). Shared alias so the same literal
- * union is not redefined inline in `ApprovalRecord`,
- * `PendingApprovalSummary`, `PolicyRuleSummary`, etc.
+ * union is not redefined inline in `PendingApprovalSummary`,
+ * `PolicyRuleSummary`, etc.
  */
 export type Severity = 'low' | 'medium' | 'high';
-
-/**
- * Fields shared by every approval row regardless of status. Internal
- * type — callers should consume the discriminated {@link ApprovalRecord}
- * so `status` narrows the optional fields below.
- *
- * PK = `task_id`, SK = `request_id` (ULID minted by the agent). GSI
- * `user_id-status-index` powers `GET /v1/pending` without a Scan.
- *
- * `matching_rule_ids` is a List, not a StringSet — DDB string sets
- * cannot be empty and pathological no-match soft-deny hits would fail
- * to persist (§10.1).
- */
-interface ApprovalRecordBase {
-  readonly task_id: string;
-  readonly request_id: string;
-  readonly tool_name: string;
-  readonly tool_input_preview: string;
-  readonly tool_input_sha256: string;
-  readonly reason: string;
-  readonly severity: Severity;
-  readonly matching_rule_ids: readonly string[];
-  readonly created_at: string;
-  readonly timeout_s: number;
-  readonly ttl: number;
-  readonly user_id: string;
-  readonly repo: string;
-}
-
-/** PENDING approval row — no decision recorded yet. */
-export interface PendingApprovalRecord extends ApprovalRecordBase {
-  readonly status: 'PENDING';
-}
-
-/** APPROVED approval row — decided_at + scope are required. */
-export interface ApprovedApprovalRecord extends ApprovalRecordBase {
-  readonly status: 'APPROVED';
-  readonly decided_at: string;
-  readonly scope: ApprovalScope;
-}
-
-/** DENIED approval row — decided_at required, deny_reason optional. */
-export interface DeniedApprovalRecord extends ApprovalRecordBase {
-  readonly status: 'DENIED';
-  readonly decided_at: string;
-  readonly deny_reason?: string;
-}
-
-/** TIMED_OUT approval row — decided_at required (server-set). */
-export interface TimedOutApprovalRecord extends ApprovalRecordBase {
-  readonly status: 'TIMED_OUT';
-  readonly decided_at: string;
-}
-
-/** STRANDED approval row — decided_at required (set by the
- *  stranded-task reconciler). No user decision was ever recorded. */
-export interface StrandedApprovalRecord extends ApprovalRecordBase {
-  readonly status: 'STRANDED';
-  readonly decided_at: string;
-}
-
-/**
- * Full approval row as stored in `TaskApprovalsTable` (design §10.1).
- *
- * Discriminated union on ``status`` so callers can narrow on the
- * status field and get exhaustiveness checking on the optional
- * decision fields. Pre-S3 this was a single interface with every
- * decision-time field optional, which let illegal combinations
- * type-check (e.g. an APPROVED record without a `scope`).
- */
-export type ApprovalRecord =
-  | PendingApprovalRecord
-  | ApprovedApprovalRecord
-  | DeniedApprovalRecord
-  | TimedOutApprovalRecord
-  | StrandedApprovalRecord;
 
 /**
  * Pending approval summary returned by `GET /v1/pending` (§7.7).
@@ -1549,22 +1602,6 @@ export interface ApprovalDecisionRecordedEvent {
   readonly caller_user_id: string;
 }
 
-/**
- * `CreateTaskRequest` extensions for HITL pre-approvals (§7.3).
- *
- * Old callers continue to work — every field is optional. New callers
- * can pre-approve common scopes (`tool_type:Read`, `bash_pattern:git
- * status*`) to avoid hitting gates for trusted operations, and can
- * raise the per-task default approval timeout above the 300s default
- * within the `[30, min(3600, maxLifetime - 300)]` bound.
- *
- * Keep in sync with ``cli/src/types.ts``.
- */
-export interface CreateTaskApprovalExtensions {
-  readonly approval_timeout_s?: number;
-  readonly initial_approvals?: readonly ApprovalScope[];
-}
-
 /** Maximum `initial_approvals` entries per §7.3. */
 export const INITIAL_APPROVALS_MAX_ENTRIES = 20;
 
@@ -1580,9 +1617,10 @@ export const APPROVAL_TIMEOUT_S_MIN = sharedConstants.approval_timeout_s.min;
  *  Sourced from ``contracts/constants.json`` (S9). */
 export const APPROVAL_TIMEOUT_S_MAX = sharedConstants.approval_timeout_s.max;
 
-/** Default `approval_timeout_s` when the submit payload omits it.
- *  Sourced from ``contracts/constants.json`` (S9). */
-export const APPROVAL_TIMEOUT_S_DEFAULT = sharedConstants.approval_timeout_s.default;
+/** Per-task MicroVM sleep delay bounds; zero disables automatic sleep. */
+export const MICROVM_SLEEP_AFTER_S_MIN = sharedConstants.microvm_sleep_after_s.min;
+export const MICROVM_SLEEP_AFTER_S_MAX = sharedConstants.microvm_sleep_after_s.max;
+export const MICROVM_SLEEP_AFTER_S_DEFAULT = sharedConstants.microvm_sleep_after_s.default;
 
 /**
  * Cedar HITL: bounds + platform default for the per-task approval-gate cap

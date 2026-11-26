@@ -105,4 +105,82 @@ describe('list command', () => {
     const calls = consoleSpy.mock.calls.map(c => c[0]);
     expect(calls.some((c: string) => c.includes('More results available'))).toBe(true);
   });
+
+  const task = (id: string) => ({
+    task_id: id,
+    status: 'FAILED',
+    repo: 'owner/repo',
+    issue_number: 1,
+    task_description: null,
+    branch_name: `bgagent/${id}/fix`,
+    pr_url: null,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+  });
+
+  test('follows next_token when a page holds fewer tasks than asked for', async () => {
+    // The API reads a bounded number of rows per request: with --repo or --status the
+    // tasks that match can all lie behind them.
+    mockListTasks
+      .mockResolvedValueOnce({ data: [], pagination: { next_token: 'T1', has_more: true } })
+      .mockResolvedValueOnce({ data: [task('task-0')], pagination: { next_token: null, has_more: false } });
+
+    const cmd = makeListCommand();
+    await cmd.parseAsync(['node', 'test', '--repo', 'owner/repo']);
+
+    // The table and nothing else: not 'No tasks found.' followed by the hint.
+    const printed = consoleSpy.mock.calls.map(c => c[0] as string);
+    expect(printed).toEqual([expect.stringContaining('task-0')]);
+    expect(mockListTasks).toHaveBeenCalledTimes(2);
+    expect(mockListTasks).toHaveBeenLastCalledWith({ status: undefined, repo: 'owner/repo', limit: 20, nextToken: 'T1' });
+  });
+
+  test('lists more tasks than one page holds, asking each further page only for the tasks still missing', async () => {
+    // The API returns at most 100 tasks per request.
+    const page = (first: number, count: number, token: string) => ({
+      data: Array.from({ length: count }, (_, i) => task(`task-${first + i}`)),
+      pagination: { next_token: token, has_more: true },
+    });
+    mockListTasks
+      .mockResolvedValueOnce(page(0, 100, 'T1'))
+      .mockResolvedValueOnce(page(100, 100, 'T2'))
+      .mockResolvedValueOnce(page(200, 50, 'T3'));
+
+    const cmd = makeListCommand();
+    await cmd.parseAsync(['node', 'test', '--status', 'FAILED', '--limit', '250', '--output', 'json']);
+
+    expect(mockListTasks.mock.calls).toEqual([
+      [{ status: 'FAILED', repo: undefined, limit: 250 }],
+      [{ status: 'FAILED', repo: undefined, limit: 150, nextToken: 'T1' }],
+      [{ status: 'FAILED', repo: undefined, limit: 50, nextToken: 'T2' }],
+    ]);
+    // No task is dropped, so the last token resumes right after the last one printed.
+    expect(consoleSpy).toHaveBeenCalledWith(JSON.stringify({
+      data: Array.from({ length: 250 }, (_, i) => task(`task-${i}`)),
+      pagination: { next_token: 'T3', has_more: true },
+    }, null, 2));
+  });
+
+  test('stops after 5 requests when every page is empty and promises more', async () => {
+    mockListTasks.mockResolvedValue({ data: [], pagination: { next_token: 'tok', has_more: true } });
+
+    const cmd = makeListCommand();
+    await cmd.parseAsync(['node', 'test', '--status', 'FAILED']);
+
+    expect(mockListTasks).toHaveBeenCalledTimes(5);
+    const printed = consoleSpy.mock.calls.map(c => c[0] as string);
+    expect(printed).toEqual(['No tasks found.', '\n(More results available)']);
+  });
+
+  test.each(['0', '-5', 'abc'])('takes --limit %s for none given', async (limit) => {
+    mockListTasks
+      .mockResolvedValueOnce({ data: [], pagination: { next_token: 'T1', has_more: true } })
+      .mockResolvedValueOnce({ data: [task('task-0')], pagination: { next_token: null, has_more: false } });
+
+    const cmd = makeListCommand();
+    await cmd.parseAsync(['node', 'test', '--limit', limit]);
+
+    // 20 are wanted, the page size the API defaults to.
+    expect(mockListTasks).toHaveBeenLastCalledWith({ status: undefined, repo: undefined, limit: 20, nextToken: 'T1' });
+  });
 });

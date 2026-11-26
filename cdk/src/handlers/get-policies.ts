@@ -28,7 +28,7 @@ import { CedarPolicyParseError, concatPolicies, parseRules } from './shared/ceda
 import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
 import { formatMinuteBucket, RATE_LIMIT_ROW_TTL_SECONDS } from './shared/rate-limit';
-import { checkRepoOnboarded, loadRepoConfig } from './shared/repo-config';
+import { lookupRepo } from './shared/repo-config';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import type { GetPoliciesResponse, PolicyRuleSummary } from './shared/types';
 import { makeDocClient } from './shared/ua';
@@ -38,8 +38,9 @@ const TASK_APPROVALS_TABLE_NAME = process.env.TASK_APPROVALS_TABLE_NAME;
 const POLICIES_RATE_LIMIT_PER_MINUTE = Number(process.env.POLICIES_RATE_LIMIT_PER_MINUTE ?? '30');
 
 // In-Lambda cache keyed by repo; 5 minutes. Keeps repeated `bgagent
-// policies list` calls snappy without hitting DDB + re-parsing the
-// policy set every time. Cold starts throw the cache away.
+// policies list` calls snappy without re-parsing the policy set every
+// time (the repo row is still read: it is the onboarding gate). Cold
+// starts throw the cache away.
 const CACHE_TTL_MINUTES = 5;
 const CACHE_TTL_MS = CACHE_TTL_MINUTES * 60 * 1000;
 interface CacheEntry {
@@ -115,7 +116,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     // Onboarding gate — same shape as ``POST /tasks`` (see
-    // ``create-task-core.ts::checkRepoOnboarded``). Originally this
+    // ``create-task-core.ts``). Originally this
     // endpoint was lenient (loaded RepoConfig best-effort, fell
     // through to built-ins on miss) on the theory that the built-in
     // policy set is public and there was no info-leak concern. E2E
@@ -125,8 +126,12 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // 422 REPO_NOT_ONBOARDED for any repo without an active
     // RepoConfig row. The built-in set is still discoverable via any
     // onboarded repo (e.g. ``scoropeza/agent-plugins``).
-    const onboardingResult = await checkRepoOnboarded(repoId);
-    if (!onboardingResult.onboarded) {
+    //
+    // The same read returns the Blueprint's policies. When it fails,
+    // the request ends in the catch below (500) and nothing is cached:
+    // a listing without the repository's own rules is never served.
+    const { onboarded, config } = await lookupRepo(repoId);
+    if (!onboarded) {
       return errorResponse(
         422,
         ErrorCode.REPO_NOT_ONBOARDED,
@@ -145,35 +150,20 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return successResponse(200, cached.response, requestId);
     }
 
-    // Load blueprint config (optional — repos without custom policies
-    // still get the built-in set).
-    let blueprintCedarPolicies: readonly string[] = [];
+    let rules;
     try {
-      const repoConfig = await loadRepoConfig(repoId);
-      if (repoConfig) {
-        blueprintCedarPolicies = repoConfig.cedar_policies ?? [];
+      rules = parseRules(concatPolicies(BUILTIN_HARD_DENY_POLICIES, BUILTIN_SOFT_DENY_POLICIES));
+      // Approval requests use these same IDs, counting only legacy entries.
+      let legacyCount = 0;
+      const nextLegacyRuleId = () => `legacy_extra_${legacyCount++}`;
+      for (const entry of config?.cedar_policies ?? []) {
+        rules.push(...parseRules(entry, nextLegacyRuleId));
       }
-    } catch (configErr) {
-      logger.warn('Could not load repo config for policies endpoint — continuing with built-ins', {
-        repo_id: repoId,
-        error: configErr instanceof Error ? configErr.message : String(configErr),
-      });
-    }
-
-    const blueprintText = blueprintCedarPolicies.join('\n');
-    const hardText = BUILTIN_HARD_DENY_POLICIES;
-    const softText = concatPolicies(BUILTIN_SOFT_DENY_POLICIES, blueprintText);
-
-    let hardRules;
-    let softRules;
-    try {
-      hardRules = parseRules(hardText);
-      softRules = parseRules(softText);
     } catch (err) {
       if (err instanceof CedarPolicyParseError) {
         logger.error('Cedar parse failure for repo policies', {
           repo_id: repoId,
-          message: err.message,
+          error: err.message,
         });
         return errorResponse(
           503,
@@ -188,10 +178,10 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const response: GetPoliciesResponse = {
       repo_id: repoId,
       policies: {
-        hard: hardRules
+        hard: rules
           .filter((r) => r.tier === 'hard')
           .map(toSummary),
-        soft: softRules
+        soft: rules
           .filter((r) => r.tier === 'soft')
           .map(toSummary),
       },

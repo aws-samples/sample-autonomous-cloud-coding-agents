@@ -34,6 +34,7 @@ const NAV_ITEMS: SideNavigationProps.Item[] = [
   { type: 'link', text: 'Overview', href: '/' },
   { type: 'link', text: 'Tasks', href: '/tasks' },
   { type: 'link', text: 'Repositories', href: '/repos' },
+  { type: 'link', text: 'Scoreboard', href: '/scoreboard' },
   { type: 'link', text: 'Costs', href: '/costs' },
 ];
 
@@ -114,14 +115,22 @@ export function AppShell() {
     const { href, external } = event.detail;
     if (external || !href) return;
     event.preventDefault();
-    navigate(href);
+    void navigate(href);
   };
 
   return (
     <>
       <div id="top-nav" style={{ position: 'sticky', top: 0, zIndex: 1002 }}>
         <TopNavigation
-          identity={{ href: '/', title: 'ABCA Operator Console', onFollow: follow }}
+          identity={{
+            href: '/',
+            title: 'ABCA Operator Console',
+            // Not `follow`: Cloudscape sends this event without the link's href.
+            onFollow: (event) => {
+              event.preventDefault();
+              void navigate('/');
+            },
+          }}
           utilities={[
             { ...approvalsMenu(pending), onItemFollow: follow },
             {

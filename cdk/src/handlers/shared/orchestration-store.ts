@@ -35,9 +35,11 @@
 
 import * as crypto from 'crypto';
 import {
+  type BatchWriteCommandInput,
   type DynamoDBDocumentClient,
   BatchWriteCommand,
   GetCommand,
+  PutCommand,
   QueryCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
@@ -45,6 +47,7 @@ import type { SubIssueNode } from './linear-subissue-fetch';
 import { logger } from './logger';
 import { validateDag } from './orchestration-dag';
 import { resolveEpicTip } from './orchestration-epic-tip';
+import { computeLeaves, isIntegrationNode } from './orchestration-integration-node';
 import type { AttachmentRecord } from './types';
 
 /** Orchestration-local lifecycle marker on each sub-issue row. */
@@ -113,15 +116,25 @@ export interface OrchestrationChildRow {
    */
   readonly pre_screened_attachments?: readonly AttachmentRecord[];
   /**
-   * A terminal failure reason recorded when the
-   * child could NOT be turned into a task at all (a deterministic create
-   * failure — guardrail/content-policy block, validation error) so it never
-   * got a ``child_task_id``. The panel's failure-reason resolver falls back to
-   * this string when there's no task to read an ``error_message`` from, so the
-   * child's ❌ carries a "why + how to fix" line instead of a bare ❌. Absent
-   * for the normal case (a released child's reason comes from its task record).
+   * Why the last attempt to start this child was refused (a deterministic create
+   * failure — guardrail/content-policy block, validation error, budget, repo not
+   * onboarded). No task exists for that attempt, so the panel shows this string
+   * on the child's ❌, a "why + how to fix" line instead of a bare ❌. The row can
+   * still carry the ``child_task_id`` of an EARLIER run (a retry keeps it). The
+   * release that starts a task removes the reason, so it is absent for the
+   * normal case (a released child's reason comes from its task record).
    */
   readonly failure_reason?: string;
+  /**
+   * The task whose failed verdict the reconciler could not put on the child's
+   * issue: its try to move the issue back and to replace its reaction did not
+   * land. The next record of that task tries again, also when it is written
+   * long after the task ended. Step 1b of ``reconcileTerminalChild`` says when
+   * a try counts as landed and when the mark is removed. Keyed by the task, so
+   * a mark that an earlier run of the child left means nothing for its next
+   * task, and a release does not remove it.
+   */
+  readonly unsettled_task_id?: string;
   readonly created_at: string;
   readonly updated_at: string;
   /** TTL epoch (seconds) for eventual cleanup. */
@@ -241,14 +254,21 @@ export interface OrchestrationReleaseContext {
  *
  * Truncation is visible rather than silent: a reader of the child prompt sees
  * that the text was cut, instead of quietly working from half a spec.
+ *
+ * This cap does not make the text fit a child's task description, whose limit
+ * the child's own text also counts against: the release cuts the epic's body
+ * further where a long sub-issue leaves less room (``buildChildDescription``).
  */
-export const PARENT_CONTEXT_MAX_CHARS = 4000;
+const PARENT_CONTEXT_MAX_CHARS = 4000;
+
+/** What ends a parent-context text that was cut, at seed or at release. */
+export const PARENT_CONTEXT_TRUNCATED = '\n… [truncated]';
 
 /** Cap one parent-context field, marking the cut so it is never mistaken for the whole. */
 function clampParentContext(text: string): string {
   const trimmed = text.trim();
   if (trimmed.length <= PARENT_CONTEXT_MAX_CHARS) return trimmed;
-  return `${trimmed.slice(0, PARENT_CONTEXT_MAX_CHARS)}\n… [truncated]`;
+  return `${trimmed.slice(0, PARENT_CONTEXT_MAX_CHARS)}${PARENT_CONTEXT_TRUNCATED}`;
 }
 
 export interface SeedOrchestrationParams {
@@ -347,12 +367,59 @@ function parsePreScreenedAttachments(raw: unknown, orchestrationId: string): Att
       orchestration_id: orchestrationId,
       error: err instanceof Error ? err.message : String(err),
     });
-    return [];
+    return []; // nosemgrep: ts-silent-success-masking -- a corrupt stored JSON blob is PERMANENT, not transient: failing closed here would make every later read of this epic throw, so an epic mid-flight could never settle and no retry could ever clear it. The attachments are advisory context for the children; the warning above is the operator's signal
   }
 }
 
 /** DynamoDB BatchWriteItem hard limit: at most 25 put/delete requests per call. */
 const DDB_BATCH_WRITE_MAX_ITEMS = 25;
+
+/** How many times one BatchWriteItem request is sent before the rows that
+ *  DynamoDB keeps handing back are given up. */
+const BATCH_WRITE_ATTEMPTS = 5;
+
+/** Pause before the second attempt; doubled before each one after it (100,
+ *  200, 400 and 800 ms: 1.5 s for a request that is given up). */
+const BATCH_WRITE_BACKOFF_MS = 100;
+
+/**
+ * Put ``rows`` with BatchWriteItem, 25 per request, in order, until DynamoDB
+ * has taken every one of them.
+ *
+ * A request that is throttled is answered with 200 and the puts that were not
+ * made, in ``UnprocessedItems``; nothing sends them again. Left unread, an epic
+ * was short of child rows while its meta row said otherwise: a child that waits
+ * for a missing one waits for ever. They are sent again here, a bounded number
+ * of times with a growing pause. Rows that are still left then are an error:
+ * no request after theirs is sent, and the caller must not go on as if they
+ * were stored. Within ONE request there is no such order: DynamoDB can store
+ * any of its rows and hand the others back, so a row that must not exist
+ * without the others (the meta row of a seed) is not passed here with them.
+ */
+async function putRows(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+  rows: ReadonlyArray<Record<string, unknown>>,
+): Promise<void> {
+  for (let i = 0; i < rows.length; i += DDB_BATCH_WRITE_MAX_ITEMS) {
+    let pending: NonNullable<BatchWriteCommandInput['RequestItems']>[string] = rows
+      .slice(i, i + DDB_BATCH_WRITE_MAX_ITEMS)
+      .map((Item) => ({ PutRequest: { Item } }));
+    for (let attempt = 1; pending.length > 0; attempt += 1) {
+      if (attempt > BATCH_WRITE_ATTEMPTS) {
+        throw new Error(
+          `${pending.length} orchestration row(s) were not written: `
+          + `DynamoDB left them unprocessed ${BATCH_WRITE_ATTEMPTS} times`,
+        );
+      }
+      if (attempt > 1) {
+        await new Promise((resolve) => setTimeout(resolve, BATCH_WRITE_BACKOFF_MS * 2 ** (attempt - 2)));
+      }
+      const result = await ddb.send(new BatchWriteCommand({ RequestItems: { [tableName]: pending } }));
+      pending = result.UnprocessedItems?.[tableName] ?? [];
+    }
+  }
+}
 
 /** Marker SK for the parent-meta row (sorts before any UUID sub_issue_id). */
 const PARENT_META_SK = '#meta';
@@ -524,24 +591,17 @@ export async function seedOrchestration(
     ...(ttl !== undefined && { ttl }),
   };
 
-  // BatchWrite in chunks of 25 (DDB limit). The meta row goes last so a
-  // partial failure can't leave a meta row claiming a fully-seeded
-  // orchestration when child rows are missing — a replay re-derives the
-  // same id, sees no meta row, and re-seeds.
-  const allRows: Array<Record<string, unknown>> = [
-    ...childRows.map((r) => ({ ...r })),
-    { ...metaRow },
-  ];
-  let rowsWritten = 0;
-  for (let i = 0; i < allRows.length; i += DDB_BATCH_WRITE_MAX_ITEMS) {
-    const chunk = allRows.slice(i, i + DDB_BATCH_WRITE_MAX_ITEMS);
-    await ddb.send(new BatchWriteCommand({
-      RequestItems: {
-        [tableName]: chunk.map((Item) => ({ PutRequest: { Item } })),
-      },
-    }));
-    rowsWritten += chunk.length;
-  }
+  // The child rows first, every one of them (BatchWrite in chunks of 25, the
+  // DDB limit), then the meta row in a request of its own. The meta row is
+  // what says the epic exists: the gate above, `loadOrchestration` and the
+  // sweep all start from it. Sent in one request with child rows, it could be
+  // stored while they were handed back, and a seed that then gave up left an
+  // epic short of children that the replay took for seeded. Written last and
+  // alone, a failed seed leaves no meta row: a replay re-derives the same id,
+  // sees none, and re-seeds.
+  await putRows(ddb, tableName, childRows.map((r) => ({ ...r })));
+  await ddb.send(new PutCommand({ TableName: tableName, Item: metaRow }));
+  const rowsWritten = childRows.length + 1;
 
   logger.info('Orchestration seeded', {
     orchestration_id: orchestrationId,
@@ -569,6 +629,78 @@ export interface ExtendOrchestrationResult {
   readonly rejected?: { readonly reason: string; readonly message: string };
 }
 
+/** A child in one of these has no task under way and none that succeeded: it
+ *  is started, or started again, from the text stored on its row. */
+const UNSTARTED: readonly ChildStatus[] = ['blocked', 'ready', 'failed', 'skipped'];
+
+/**
+ * Store the title and description that the graph has NOW for each existing
+ * child that will be started from its row: one that waits, was skipped or
+ * failed.
+ *
+ * A child is started with the text on its row, which the first seed wrote. A
+ * sub-issue that was refused for its text (content policy, length) and then
+ * reworded was therefore sent again as it was, on every retry. A child that is
+ * running or has succeeded is not written.
+ *
+ * Called with a graph that was just read, by both gestures that start such a
+ * child again: a re-applied trigger label ({@link extendOrchestration}) and a
+ * retry comment (the webhook processors).
+ *
+ * Each write is conditional on the row still being in one of those statuses,
+ * which the store checks at the moment of the write: a releaser that claimed
+ * the row since it was read here starts the task with the text it read, and
+ * the row keeps that text. A releaser that read the row before this write and
+ * claims it after starts the task with the text it read, while the row holds
+ * the new one; the next start uses the new one. ``updated_at`` is left alone:
+ * it is the stamp of the row's last status change, which the sweep and the
+ * retry's once-only key compare.
+ */
+export async function refreshUnstartedText(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+  existing: readonly OrchestrationChildRow[],
+  graph: readonly SubIssueNode[],
+): Promise<void> {
+  const nodeById = new Map(graph.map((n) => [n.id, n]));
+  for (const row of existing) {
+    const node = nodeById.get(row.sub_issue_id);
+    if (!node || !UNSTARTED.includes(row.child_status)) continue;
+    // As the seed stores it: an empty description is no description.
+    const description = node.description || undefined;
+    if (node.title === row.title && description === row.description) continue;
+
+    const set: string[] = [];
+    const remove: string[] = [];
+    const values: Record<string, string> = Object.fromEntries(UNSTARTED.map((s) => [`:${s}`, s]));
+    for (const [name, value] of [['title', node.title], ['description', description]] as const) {
+      if (value === undefined) {
+        remove.push(`#${name}`);
+      } else {
+        set.push(`#${name} = :${name}`);
+        values[`:${name}`] = value;
+      }
+    }
+    try {
+      await ddb.send(new UpdateCommand({
+        TableName: tableName,
+        Key: { orchestration_id: row.orchestration_id, sub_issue_id: row.sub_issue_id },
+        UpdateExpression: [
+          ...(set.length > 0 ? [`SET ${set.join(', ')}`] : []),
+          ...(remove.length > 0 ? [`REMOVE ${remove.join(', ')}`] : []),
+        ].join(' '),
+        ConditionExpression: `child_status IN (${UNSTARTED.map((s) => `:${s}`).join(', ')})`,
+        // Aliased, so that it does not matter whether DynamoDB reserves either word.
+        ExpressionAttributeNames: { '#title': 'title', '#description': 'description' },
+        ExpressionAttributeValues: values,
+      }));
+    } catch (err) {
+      // Claimed for release since the rows were read: it keeps its text.
+      if ((err as { name?: string })?.name !== 'ConditionalCheckFailedException') throw err;
+    }
+  }
+}
+
 /**
  * Extend an ALREADY-SEEDED orchestration with sub-issues added to the Linear
  * epic after the first seed. The seed path is
@@ -577,19 +709,23 @@ export interface ExtendOrchestrationResult {
  * orchestration is re-triggered.
  *
  * Diffs the freshly-fetched ``graph`` against the persisted children:
- *  - existing nodes are LEFT UNTOUCHED (their status/branch/task are preserved
- *    — we never re-seed or reset a node that already ran),
+ *  - existing nodes keep their status/branch/task/edges (we never re-seed or
+ *    reset a node that already ran); a node that is not running and has not
+ *    succeeded gets the title and description the graph has for it now (see
+ *    {@link refreshUnstartedText}),
  *  - genuinely-new nodes are validated (the augmented graph must stay acyclic),
  *    then added as ``ready`` (deps all already succeeded, or no deps) or
  *    ``blocked``,
  *  - the meta ``child_count`` is bumped.
  *
- * Idempotent: re-running with no new nodes is a no-op (empty result). A cycle
- * introduced by the new edges rejects WITHOUT writing anything.
+ * Idempotent: re-running with no new nodes and no changed text is a no-op
+ * (empty result). A cycle introduced by the new edges rejects WITHOUT writing
+ * anything.
  *
  * @param graph the full current sub-issue node set, already augmented with the
  *   synthetic integration node if the graph fans out, from the same source the
- *   seed used.
+ *   seed used. A new integration node is kept only if the STORED edges still
+ *   leave more than one leaf, and then depends on those leaves.
  */
 export async function extendOrchestration(params: {
   readonly ddb: DynamoDBDocumentClient;
@@ -613,6 +749,7 @@ export async function extendOrchestration(params: {
   const existingIds = new Set(snapshot.children.map((c) => c.sub_issue_id));
   const newNodes = graph.filter((n) => !existingIds.has(n.id));
   if (newNodes.length === 0) {
+    await refreshUnstartedText(ddb, tableName, snapshot.children, graph);
     return { orchestrationId, addedSubIssueIds: [], releasableSubIssueIds: [] };
   }
 
@@ -630,21 +767,42 @@ export async function extendOrchestration(params: {
       rejected: { reason: validation.reason, message: validation.message },
     };
   }
+  await refreshUnstartedText(ddb, tableName, snapshot.children, graph);
 
   // A new node with NO declared dependency must NOT branch off bare
   // main — it inherits the epic's accumulated unmerged work by stacking on the
-  // epic TIP (the existing leaf frontier). We inject that as a synthetic
+  // epic TIP (the leaf frontier of the existing nodes that have not failed or
+  // been skipped; empty when there is no such node). We inject that as a synthetic
   // ``depends_on`` so the existing dependency gating + base-branch stacking treat
   // it like any other dependent; "fall back to main only when merged" is handled
   // downstream by the agent's base-fetch fallback. Nodes that DECLARED a
   // dependency keep their explicit edges (user intent wins over the tip).
   const epicTip = resolveEpicTip(snapshot.children);
-  const withImplicitDeps = newNodes.map((n) => ({
+  const withImplicitDeps = newNodes.filter((n) => !isIntegrationNode(n.id)).map((n) => ({
     node: n,
     // Only unconstrained new nodes inherit the tip; and never self-depend
     // (the tip is computed from EXISTING nodes, so a new id can't appear).
     depends_on: n.depends_on.length > 0 ? n.depends_on : epicTip,
   }));
+
+  // The integration node arrives computed from the edges the issues DECLARE,
+  // where a node that stacks on the tip looks like one more leaf, next to the
+  // tip. What there is to combine is decided by the edges as they are STORED:
+  // those of the existing rows, and the new nodes with the tip they were just
+  // given. A single leaf there already is the combined result, and an
+  // integration node over it would run one more agent to open the same pull
+  // request again.
+  const integration = newNodes.find((n) => isIntegrationNode(n.id));
+  if (integration) {
+    const leaves = computeLeaves([
+      ...snapshot.children.map((c) => ({ id: c.sub_issue_id, depends_on: c.depends_on })),
+      ...withImplicitDeps.map(({ node, depends_on }) => ({ id: node.id, depends_on })),
+    ]);
+    if (leaves.length > 1) withImplicitDeps.push({ node: integration, depends_on: leaves });
+  }
+  if (withImplicitDeps.length === 0) {
+    return { orchestrationId, addedSubIssueIds: [], releasableSubIssueIds: [] };
+  }
 
   // A node is immediately releasable iff every predecessor is already
   // ``succeeded`` (or it has none). Predecessors may be existing (check their
@@ -675,12 +833,7 @@ export async function extendOrchestration(params: {
   });
 
   // Persist new child rows (chunks of 25), then bump meta child_count.
-  for (let i = 0; i < newRows.length; i += DDB_BATCH_WRITE_MAX_ITEMS) {
-    const chunk = newRows.slice(i, i + DDB_BATCH_WRITE_MAX_ITEMS);
-    await ddb.send(new BatchWriteCommand({
-      RequestItems: { [tableName]: chunk.map((Item) => ({ PutRequest: { Item } })) },
-    }));
-  }
+  await putRows(ddb, tableName, newRows.map((r) => ({ ...r })));
   // Bump child_count AND clear rollup_posted_at: if this epic had ALREADY
   // reached all-terminal and posted its rollup, adding a node re-opens it.
   // Clearing the claim lets the reconciler re-settle the parent state to
@@ -863,6 +1016,8 @@ export interface OrchestrationMeta {
    * settled, so a later settle can't re-swap a marker on an old comment.
    */
   readonly retry_comment_id?: string;
+  /** When the epic was seeded, extended or re-opened last (the meta row's own stamp). */
+  readonly updated_at?: string;
 }
 
 /**
@@ -1029,6 +1184,7 @@ export async function loadOrchestration(
     ...(metaItem.status_comment_id !== undefined && {
       status_comment_id: metaItem.status_comment_id as string,
     }),
+    ...(metaItem.updated_at !== undefined && { updated_at: metaItem.updated_at as string }),
   };
 
   return { meta, children };

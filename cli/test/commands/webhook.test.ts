@@ -85,6 +85,7 @@ describe('webhook command', () => {
         webhook_id: 'wh-1',
         name: 'My CI',
         secret: 'whsec_abc123',
+        webhook_url: 'https://abc123.execute-api.us-east-1.amazonaws.com/v1/webhooks/tasks',
         created_at: '2026-01-01T00:00:00Z',
       });
 
@@ -94,8 +95,19 @@ describe('webhook command', () => {
       expect(mockCreateWebhook).toHaveBeenCalledWith({ name: 'My CI' });
       const output = consoleSpy.mock.calls[0][0] as string;
       expect(output).toContain('wh-1');
+      expect(output).toContain('URL:         https://abc123.execute-api.us-east-1.amazonaws.com/v1/webhooks/tasks');
       expect(output).toContain('whsec_abc123');
       expect(output).toContain('store securely');
+    });
+
+    test('--help says the URL is the same for every webhook', () => {
+      const create = makeWebhookCommand().commands.find((command) => command.name() === 'create')!;
+      let help = '';
+      create.configureOutput({ writeOut: (text) => { help += text; } });
+      create.outputHelp();
+      const text = help.replace(/\s+/g, ' ');
+      expect(text).toContain('The output includes the webhook URL');
+      expect(text).toContain('the same for every webhook');
     });
 
     test('outputs JSON when --output json', async () => {
@@ -103,6 +115,7 @@ describe('webhook command', () => {
         webhook_id: 'wh-1',
         name: 'My CI',
         secret: 'whsec_abc123',
+        webhook_url: 'https://abc123.execute-api.us-east-1.amazonaws.com/v1/webhooks/tasks',
         created_at: '2026-01-01T00:00:00Z',
       };
       mockCreateWebhook.mockResolvedValue(webhookData);
@@ -166,6 +179,75 @@ describe('webhook command', () => {
 
       const calls = consoleSpy.mock.calls.map(c => c[0]);
       expect(calls.some((c: string) => c.includes('More results available'))).toBe(true);
+    });
+
+    const webhook = (id: string) => ({
+      webhook_id: id,
+      name: 'My CI',
+      status: 'active',
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+      revoked_at: null,
+    });
+
+    test('follows next_token when a page holds fewer webhooks than asked for', async () => {
+      // The API reads a bounded number of rows per request: revoked ones can take all of them.
+      mockListWebhooks
+        .mockResolvedValueOnce({ data: [], pagination: { next_token: 'T1', has_more: true } })
+        .mockResolvedValueOnce({ data: [webhook('wh-0')], pagination: { next_token: null, has_more: false } });
+
+      const cmd = makeWebhookCommand();
+      await cmd.parseAsync(['node', 'test', 'list']);
+
+      expect(mockListWebhooks).toHaveBeenCalledTimes(2);
+      expect(mockListWebhooks).toHaveBeenLastCalledWith({ includeRevoked: undefined, limit: 20, nextToken: 'T1' });
+      const calls = consoleSpy.mock.calls.map(c => c[0] as string);
+      expect(calls[0]).toContain('wh-0');
+      expect(calls.some(c => c.includes('More results available'))).toBe(false);
+    });
+
+    test('stops at --limit, asking each further page only for the webhooks still missing', async () => {
+      mockListWebhooks
+        .mockResolvedValueOnce({ data: [webhook('wh-1')], pagination: { next_token: 'T1', has_more: true } })
+        .mockResolvedValueOnce({ data: [webhook('wh-2'), webhook('wh-3')], pagination: { next_token: 'T2', has_more: true } });
+
+      const cmd = makeWebhookCommand();
+      await cmd.parseAsync(['node', 'test', 'list', '--limit', '3', '--output', 'json']);
+
+      expect(mockListWebhooks).toHaveBeenCalledTimes(2);
+      expect(mockListWebhooks).toHaveBeenLastCalledWith({ includeRevoked: undefined, limit: 2, nextToken: 'T1' });
+      // No webhook is dropped, so the last token resumes right after the last one printed.
+      expect(consoleSpy).toHaveBeenCalledWith(JSON.stringify({
+        data: [webhook('wh-1'), webhook('wh-2'), webhook('wh-3')],
+        pagination: { next_token: 'T2', has_more: true },
+      }, null, 2));
+    });
+
+    test('stops after 100 requests when every page is empty and promises more', async () => {
+      mockListWebhooks.mockResolvedValue({ data: [], pagination: { next_token: 'tok', has_more: true } });
+
+      const cmd = makeWebhookCommand();
+      await cmd.parseAsync(['node', 'test', 'list']);
+
+      expect(mockListWebhooks).toHaveBeenCalledTimes(100);
+      const calls = consoleSpy.mock.calls.map(c => c[0] as string);
+      expect(calls.some(c => c.includes('More results available'))).toBe(true);
+    });
+
+    test('gives every further request --include-revoked and the token of the page before it', async () => {
+      mockListWebhooks
+        .mockResolvedValueOnce({ data: [webhook('wh-1')], pagination: { next_token: 'T1', has_more: true } })
+        .mockResolvedValueOnce({ data: [webhook('wh-2')], pagination: { next_token: 'T2', has_more: true } })
+        .mockResolvedValueOnce({ data: [webhook('wh-3')], pagination: { next_token: null, has_more: false } });
+
+      const cmd = makeWebhookCommand();
+      await cmd.parseAsync(['node', 'test', 'list', '--include-revoked', '--limit', '3']);
+
+      expect(mockListWebhooks.mock.calls).toEqual([
+        [{ includeRevoked: true, limit: 3 }],
+        [{ includeRevoked: true, limit: 2, nextToken: 'T1' }],
+        [{ includeRevoked: true, limit: 1, nextToken: 'T2' }],
+      ]);
     });
 
     test('outputs JSON when --output json', async () => {

@@ -17,18 +17,16 @@
  *  SOFTWARE.
  */
 
-import { execSync } from 'child_process';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as readline from 'readline';
-import { CloudFormationClient, DescribeStacksCommand } from '@aws-sdk/client-cloudformation';
 import { PutSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
-import { PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { Command } from 'commander';
 import { ApiClient } from '../api-client';
 import { loadConfig } from '../config';
+import { featureNotDeployedError } from '../deployment-profile';
+import { requireDeployedFeature } from '../feature-guard';
 import { formatJson } from '../format';
-import { promptSecret } from '../prompt-secret';
+import { promptLine, promptSecret } from '../prompt-secret';
+import { findStackOutput } from '../stack-outputs';
 import { makeClient, makeDocClient } from '../ua';
 
 export function makeSlackCommand(): Command {
@@ -66,36 +64,16 @@ export function makeSlackCommand(): Command {
 
         // Step 1: Fetch the manifest JSON from stack outputs.
         console.log('Fetching Slack App manifest from stack outputs...\n');
-        let manifestJson = await getStackOutput(region, opts.stackName, 'SlackAppManifestJson');
+        const manifestJson = await findStackOutput(region, opts.stackName, 'SlackAppManifestJson');
 
-        if (!manifestJson) {
-          console.log('Stack has not been deployed yet.');
-          const shouldDeploy = await promptConfirm('Deploy now? (y/n) ');
-          if (shouldDeploy) {
-            console.log('\nDeploying stack (this may take a few minutes)...\n');
-            try {
-              const repoRoot = findRepoRoot();
-              console.log(`Deploying from ${repoRoot}\n`);
-              execSync('MISE_EXPERIMENTAL=1 mise run //cdk:deploy', {
-                cwd: repoRoot,
-                stdio: 'inherit',
-              });
-              console.log('');
-              manifestJson = await getStackOutput(region, opts.stackName, 'SlackAppManifestJson');
-            } catch (err) {
-              const msg = err instanceof Error ? err.message : String(err);
-              console.error(`\nDeploy failed: ${msg}`);
-              process.exit(1);
-            }
-          }
-        }
+        // Deploying happens through `bgagent setup`, which shows the diff and
+        // guards data loss; a bare deploy here would follow whatever the profile says.
+        if (!manifestJson) throw featureNotDeployedError('slack', opts.stackName);
 
         if (manifestJson) {
           const createUrl = `https://api.slack.com/apps?new_app=1&manifest_json=${encodeURIComponent(manifestJson).replace(/%2F/g, '/')}`;
           console.log('Open this URL to create your Slack App (all settings pre-filled):');
           console.log(`  ${createUrl}\n`);
-        } else {
-          console.log('Create the app manually at https://api.slack.com/apps\n');
         }
 
         // Step 2: Fetch secret ARNs from stack outputs (CDK creates the placeholders).
@@ -166,7 +144,7 @@ export function makeSlackCommand(): Command {
         const config = loadConfig();
         const region = opts.region || config.region;
 
-        const tableName = await getStackOutput(region, opts.stackName, 'SlackChannelMappingTableName');
+        const tableName = await findStackOutput(region, opts.stackName, 'SlackChannelMappingTableName');
         if (!tableName) {
           console.error('Could not find SlackChannelMappingTableName in stack outputs. Deploy the stack first.');
           process.exit(1);
@@ -188,18 +166,27 @@ export function makeSlackCommand(): Command {
         // across workspaces. Resolve the team_id from the installation table when
         // the operator didn't pass one — the common single-workspace case needs
         // no flag; multi-workspace deployments must disambiguate with --team-id.
-        const installationTable = await getStackOutput(region, opts.stackName, 'SlackInstallationTableName');
+        const installationTable = await findStackOutput(region, opts.stackName, 'SlackInstallationTableName');
         const teamId = await resolveSlackTeamId(region, installationTable, opts.teamId);
 
         const now = new Date().toISOString();
         const ddb = makeDocClient({ region });
+        const key = { channel_id: `${teamId}#${channelId}` };
+        // The put replaces the row, so read the date the channel was first
+        // mapped and write it back. A read that fails stops the command:
+        // taking the row for new would date the mapping from today.
+        const existing = await ddb.send(new GetCommand({
+          TableName: tableName,
+          Key: key,
+          ConsistentRead: true,
+        }));
         await ddb.send(new PutCommand({
           TableName: tableName,
           Item: {
-            channel_id: `${teamId}#${channelId}`,
+            ...key,
             repo: opts.repo,
             status: 'active',
-            onboarded_at: now,
+            onboarded_at: existing.Item?.onboarded_at ?? now,
             updated_at: now,
           },
         }));
@@ -212,7 +199,7 @@ export function makeSlackCommand(): Command {
       }),
   );
 
-  return slack;
+  return requireDeployedFeature(slack, 'slack');
 }
 
 /**
@@ -266,9 +253,9 @@ interface SecretArns {
 }
 
 async function fetchSecretArns(region: string, stackName: string): Promise<SecretArns> {
-  const signingSecretArn = await getStackOutput(region, stackName, 'SlackSigningSecretArn');
-  const clientSecretArn = await getStackOutput(region, stackName, 'SlackClientSecretArn');
-  const clientIdSecretArn = await getStackOutput(region, stackName, 'SlackClientIdSecretArn');
+  const signingSecretArn = await findStackOutput(region, stackName, 'SlackSigningSecretArn');
+  const clientSecretArn = await findStackOutput(region, stackName, 'SlackClientSecretArn');
+  const clientIdSecretArn = await findStackOutput(region, stackName, 'SlackClientIdSecretArn');
 
   if (!signingSecretArn || !clientSecretArn || !clientIdSecretArn) {
     console.error('Could not find Slack secret ARNs in stack outputs. Deploy the stack first.');
@@ -284,7 +271,7 @@ async function promptAndStoreCredentials(region: string, arns: SecretArns): Prom
 
     const signingSecret = await promptSecret('Signing Secret: ');
     const clientSecret = await promptSecret('Client Secret:  ');
-    const clientId = await promptVisible('Client ID:      ');
+    const clientId = await promptLine('Client ID');
 
     if (!signingSecret || !clientSecret || !clientId) {
       console.error('\n✗ All three values are required. Try again.\n');
@@ -332,78 +319,5 @@ async function promptAndStoreCredentials(region: string, arns: SecretArns): Prom
     console.log('  - Signing Secret: when @Shoof receives its first message\n');
 
     return clientId;
-  }
-}
-
-// ─── Prompts ─────────────────────────────────────────────────────────────────
-
-function promptConfirm(label: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stderr,
-    });
-    rl.question(label, (answer) => {
-      rl.close();
-      resolve(answer.trim().toLowerCase().startsWith('y'));
-    });
-  });
-}
-
-function promptVisible(label: string): Promise<string> {
-  return new Promise((resolve) => {
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stderr,
-    });
-
-    rl.question(label, (answer) => {
-      rl.close();
-      resolve(answer.trim());
-    });
-  });
-}
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-function findRepoRoot(): string {
-  const startDirs = [
-    process.cwd(),
-    path.resolve(__dirname, '..', '..', '..'),
-  ];
-
-  for (const start of startDirs) {
-    let dir = start;
-    while (true) {
-      if (fs.existsSync(path.join(dir, 'mise.toml')) && fs.existsSync(path.join(dir, 'cdk', 'cdk.json'))) {
-        return dir;
-      }
-      const parent = path.dirname(dir);
-      if (parent === dir) break;
-      dir = parent;
-    }
-  }
-
-  throw new Error('Could not find project root. Run this command from the repository directory.');
-}
-
-async function getStackOutput(region: string, stackName: string, outputKey: string): Promise<string | null> {
-  try {
-    const cfn = makeClient(CloudFormationClient, { region });
-    const result = await cfn.send(new DescribeStacksCommand({ StackName: stackName }));
-    const outputs = result.Stacks?.[0]?.Outputs ?? [];
-    const output = outputs.find((o) => o.OutputKey === outputKey);
-    return output?.OutputValue ?? null;
-  } catch (err) {
-    // Only swallow the "stack does not exist" case — that's the "not deployed yet"
-    // path callers expect as null. Auth failures (ExpiredToken,
-    // UnauthorizedOperation, AccessDenied, etc.) must surface so users see the
-    // real error instead of a misleading "stack not deployed" message.
-    const name = (err as Error)?.name ?? '';
-    const message = (err as Error)?.message ?? '';
-    if (name === 'ValidationError' && /does not exist/i.test(message)) {
-      return null; // nosemgrep: ts-silent-success-masking -- "stack does not exist" is the not-deployed-yet contract; auth/other errors rethrow below
-    }
-    throw err;
   }
 }

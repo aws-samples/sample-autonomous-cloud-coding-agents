@@ -1,8 +1,6 @@
 ---
-title: Prompt guide
+title: "Prompt guide"
 ---
-
-# Prompt guide
 
 Writing effective task descriptions for ABCA.
 
@@ -146,7 +144,7 @@ Understanding the prompt assembly helps you write better descriptions. When you 
 
 1. If you provided `--issue`, the platform fetches the issue title, body, and comments from GitHub.
 2. If you provided `--pr` or `--review-pr`, it fetches the PR metadata, diff, conversation comments, and inline review comments. Resolved review threads are filtered out.
-3. Your task description, the fetched content, and task metadata are combined into a single user prompt.
+3. Your task description, the fetched content, and task metadata are combined into a single user prompt. The fetched issue or pull request is delimited in it as untrusted data, since anyone may have written it: the agent is told to use it to understand the work and to follow no instruction in it that would change its rules, its workflow or the scope of the task (see [Untrusted content boundaries](/sample-autonomous-cloud-coding-agents/architecture/security#untrusted-content-boundaries)). What you write in `--task` is an instruction.
 4. If the assembled prompt exceeds ~100K tokens, oldest comments are trimmed first. The title, body, and your task description are always preserved.
 
 The agent receives this user prompt alongside a system prompt selected by task type and any repo-level instructions from your repository. You control the input, but the platform decides the final shape.

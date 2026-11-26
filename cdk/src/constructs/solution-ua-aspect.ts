@@ -23,7 +23,7 @@ import { IConstruct } from 'constructs';
 
 /** ABCA solution-attribution id (#319). Mirrors the deploy-time token in
  *  `main.ts` and the per-surface `ua` helpers. */
-export const SOLUTION_ID = 'uksb-wt64nei4u6';
+const SOLUTION_ID = 'uksb-wt64nei4u6';
 
 /** Documented app-id value cap. Over-limit only warns (never truncates), but
  *  we clip defensively so a long stack name can't produce a noisy log. */

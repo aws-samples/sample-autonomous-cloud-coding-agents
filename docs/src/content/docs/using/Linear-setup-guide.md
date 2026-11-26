@@ -1,14 +1,12 @@
 ---
-title: Linear setup guide
+title: "Linear integration setup guide"
 ---
-
-# Linear integration setup guide
 
 Set up the ABCA Linear integration so that applying a label to a Linear issue triggers an autonomous task. The agent posts progress comments back on the issue as it works, and opens a pull request.
 
 ## Prerequisites
 
-- ABCA CDK stack deployed (see [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction))
+- ABCA CDK stack deployed (see [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction)) with the `linear` feature enabled in its [deployment profile](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide#deployment-profiles)
 - A Cognito user account configured (see [User guide](/sample-autonomous-cloud-coding-agents/using/overview))
 - A Linear workspace where you have **admin** access — `actor=app` installs are workspace-wide and Linear requires an admin to approve them
 - The `bgagent` CLI installed and logged in (`bgagent configure` + `bgagent login`)
@@ -38,7 +36,9 @@ AgentCore Identity not available in us-east-1 — using Secrets Manager.
 
 A workspace that started on Secrets Manager and later moves to the vault **keeps** its Secrets Manager token as a fallback. A workspace onboarded straight onto the vault has no such token by design — it needs the vault to be reachable.
 
-When a workspace's authorization dies, ABCA records it on the registry row and publishes to the stack's operational alert topic. That topic has **no subscribers unless you deployed with `alertEmail`**, so set it if you want to hear about a dead workspace rather than discover it from `bgagent platform doctor`.
+When a workspace's authorization dies, ABCA records it on the registry row and publishes to the `OperationalAlerts` topic. That topic has **no subscribers unless you deployed with `alertEmail`**, so set it if you want to hear about a dead workspace rather than discover it from `bgagent platform doctor`.
+
+A vault call that fails is not such a death. When the vault answers with an error (a throttle, a missing permission, a deleted credential provider) rather than saying that a new consent is needed, ABCA records and announces nothing. That event uses the Secrets Manager token if the workspace has a usable one and is otherwise dropped, with `Vault token resolution failed` in the function's log. The next event asks the vault again.
 
 #### Using the vault with Lambda MicroVMs
 
@@ -79,7 +79,7 @@ Two fields deserve attention:
 
 Click **Create** and copy the **Client ID** and **Client Secret**.
 
-> **Don't enable Linear's agent / app-notification events.** ABCA is a **comment-based** integration: it posts a maturing threaded reply and reacts 👀→✅ on ordinary comments. With agent-session events on, Linear renders an `@mention` of the app as its interactive agent-activity surface instead of a comment thread, which breaks the reply/reaction UX. ABCA ignores agent-session events and logs a WARN naming the workspace. If comments start behaving "interactively", this toggle is why.
+> **Don't enable Linear's agent / app-notification events** unless you opted into [native agent sessions](#native-agent-sessions-opt-in). By default ABCA is a **comment-based** integration: it posts a maturing threaded reply and reacts 👀→✅ on ordinary comments. With agent-session events on, Linear renders an `@mention` of the app as its interactive agent-activity surface instead of a comment thread, which breaks the reply/reaction UX. A stack without the opt-in ignores agent-session events and logs a WARN naming the workspace. If comments start behaving "interactively", this toggle is why.
 
 > **One webhook, not two.** The app's own webhook is all ABCA needs. A separate workspace webhook (Linear → Settings → API → Webhooks) works equally well as an *alternative* — but pointing both at ABCA delivers every event twice under two different signing secrets, and only one of them can verify. Pick one.
 
@@ -134,7 +134,7 @@ Pass `--label <name>` to use a trigger label other than `bgagent`. Also availabl
 
 `onboard-project` asks Linear which workspace owns the project and records it on the mapping, so a later webhook naming that project can be checked against the workspace whose signature it arrived with. Narrow the search with `--slug <slug>` when you know the workspace. If the Linear API is unreachable, `--workspace-id <uuid>` records an owner without verifying it — a wrong value routes the project's tasks nowhere.
 
-Mappings created before this was recorded have no owning workspace. `bgagent platform doctor` reports them. That is harmless while a stack has one workspace, since there is no other tenant a project could be steered at — but re-run `onboard-project` for each of them before onboarding a second workspace.
+Mappings created before this was recorded have no owning workspace. `bgagent platform doctor` reports them. That is harmless while a stack has one workspace, since there is no other tenant a project could be steered at — but re-run `onboard-project` for each of them before onboarding a second workspace, with the same `--repo` and the same `--label`: the command rewrites the whole mapping, and without `--label` the trigger label goes back to `bgagent`.
 
 ### Signing secrets in a multi-workspace install
 
@@ -180,7 +180,7 @@ The parent issue itself spawns no task — a human-authored sub-issue graph is t
 
 #### Adding a sub-issue to a running epic
 
-The graph is read **at trigger time**, so a sub-issue created afterward isn't picked up automatically. Create it (with its `blocked by` edges), then **re-apply the trigger label to the parent**. ABCA diffs the current graph against what it has, adds only the new nodes, and releases any that are immediately runnable. Re-applying with no new sub-issues is a safe no-op.
+The graph is read **at trigger time**, so a sub-issue created afterward isn't picked up automatically. Create it (with its `blocked by` edges), then **re-apply the trigger label to the parent**. ABCA diffs the current graph against what it has, adds only the new nodes, and releases any that are immediately runnable. Re-applying with no new sub-issues is safe: sub-issues that are running or have succeeded are left alone. It retries the ones that failed or were skipped, and it reads again the title and description of every sub-issue that is not running and has not succeeded, so a reworded sub-issue starts with its new text.
 
 Re-applying the label is deliberately the explicit "execute this" signal — the same consent model as the initial trigger — so newly drafted sub-issues don't start the instant you create them.
 
@@ -201,6 +201,55 @@ Gathered on **every** trigger path (labelled issue, orchestration, `@bgagent` co
 - **Rejected**: everything else (`.docx`, `.zip`, …). The reporter gets a comment asking them to remove or convert the file and re-trigger.
 
 No extra setup — this is automatic once the workspace and project are onboarded.
+
+## Native agent sessions (opt-in)
+
+Linear's [Agents API](https://linear.app/developers/agents) gives an installed app a first-class agent UI: people **@-mention or delegate an issue** to it, follow up **inside the session**, and watch typed progress (thoughts, actions, a final response) instead of a comment thread. ABCA can answer through that API instead of the `@bgagent` comment protocol. It's an additive, flag-gated channel ([ADR-018](/sample-autonomous-cloud-coding-agents/decisions/adr-018-linear-agent-session-interaction) Phase 2): the label triggers, the epic orchestration and the AWS compute are unchanged. Only how a standalone issue is triggered and how its progress is shown changes.
+
+> **Developer Preview.** Linear marks the Agents API as subject to change before GA. Keep the flag off on stacks where a Preview-API change would hurt.
+
+**Enable it.** Turn on both halves together, in this order:
+
+1. Deploy the stack with the flag:
+
+   ```bash
+   mise //cdk:deploy -- --context enableLinearAgentSessions=true
+   ```
+
+2. In the Linear app (*Settings → API → Applications → your app → Webhooks*), tick **Agent session events** under *App events*. Leave **Issues** and **Comments** ticked. Inbox notifications and permission changes stay off.
+
+If you do these the other way round, every mention in the meantime opens a session that nothing answers, and Linear shows "did not respond". To turn the channel off, reverse the order: untick **Agent session events** first, then redeploy without the flag.
+
+3. Delegate one issue to bgagent in each workspace you enabled. ABCA switches a workspace's standalone `@bgagent` mentions over to sessions once it has received a session event from that workspace, and this is the first one. Skip it and the first mention may be answered by both the session and the comment flow.
+
+**Step 2 is per workspace.** The flag is stack-wide, but the toggle belongs to each workspace's Linear app. A workspace whose app lacks the toggle isn't affected by the flag: its `@bgagent` comments, label triggers and epics keep working as before.
+
+> **@-mentions need the WAF fix.** A session opened by an @-mention carries XML-like context that the API's web application firewall has been seen to reject. Deploy a version that includes the signed-webhook WAF rule ([#1065](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/1065)) before you turn the flag on. Without it, once a workspace has delivered its first session, a standalone `@bgagent` mention there gets no session and no comment reply. Delegating an issue works either way.
+
+**Turning it off for one workspace.** Untick **Agent session events** in that workspace's Linear app. Linear doesn't tell ABCA about this, so ABCA goes back to answering that workspace's `@bgagent` comments once it has seen no session event from it for 14 days. To switch back immediately, remove the `agent_sessions_seen_at` attribute from the workspace's row in the Linear workspace registry table.
+
+**What changes once it's on**
+
+| You do in Linear | ABCA does |
+|---|---|
+| @-mention bgagent on an issue, or delegate the issue to it | Acknowledges within seconds with a *thought*, then starts a coding task on the project's mapped repo. If the issue already has an ABCA pull request and your mention carries an instruction, it iterates on that PR instead. The session shows **Started coding task** or **Iterating on pull request**. |
+| — the agent opens a PR | Attaches the pull request to the session header and posts an **Opened pull request** action. |
+| — a long run is in progress | Posts a short-lived "Still working" thought at most every 10 minutes, so the session never goes stale (Linear's idle limit is 30 minutes). |
+| — the task finishes | Posts one final activity carrying the same outcome, cost, turns and duration as the comment channel: a *response* on success, an *elicitation* if the run stopped to ask you a question, an *error* on failure. Linear turns it into the thread comment. |
+| — you're at your concurrency limit | Posts a "Queued" thought in the session. The task starts on its own when a slot frees up. |
+| Reply inside the session while the task runs | Your message goes to the running agent as a nudge (the same guardrail screening, 2,000-character cap and per-minute limit as `bgagent nudge`). The agent picks it up at its next step. Only the task's owner can steer it. |
+| Reply after the task has finished | Starts a follow-up task. If the run stopped to ask a question, your reply resumes the original request with the answer. Otherwise it's a PR iteration if a PR exists, or new work from your message plus the issue. |
+| Click **Stop** in the session | Cancels the running task and shuts its agent down, like `bgagent cancel`, then confirms with a final response. Only the task's owner can stop it. |
+
+**What stays on the comment path.** Linear sessions are per-issue and can't roll up across issues. So mentions on an **epic** or on a **started sub-issue of an orchestration** are still handled by the `@bgagent` comment flow and its epic panel. The session for those mentions replies with a pointer and closes. Label triggers (`bgagent`, `bgagent:help`) are unchanged. In a workspace that delivers session events, ABCA no longer acts on standalone `@bgagent` comments, because the session answers that same mention and acting on both would start two tasks.
+
+**Re-delegating a finished issue does nothing.** Linear opens no new session and sends ABCA nothing when you delegate an issue whose session is already complete. To restart work, reply inside the existing session.
+
+**Who can act.** Every session request, `stop` included, needs a linked ABCA user ([Inviting teammates](#inviting-teammates)). An unlinked user is told to link their account and nothing runs. A refusal closes the session it was made in, unless that is the session a running task reports into; there it's a note, so someone else's run isn't marked finished or failed. A new task is attributed to whoever asked for it. Steering or stopping a *running* task follows the API's rule: only its owner can do it.
+
+**Reactions.** A session task gets no 👀/✅/❌ reactions on the issue, since the session shows that state. The issue still moves to *In Progress* and *In Review*.
+
+**Not yet supported in sessions:** image and file attachments from the issue description (use a label trigger for those), and Linear's *plan* checklist.
 
 ## Adding another workspace
 
@@ -226,7 +275,7 @@ Pick the teammate from the list of human members. You get a one-time code (24h T
 
 They need an ABCA account first. If they don't have one:
 
-1. **Admin** runs `bgagent admin invite-user teammate@example.com` to create their Cognito user (see [User guide → Joining an existing deployment](/sample-autonomous-cloud-coding-agents/using/overview#joining-an-existing-deployment) for the full Cognito-side flow).
+1. **Admin** runs `bgagent admin invite-user teammate@example.com` to create their Cognito user (see [User guide → Joining an existing deployment](/sample-autonomous-cloud-coding-agents/using/authentication#joining-an-existing-deployment) for the full Cognito-side flow).
 2. **Teammate** pastes the bundle + temp password from the admin into:
 
    ```bash
@@ -305,7 +354,7 @@ If the failing event's `organizationId` matches no registered workspace and the 
 
 An `@mention` shows up as an interactive agent widget rather than a comment, and replies/reactions don't behave like a thread. The OAuth app is configured as a Linear **agent**.
 
-Fix: untick the app's **App events** checkboxes (agent session events, inbox notifications, permission changes). Keep the webhook enabled with the **Issues** and **Comments** data-change events. No redeploy needed.
+Fix: untick the app's **App events** checkboxes (agent session events, inbox notifications, permission changes). Keep the webhook enabled with the **Issues** and **Comments** data-change events. No redeploy needed. If you want the interactive surface, enable [native agent sessions](#native-agent-sessions-opt-in) instead; with the flag on, ABCA answers in the session.
 
 To confirm ABCA is seeing agent-mode traffic:
 
@@ -322,7 +371,7 @@ A `WARN … Ignoring Linear agent-mode webhook …` line names the offending wor
 - Does the registry row's `oauth_secret_arn` match it, with `status='active'`?
 - Check the webhook-processor logs, not the agent container — token resolution and attachment screening happen there, before the task is dispatched.
 - `WARN linear_reactions: HTTP 401 from Linear` — the refresh token was revoked Linear-side. Re-run `bgagent linear setup <slug>`.
-- `resolve_linear_api_token: invalid_grant` — Linear permanently rejected the refresh token. Re-run setup to issue a new one.
+- `resolve_linear_api_token: stored token is expiring and the agent does not refresh` (agent log) — the agent read the stored token in its last minute or after it expired. The agent never renews the token itself; the next Lambda that needs one does. Until then that task posts no reactions and does not move the issue's state.
 - On the vault path, a "consent required" outcome means the grant is gone; re-run setup.
 
 ## Removing a workspace
@@ -368,6 +417,15 @@ aws dynamodb update-item \
 
 If `remove-workspace` returns the `SECRET_DELETE_FAILED` error code, the workspace is already revoked (fail-closed, so it no longer resolves tokens or routes webhooks), but its OAuth secret was orphaned. The handler records this durably on the registry row: `secret_deletion_failed = true`, `secret_deletion_error` (the failing error name), and `orphaned_oauth_secret_arn` (the exact secret ARN to purge). When you see that marker — or the error code — run the `delete-secret` step below against `orphaned_oauth_secret_arn` to finish teardown.
 
+If `remove-workspace` returns the `WORKSPACE_SLUG_AMBIGUOUS` error code (HTTP 409), more than one `active` registry row carries the slug, and the command changed nothing. The message names the `linear_workspace_id` of each of those rows. On a row, `team_keys` (the workspace's Linear team keys, such as the `ENG` of `ENG-42`, when recorded), `installed_at` and `installed_by_platform_user_id` tell them apart.
+
+1. Use the `update-item` command below to revoke each workspace that should go, by its id. Leave out the `delete-secret` step and the credential-provider step as long as another `active` row carries the slug. The rows share the secret and the provider, both named after the slug.
+2. Run `bgagent linear setup` again for each workspace that stays, under its own URL key if that differs from the slug. `setup` prints the workspace it authorized, which has to be that one.
+
+Once a single `active` row is left for the slug, `remove-workspace <slug>` works again. Run it if that workspace should go too, and it deletes the secret and names the provider as usual.
+
+If no `active` row is left for the slug, because each one was revoked by hand or set up again under another URL key, finish teardown by hand. Run the `delete-secret` step for the slug and, if the workspaces were vault-managed, the credential-provider step.
+
 If the CLI is unavailable, you can revoke a workspace directly (equivalent to the default `remove-workspace` flow). **Run the registry revoke first, then delete the secret** — the same order the handler uses. Deleting the secret first leaves an `active` registry row with no credential behind it: token resolution then fails per-event without latching the row (the resolver deliberately declines to infer a revocation from a missing secret), so the workspace keeps advertising itself as active, and webhook signature verification — which lets Secrets Manager errors bubble so a transient failure can't silently downgrade to the stack-wide secret — makes the receiver return 500 and Linear retry the delivery. Revoking first shuts the workspace off deterministically at the registry, and the secret delete is then pure cleanup.
 
 ```bash
@@ -382,7 +440,7 @@ aws dynamodb update-item \
 aws secretsmanager delete-secret --secret-id bgagent-linear-oauth-<slug> --force-delete-without-recovery
 ```
 
-The `--condition-expression` mirrors the handler's, so a second run against an already-revoked row fails with `ConditionalCheckFailedException` instead of silently re-revoking. `remove-workspace` behaves the same way: because it only matches `status='active'` rows, **re-running it on an already-removed workspace returns 404**, not a second success. That 404 does not distinguish "revoked" from "never existed".
+The `--condition-expression` makes a second run against an already-revoked row fail with `ConditionalCheckFailedException` instead of silently re-revoking. `remove-workspace` behaves the same way for a workspace it has removed: it leaves out rows revoked with `admin_removed`, so **re-running it on an already-removed workspace returns 404**, not a second success. That 404 does not distinguish "removed" from "never existed". A workspace that the platform itself marked `revoked` because its Linear grant died (`revoked_reason` `refresh_token_rejected` or `vault_consent_required`) is not removed yet: marking it deleted nothing, so whatever secret it has is still in Secrets Manager, and `remove-workspace` removes it like an active one. A row revoked by hand without a `revoked_reason` is accepted too; if its secret is already gone the command reports `absent`.
 
 Vault-managed workspaces need one more step after these two — see [the credential-provider section](#vault-managed-workspaces-the-credential-provider-outlives-the-stack).
 

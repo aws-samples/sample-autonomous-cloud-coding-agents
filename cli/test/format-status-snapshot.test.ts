@@ -32,7 +32,9 @@ function buildTask(overrides: Partial<TaskDetail> = {}): TaskDetail {
     status: 'RUNNING',
     repo: 'org/repo',
     issue_number: null,
+    issue_title: null,
     resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
+    resolved_assets: null,
     pr_number: null,
     task_description: 'fix bug',
     branch_name: 'bgagent/abc123/fix',
@@ -50,9 +52,12 @@ function buildTask(overrides: Partial<TaskDetail> = {}): TaskDetail {
     // Heartbeat line, and "the agent has not beaten yet" is the honest default for
     // a freshly-built fixture.
     agent_heartbeat_at: null,
+    compute_type: null,
     duration_s: null,
     cost_usd: null,
     build_passed: null,
+    lint_passed: null,
+    otel_trace_id: null,
     max_turns: 12,
     max_budget_usd: 2.0,
     turns_attempted: null,
@@ -141,7 +146,7 @@ describe('formatStatusSnapshot', () => {
         '  Repo:          org/repo',
         '  Channel:       api',
         '  Description:   fix bug',
-        '  Turn:          7 / ~12',
+        '  Turn:          7 / 12',
         '  Last milestone: nudge_acknowledged (42s ago)',
         '  Current:       Bash tool call',
         '  Cost:          $0.18 / budget $2.00',
@@ -176,7 +181,8 @@ describe('formatStatusSnapshot', () => {
       completed_at: '2026-04-29T15:29:50Z',
       duration_s: 164, // 2m 44s — authoritative SDK value
       cost_usd: 0.44,
-      turns_attempted: 11,
+      turns_attempted: 14, // the Claude Code CLI's own count: above the limit of 12
+      turns_completed: 11,
     });
 
     const rendered = formatStatusSnapshot(task, [], NOW);
@@ -185,8 +191,62 @@ describe('formatStatusSnapshot', () => {
     expect(rendered).toContain('Current:       task completed');
     // With no live cost event, falls back to task.cost_usd.
     expect(rendered).toContain('Cost:          $0.44 / budget $2.00');
-    // With no live turn event, falls back to task.turns_attempted.
-    expect(rendered).toContain('Turn:          11 / ~12');
+    // The count shown against the limit is turns_completed, never turns_attempted (#919).
+    expect(rendered).toContain('Turn:          11 / 12');
+  });
+
+  test('finished task shows turns_completed whatever the event window holds', () => {
+    // The 20 newest events of a finished task may or may not hold an ``agent_turn``,
+    // and older agents numbered these events per message, not per answer.
+    const task = buildTask({
+      status: 'COMPLETED',
+      completed_at: '2026-04-29T15:29:50Z',
+      turns_attempted: 14,
+      turns_completed: 11,
+    });
+
+    const rendered = formatStatusSnapshot(task, [mkEvent({ metadata: { turn: 23 } })], NOW);
+
+    expect(rendered).toContain('Turn:          11 / 12');
+  });
+
+  test('task stopped at the turn limit shows the limit, not the attempt that was aborted', () => {
+    // Such a task is FAILED, and its record holds the limit as turns_completed
+    // and the limit plus one as turns_attempted.
+    const task = buildTask({
+      status: 'FAILED',
+      completed_at: '2026-04-29T15:29:50Z',
+      turns_attempted: 13,
+      turns_completed: 12,
+    });
+
+    const rendered = formatStatusSnapshot(task, [mkEvent({ metadata: { turn: 23 } })], NOW);
+
+    expect(rendered).toContain('Turn:          12 / 12');
+  });
+
+  test('finished task without a count on its record falls back to the live turn', () => {
+    // A cancelled task: the agent writes no terminal record, so no count.
+    const task = buildTask({ status: 'CANCELLED', completed_at: '2026-04-29T15:29:50Z' });
+
+    const rendered = formatStatusSnapshot(task, [mkEvent({ metadata: { turn: 5 } })], NOW);
+
+    expect(rendered).toContain('Turn:          5 / 12');
+  });
+
+  test('finished task with a count of 0 on its record falls back to the live turn', () => {
+    // What the record holds when the agent step failed after the session had
+    // made its turns: 0 stands for "no count", not for a task without a turn.
+    const task = buildTask({
+      status: 'FAILED',
+      completed_at: '2026-04-29T15:29:50Z',
+      turns_attempted: 0,
+      turns_completed: 0,
+    });
+
+    const rendered = formatStatusSnapshot(task, [mkEvent({ metadata: { turn: 5 } })], NOW);
+
+    expect(rendered).toContain('Turn:          5 / 12');
   });
 
   test('events without a milestone show the placeholder', () => {
@@ -311,6 +371,11 @@ describe('formatStatusSnapshot', () => {
       expect(formatStatusSnapshot(buildTask(), [], NOW)).not.toContain('Heartbeat:');
     });
 
+    test('is omitted on ecs, where the agent beats once, at its start, and the age only grows', () => {
+      const task = buildTask({ compute_type: 'ecs', agent_heartbeat_at: '2026-04-29T15:29:36Z' }); // 44s before NOW
+      expect(formatStatusSnapshot(task, [], NOW)).not.toContain('Heartbeat:');
+    });
+
     test('degrades to a placeholder on an unparseable timestamp', () => {
       const task = buildTask({ agent_heartbeat_at: 'garbage' });
       expect(formatStatusSnapshot(task, [], NOW)).toContain('  Heartbeat:     — ago');
@@ -339,7 +404,7 @@ describe('formatStatusSnapshot', () => {
     // not the stale DB row.
     const task = buildTask({
       cost_usd: 0.10,
-      turns_attempted: 3, // stale — the live turn event below is more recent
+      turns_completed: 3, // on the record, but the task is running: the live turn event below wins
     });
     const events: TaskEvent[] = [
       mkEvent({
@@ -357,7 +422,7 @@ describe('formatStatusSnapshot', () => {
     ];
     const rendered = formatStatusSnapshot(task, events, NOW);
     expect(rendered).toContain('Cost:          $0.25 / budget $2.00');
-    expect(rendered).toContain('Turn:          7 / ~12');
+    expect(rendered).toContain('Turn:          7 / 12');
   });
 
   test('renders Trace S3 line when trace_s3_uri is non-null', () => {
@@ -678,7 +743,7 @@ describe('formatStatusSnapshot', () => {
   test('still shows the Blocker line on a FAILED task (#251 review — guard is COMPLETED-only)', () => {
     // The suppression is narrow: on a failure state the blocker is the
     // actionable cause and must stay visible. Guards against a mistaken
-    // broadening to isTerminalStatus().
+    // broadening to every terminal status.
     const task = buildTask({ status: 'FAILED' });
     const events: TaskEvent[] = [
       mkEvent({

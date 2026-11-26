@@ -354,6 +354,12 @@ describe('jira-webhook handler', () => {
     expect(result.statusCode).toBe(400);
   });
 
+  test('400s on a body of null, which parses but is not an envelope', async () => {
+    const result = await handler(makeEvent('null', 'sha256=00'));
+    expect(result.statusCode).toBe(400);
+    expect(lambdaSend).not.toHaveBeenCalled();
+  });
+
   test('accepts bare hex signature (no sha256= prefix) for back-compat / non-standard callers', async () => {
     // A few Atlassian deployments and proxies strip the algorithm prefix.
     // verifyJiraSignature intentionally accepts both shapes; this test

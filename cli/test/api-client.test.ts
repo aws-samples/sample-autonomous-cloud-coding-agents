@@ -19,6 +19,7 @@
 
 import { ApiClient } from '../src/api-client';
 import { getAuthToken } from '../src/auth';
+import { setVerbose } from '../src/debug';
 import { ApiError } from '../src/errors';
 
 // Mock auth
@@ -32,6 +33,7 @@ const mockGetAuthToken = getAuthToken as jest.Mock;
 jest.mock('../src/config', () => ({
   loadConfig: jest.fn().mockReturnValue({
     api_url: 'https://api.example.com',
+    registry_api_url: 'https://registry.example.com',
     region: 'us-east-1',
     user_pool_id: 'pool-id',
     client_id: 'client-id',
@@ -97,6 +99,20 @@ describe('ApiClient', () => {
         expect.anything(),
       );
     });
+
+    test('sends the repo filter and the page token of a further page', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: [], pagination: { next_token: null, has_more: false } }),
+      });
+
+      await client.listTasks({ repo: 'owner/repo', nextToken: 'tok-1' });
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://api.example.com/tasks?repo=owner%2Frepo&next_token=tok-1',
+        expect.anything(),
+      );
+    });
   });
 
   describe('getPersonalBudget', () => {
@@ -123,6 +139,35 @@ describe('ApiClient', () => {
         expect.objectContaining({ method: 'GET' }),
       );
       expect(mockGetAuthToken).toHaveBeenCalled();
+    });
+  });
+
+  describe('getScoreboard', () => {
+    const scoreboard = { range: '7d', truncated: false, previous: null, open_over_7d: null };
+
+    beforeEach(() => {
+      mockFetch.mockResolvedValue({ ok: true, json: async () => ({ data: scoreboard }) });
+    });
+
+    test('asks the tasks endpoint for the scoreboard view of a range and a repository', async () => {
+      await expect(client.getScoreboard({ range: '7d', repo: 'acme/shop' })).resolves.toEqual(scoreboard);
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://api.example.com/tasks?view=scoreboard&range=7d&repo=acme%2Fshop',
+        expect.objectContaining({ method: 'GET' }),
+      );
+    });
+
+    test('names no repository when none is given', async () => {
+      await client.getScoreboard({ range: '30d' });
+
+      expect(mockFetch).toHaveBeenCalledWith('https://api.example.com/tasks?view=scoreboard&range=30d', expect.anything());
+    });
+
+    test('sends an empty repository as it is, for the API to refuse', async () => {
+      // `--repo "$REPO"` with the variable unset: left out, the answer would count every repository.
+      await client.getScoreboard({ range: '7d', repo: '' });
+
+      expect(mockFetch).toHaveBeenCalledWith('https://api.example.com/tasks?view=scoreboard&range=7d&repo=', expect.anything());
     });
   });
 
@@ -224,6 +269,23 @@ describe('ApiClient', () => {
       await client.linearRemoveWorkspace('a b');
       expect(mockFetch.mock.calls[0][0]).toContain('/linear/workspaces/a%20b');
     });
+  });
+
+  describe('linearLink / jiraLink', () => {
+    test.each(['linearLink', 'jiraLink'] as const)(
+      '%s sends dry_run for the preview only, not for the confirming call',
+      async (method) => {
+        mockFetch.mockResolvedValue({ ok: true, json: async () => ({ data: {} }) });
+
+        await client[method]('link-abc', { dryRun: true });
+        await client[method]('link-abc');
+
+        // The handler stores the identity mapping and consumes the code unless
+        // the body says `dry_run: true` (the wire name, not the option's).
+        expect(JSON.parse(mockFetch.mock.calls[0][1].body)).toEqual({ code: 'link-abc', dry_run: true });
+        expect(JSON.parse(mockFetch.mock.calls[1][1].body)).toEqual({ code: 'link-abc' });
+      },
+    );
   });
 
   describe('getTaskEvents', () => {
@@ -383,6 +445,10 @@ describe('ApiClient', () => {
       const url3 = mockFetch.mock.calls[2][0] as string;
       expect(url3).toContain('next_token=tok-2');
       expect(url3).not.toContain('after=');
+      // Every request asks for the largest page the server returns.
+      for (const [url] of mockFetch.mock.calls) {
+        expect(url).toContain('limit=100');
+      }
     });
 
     test('returns empty array when server reports no events after cursor', async () => {
@@ -429,7 +495,7 @@ describe('ApiClient', () => {
 
       const controller = new AbortController();
       await client.getTaskEvents('abc', { signal: controller.signal });
-      await client.catchUpEvents('abc', '01ARZ3NDEKTSV4RRFFQ69G5FAV', 100, { signal: controller.signal });
+      await client.catchUpEvents('abc', '01ARZ3NDEKTSV4RRFFQ69G5FAV', { signal: controller.signal });
 
       // Every fetch the client issued must carry the same signal.
       const calls = mockFetch.mock.calls;
@@ -452,13 +518,9 @@ describe('ApiClient', () => {
         json: async () => { throw new SyntaxError('Unexpected token <'); },
       });
 
-      try {
-        await client.getTask('abc');
-        fail('expected an error');
-      } catch (err) {
-        expect(err).toBeInstanceOf(ApiError);
-        expect((err as ApiError).statusCode).toBe(403);
-      }
+      const err: unknown = await client.getTask('abc').catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ApiError);
+      expect((err as ApiError).statusCode).toBe(403);
     });
   });
 
@@ -503,20 +565,6 @@ describe('ApiClient', () => {
         });
 
       await expect(client.getStatusSnapshot('abc')).rejects.toThrow('network down');
-    });
-
-    test('honors a custom recentEventLimit', async () => {
-      mockFetch
-        .mockResolvedValueOnce({ ok: true, json: async () => ({ data: { task_id: 'abc' } }) })
-        .mockResolvedValueOnce({
-          ok: true,
-          json: async () => ({ data: [], pagination: { next_token: null, has_more: false } }),
-        });
-
-      await client.getStatusSnapshot('abc', 5);
-
-      const eventsUrl = mockFetch.mock.calls.map(c => c[0] as string).find(u => u.includes('/events'));
-      expect(eventsUrl).toContain('limit=5');
     });
   });
 
@@ -636,13 +684,73 @@ describe('ApiClient', () => {
 
       await expect(client.getTask('abc')).rejects.toThrow('non-JSON response');
       // ApiError (not CliError) so isTransientError can see the 502.
-      try {
-        await client.getTask('abc');
-        fail('expected throw');
-      } catch (err) {
-        expect(err).toBeInstanceOf(ApiError);
-        expect((err as ApiError).statusCode).toBe(502);
-      }
+      const err: unknown = await client.getTask('abc').catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ApiError);
+      expect((err as ApiError).statusCode).toBe(502);
+    });
+  });
+
+  describe('--verbose output', () => {
+    let errorSpy: jest.SpiedFunction<typeof console.error>;
+
+    beforeEach(() => {
+      setVerbose(true);
+      errorSpy = jest.spyOn(console, 'error').mockImplementation();
+    });
+
+    afterEach(() => {
+      setVerbose(false);
+      errorSpy.mockRestore();
+    });
+
+    test('logs a request with its query, and the status of the response', async () => {
+      mockFetch.mockResolvedValue({ ok: true, status: 200, statusText: 'OK', json: async () => ({ data: {} }) });
+
+      await client.getScoreboard({ range: '7d', repo: 'acme/shop' });
+
+      const logged = errorSpy.mock.calls.map(args => args.join(' '));
+      expect(logged.slice(0, 2)).toEqual([
+        '[DEBUG] GET https://api.example.com/tasks?view=scoreboard&range=7d&repo=acme%2Fshop',
+        '[DEBUG] Response: 200 OK',
+      ]);
+    });
+
+    test('masks the one-time API key in the logged response body', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        status: 201,
+        statusText: 'Created',
+        json: async () => ({ data: { key_id: 'k-1', name: 'ci', key: 'bgak_live_secret' } }),
+      });
+
+      const created = await client.createApiKey({ name: 'ci' });
+
+      // The caller still gets the key; only what --verbose prints is masked.
+      expect(created.key).toBe('bgak_live_secret');
+      const logged = errorSpy.mock.calls.map(args => args.join(' ')).join('\n');
+      expect(logged).toContain('Response body');
+      expect(logged).not.toContain('bgak_live_secret');
+      expect(logged).toContain('[REDACTED]');
+    });
+
+    test('masks a secret field in the logged request body', async () => {
+      mockFetch.mockResolvedValue({ ok: true, status: 201, statusText: 'Created', json: async () => ({ data: {} }) });
+
+      await client.registryPublish({
+        kind: 'mcp_server',
+        namespace: 'ns',
+        name: 'srv',
+        asset_version: '1.0.0',
+        discovery: {},
+        runtime: { headers: { Authorization: 'Bearer not-a-real-token' } },
+      });
+
+      // The server still gets the header; only what --verbose prints is masked.
+      expect(JSON.parse(mockFetch.mock.calls[0][1].body).runtime.headers.Authorization).toBe('Bearer not-a-real-token');
+      const logged = errorSpy.mock.calls.map(args => args.join(' ')).join('\n');
+      expect(logged).toContain('Request body');
+      expect(logged).toContain('"runtime":{"headers":{"Authorization":"[REDACTED]"}}');
+      expect(logged).not.toContain('not-a-real-token');
     });
   });
 

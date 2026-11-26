@@ -97,8 +97,9 @@ export function evaluateBootstrap(outputs: readonly CfnOutput[] | null, expected
     return {
       status: 'FAIL',
       message: 'CDKToolkit is a default CDK bootstrap (no BootstrapPolicyVersion output), whose execution role has '
-        + 'AdministratorAccess. ABCA expects its least-privilege bootstrap. Run `mise //cdk:bootstrap`, or bypass '
-        + 'deliberately with ABCA_SKIP_BOOTSTRAP_PREFLIGHT=1.',
+        + 'AdministratorAccess. ABCA expects its least-privilege bootstrap. `mise //cdk:bootstrap` replaces this one, '
+        + 'for every CDK app that deploys in this account and Region; to keep it, bypass deliberately with '
+        + 'ABCA_SKIP_BOOTSTRAP_PREFLIGHT=1.',
     };
   }
   if (compareVersions(version, expected.version) < 0) {

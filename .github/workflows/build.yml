@@ -5,15 +5,7 @@ on:
   # report inside the merge queue. Without this trigger, marking `build` a required
   # check would deadlock the queue (the check never reports). See issue #327.
   merge_group: {}
-  workflow_dispatch:
-    inputs:
-      deploy:
-        description: "Deploy after build (- = no deploy)"
-        type: choice
-        default: "-"
-        options:
-          - "-"
-          - agentcore
+  workflow_dispatch: {}
 permissions:
   actions: none
   attestations: none
@@ -30,11 +22,21 @@ permissions:
   repository-projects: none
   security-events: none
   statuses: none
+# One build per pull request: a new push cancels the superseded run instead of
+# both holding a runner. Merge-queue and manual runs each get a group of their
+# own (the run id) and cancel-in-progress is false for them, so this block can
+# never cancel a queued merge group or make it wait behind another run.
+concurrency:
+  group: build-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   build:
     permissions:
-      actions: write # upload-artifact when self-mutation is detected
       contents: read
+    # A hung build must not hold a runner for the 360-minute default. The longest
+    # of 194 recorded jobs took 27 minutes (on one jest worker), and the merge
+    # queue gives up on an entry after 60.
+    timeout-minutes: 45
     # Runner priority: vars.DEFAULT_RUNNER_LABEL > PR label 'self-hosted' > PR label 'ubuntu-latest-4-cores' > 'ubuntu-latest'
     runs-on: >-
       ${{
@@ -47,14 +49,22 @@ jobs:
             && 'ubuntu-latest-4-cores')
         || 'ubuntu-latest'
       }}
+    # The one-value matrix names this job `build (agentcore)`, the check that the
+    # ruleset of `main` requires. Without it the check is `build`: the required
+    # one never reports and nothing merges.
     strategy:
       matrix:
         compute_type: [agentcore]
     outputs:
       self_mutation_happened: ${{ steps.self_mutation.outputs.self_mutation_happened }}
+    services:
+      dynamodb:
+        # Pin the multi-architecture image used for real transaction assertions.
+        image: amazon/dynamodb-local@sha256:ff89bd48ff32cd8d9be5fee8873b65b8854dc408f1afe881be6eb00247bc0dab
+        ports:
+          - 8000/tcp
     env:
       CI: "true"
-      MISE_EXPERIMENTAL: "1"
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       AQUA_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -63,6 +73,10 @@ jobs:
       # secret/dependency/workflow scanning runs as required PR checks in
       # security-pr.yml (issue #327); the full image/SAST suite runs in security.yml.
       MISE_DISABLE_TOOLS: "aqua:aquasecurity/trivy,grype,semgrep"
+      # cdk's test script defaults to `--maxWorkers=25%`, which is ONE worker on
+      # the 4-core runner: the whole jest suite ran serially. Three workers leave
+      # a core for the other build tasks (the ECS agent box runs four).
+      JEST_MAX_WORKERS: "3"
     steps:
       - name: Free Disk Space
         shell: bash
@@ -76,174 +90,13 @@ jobs:
         with:
           fetch-depth: 1  # shallow clone
           persist-credentials: false
-      - name: Resolve github:* tag values
-        id: tags
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          GH_SHA: ${{ github.sha }}
-          GH_REF_NAME: ${{ github.ref_name }}
-          GH_REF_TYPE: ${{ github.ref_type }}
-          GH_HEAD_REF: ${{ github.head_ref }}
-          GH_BASE_REF: ${{ github.base_ref }}
-          MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
-          MG_BASE_REF: ${{ github.event.merge_group.base_ref }}
-          MG_HEAD_REF: ${{ github.event.merge_group.head_ref }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          case "$EVENT_NAME" in
-            merge_group)
-              echo "sha=${MG_HEAD_SHA}" >> "$GITHUB_OUTPUT"
-              echo "ref=${MG_BASE_REF}" >> "$GITHUB_OUTPUT"
-              echo "ref-type=branch" >> "$GITHUB_OUTPUT"
-              echo "head-ref=${MG_HEAD_REF}" >> "$GITHUB_OUTPUT"
-              echo "base-ref=${MG_BASE_REF}" >> "$GITHUB_OUTPUT"
-              PR_NUM=$(echo "$MG_HEAD_REF" | grep -oP 'pr-\K[0-9]+' || echo "")
-              echo "pr-number=${PR_NUM}" >> "$GITHUB_OUTPUT"
-              ;;
-            pull_request|pull_request_target)
-              echo "sha=${PR_HEAD_SHA}" >> "$GITHUB_OUTPUT"
-              echo "ref=${GH_HEAD_REF}" >> "$GITHUB_OUTPUT"
-              echo "ref-type=branch" >> "$GITHUB_OUTPUT"
-              echo "head-ref=${GH_HEAD_REF}" >> "$GITHUB_OUTPUT"
-              echo "base-ref=${GH_BASE_REF}" >> "$GITHUB_OUTPUT"
-              echo "pr-number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
-              ;;
-            push)
-              echo "sha=${GH_SHA}" >> "$GITHUB_OUTPUT"
-              echo "ref=${GH_REF_NAME}" >> "$GITHUB_OUTPUT"
-              echo "ref-type=${GH_REF_TYPE}" >> "$GITHUB_OUTPUT"
-              echo "head-ref=" >> "$GITHUB_OUTPUT"
-              echo "base-ref=" >> "$GITHUB_OUTPUT"
-              echo "pr-number=" >> "$GITHUB_OUTPUT"
-              ;;
-            *)
-              echo "sha=${GH_SHA}" >> "$GITHUB_OUTPUT"
-              echo "ref=${GH_REF_NAME}" >> "$GITHUB_OUTPUT"
-              echo "ref-type=${GH_REF_TYPE}" >> "$GITHUB_OUTPUT"
-              echo "head-ref=" >> "$GITHUB_OUTPUT"
-              echo "base-ref=" >> "$GITHUB_OUTPUT"
-              echo "pr-number=" >> "$GITHUB_OUTPUT"
-              ;;
-          esac
-      - name: Resolve stack name
-        id: naming
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          COMPUTE_TYPE: ${{ matrix.compute_type }}
-          GH_SHA: ${{ github.sha }}
-          GH_REF_NAME: ${{ github.ref_name }}
-          PR_NUMBER: ${{ steps.tags.outputs.pr-number }}
-        run: |
-          sanitize() {
-            local result
-            result=$(echo "$1" | tr '[:upper:]' '[:lower:]' | tr '/_.' '-' | sed 's/[^a-z0-9-]//g; s/--*/-/g' | cut -c1-60 | sed 's/^-*//; s/-$//')
-            # CloudFormation requires stack names to start with a letter
-            if [[ -z "$result" || ! "$result" =~ ^[a-z] ]]; then
-              result="s-${result}"
-            fi
-            echo "$result"
-          }
-
-          case "$EVENT_NAME" in
-            push)
-              REF=$(sanitize "$GH_REF_NAME")
-              STACK_NAME="${REF}-${COMPUTE_TYPE}"
-              ;;
-            pull_request|pull_request_target)
-              if [[ ! "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
-                echo "::error::Invalid PR number: '$PR_NUMBER'"
-                exit 1
-              fi
-              STACK_NAME="pr${PR_NUMBER}-${COMPUTE_TYPE}"
-              ;;
-            merge_group)
-              if [[ -n "$PR_NUMBER" && "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
-                STACK_NAME="mg${PR_NUMBER}-${COMPUTE_TYPE}"
-              else
-                STACK_NAME="${COMPUTE_TYPE}-${GH_SHA:0:7}"
-              fi
-              ;;
-            workflow_dispatch)
-              REF=$(sanitize "$GH_REF_NAME")
-              STACK_NAME="${REF}-${COMPUTE_TYPE}"
-              ;;
-            *)
-              STACK_NAME="${COMPUTE_TYPE}-${GH_SHA:0:7}"
-              ;;
-          esac
-
-          echo "stack_name=$STACK_NAME" >> "$GITHUB_OUTPUT"
-          echo "Stack name: $STACK_NAME"
-      - name: Generate CDK context
-        env:
-          COMPUTE_TYPE: ${{ matrix.compute_type }}
-          STACK_NAME: ${{ steps.naming.outputs.stack_name }}
-          TAG_SHA: ${{ steps.tags.outputs.sha }}
-          TAG_REF: ${{ steps.tags.outputs.ref }}
-          TAG_REF_TYPE: ${{ steps.tags.outputs.ref-type }}
-          TAG_ACTOR: ${{ github.actor }}
-          TAG_HEAD_REF: ${{ steps.tags.outputs.head-ref }}
-          TAG_BASE_REF: ${{ steps.tags.outputs.base-ref }}
-          TAG_PR_NUMBER: ${{ steps.tags.outputs.pr-number }}
-          TAG_RUN_ID: ${{ github.run_id }}
-          TAG_RUN_ATTEMPT: ${{ github.run_attempt }}
-          TAG_EVENT: ${{ github.event_name }}
-          TAG_WORKFLOW: ${{ github.workflow }}
-          TAG_REPOSITORY: ${{ github.repository }}
-          # AgentCore-supported AZ pin for the deployed stack. The assembly this
-          # step feeds is synthesized WITHOUT credentials (env-agnostic), so
-          # auto-pin cannot run and this override is the only way the pipeline
-          # can keep the Runtime ENIs out of unsupported zones. Set the repo/env
-          # variable AGENTCORE_AVAILABILITY_ZONES to a JSON array of zone NAMES
-          # whose zone IDs are AgentCore-supported in the deploy account, e.g.
-          # ["us-east-1b","us-east-1c"]. Unset => not pinned (synth warns).
-          # See docs/guides/DEPLOYMENT_GUIDE.md "AgentCore unsupported Availability Zones".
-          AGENTCORE_AZS: ${{ vars.AGENTCORE_AVAILABILITY_ZONES }}
-        run: |
-          jq -n \
-            --arg compute_type "$COMPUTE_TYPE" \
-            --arg stackName "$STACK_NAME" \
-            --arg agentcore_azs "$AGENTCORE_AZS" \
-            --arg sha "$TAG_SHA" \
-            --arg ref "$TAG_REF" \
-            --arg ref_type "$TAG_REF_TYPE" \
-            --arg actor "$TAG_ACTOR" \
-            --arg head_ref "$TAG_HEAD_REF" \
-            --arg base_ref "$TAG_BASE_REF" \
-            --arg pr_number "$TAG_PR_NUMBER" \
-            --arg run_id "$TAG_RUN_ID" \
-            --arg run_attempt "$TAG_RUN_ATTEMPT" \
-            --arg event "$TAG_EVENT" \
-            --arg workflow "$TAG_WORKFLOW" \
-            --arg repository "$TAG_REPOSITORY" \
-            '{
-              "compute_type": $compute_type,
-              "stackName": $stackName,
-              "github:sha": $sha,
-              "github:ref": $ref,
-              "github:ref-type": $ref_type,
-              "github:actor": $actor,
-              "github:head-ref": $head_ref,
-              "github:base-ref": $base_ref,
-              "github:pr-number": $pr_number,
-              "github:run-id": $run_id,
-              "github:run-attempt": $run_attempt,
-              "github:event": $event,
-              "github:workflow": $workflow,
-              "github:repository": $repository,
-              "github:clean": "true"
-            }
-            + (if $agentcore_azs == "" then {}
-               else {"agentcore:availabilityZones": ($agentcore_azs | fromjson)} end)' \
-            > cdk/cdk.context.json
-          cat cdk/cdk.context.json
       - name: Install mise
-        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
         with:
+          version: 2026.10.25 # exact mise release for every workflow (#890); bump by PR
           cache: true
       - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22.x
       - name: Cache node_modules
@@ -290,76 +143,98 @@ jobs:
           SECONDS=0
           mise run install
           echo "::notice::Install completed in ${SECONDS}s (node_modules=${CACHE_NODE:-miss}, venv=${CACHE_VENV:-miss}, jest=${CACHE_JEST:-miss})"
+      # The yarn install is not frozen: a package.json that disagrees with
+      # yarn.lock makes it rewrite the lockfile. Fail here and name the file,
+      # instead of at the end of the build as an anonymous "files were changed".
+      # The agent install (`uv sync --locked`) fails by itself on such a mismatch
+      # and never rewrites agent/uv.lock; the step still requires that file to be
+      # tracked (git ls-files --error-unmatch, as for yarn.lock) and unchanged.
+      - name: Fail on lockfile drift
+        shell: bash
+        run: |
+          drift=0
+          for lock in yarn.lock agent/uv.lock; do
+            git ls-files --error-unmatch "$lock" > /dev/null
+            changed="$(git status --porcelain -- "$lock")"
+            if [ -n "$changed" ]; then
+              echo "::error file=${lock},title=Lockfile drift::${lock} is not as committed after installing dependencies. Regenerate it locally and commit it: 'mise run install' for yarn.lock (a package.json no longer matches it), 'cd agent && uv lock' for agent/uv.lock."
+              git --no-pager diff --stat -- "$lock"
+              drift=1
+            fi
+          done
+          exit "$drift"
       - name: build
+        id: build
+        shell: bash
         env:
           TMPDIR: ${{ runner.temp }}
+          ABCA_DDB_LOCAL_ENDPOINT: http://127.0.0.1:${{ job.services.dynamodb.ports[8000] }}
         run: |
+          # The output is copied for "Summarize build failure". pipefail is what
+          # keeps the pipe to tee from turning a failed build green: do not drop it.
+          set -o pipefail
           echo "::notice::Runner: $(nproc) cores, $(free -h | awk '/Mem:/{print $2}') RAM"
           SECONDS=0
-          mise run build
+          mise run build 2>&1 | tee "$RUNNER_TEMP/build.log"
           echo "::notice::Build completed in ${SECONDS}s ($(nproc) cores, mise parallel DAG)"
+      # A failed build must say which mise task failed and why, without anyone
+      # reading a thousand interleaved log lines (#256, CA-06): the task name and
+      # the last lines of its own output go to the job summary and an annotation.
+      - name: Summarize build failure
+        if: failure() && steps.build.outcome == 'failure'
+        shell: bash
+        run: |
+          log="$RUNNER_TEMP/build.log"
+          esc="$(printf '\033')"
+          sed -E "s/${esc}\[[0-9;]*m//g" "$log" > "$log.clean"
+          # mise prints "[//pkg:task] ERROR task failed" for every task that failed.
+          failed="$(sed -n -E 's/^\[([^]]+)\] ERROR task failed$/\1/p' "$log.clean" | sort -u)"
+          {
+            echo "## Build failed"
+            if [ -z "$failed" ]; then
+              echo "mise named no failed task. Last 60 lines of the build output:"
+              echo '```text'
+              tail -n 60 "$log.clean"
+              echo '```'
+            fi
+            printf '%s\n' "$failed" | while IFS= read -r task; do
+              [ -n "$task" ] || continue
+              echo "\`mise run ${task}\` failed. Last 60 lines of its output (coverage table rows left out):"
+              echo '```text'
+              # Only rows of the coverage table that jest prints are left out: six
+              # cells, with nothing but numbers, line ranges and dashes after the
+              # first, or the "% Stmts" heading. Every other line is kept however
+              # many "|" it has: compiler and type-checker errors spell union types
+              # with them, and those lines are the reason the task failed.
+              awk -v p="[${task}] " '
+                index($0, p) != 1 { next }
+                { line = substr($0, length(p) + 1); n = split(line, cell, "[|]") }
+                n == 6 && (cell[2] cell[3] cell[4] cell[5] cell[6]) ~ /^[-0-9., ]+$/ { next }
+                n == 6 && cell[2] ~ /^ *% Stmts *$/ { next }
+                { print line }
+              ' "$log.clean" | tail -n 60
+              echo '```'
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error title=Build failed::Failed mise task(s): $(printf '%s' "${failed:-none named by mise}" | tr '\n' ' '). The job summary shows the last lines of their output."
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-reports-${{ matrix.compute_type }}
+          path: "*/test-reports"
+          if-no-files-found: ignore
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         continue-on-error: true
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: cdk/coverage/lcov.info,cli/coverage/lcov.info,agent/coverage/lcov.info
+          # Information only, never a gate: the coverage floors are enforced by the
+          # test tasks themselves. Without disable_search the uploader also sends
+          # every file that looks like coverage, e.g. contracts/coverage-thresholds.json.
+          disable_search: true
           fail_ci_if_error: false
-      - name: Upload CDK artifact (${{ matrix.compute_type }})
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: cdk-${{ matrix.compute_type }}-out
-          path: |
-            cdk/cdk.out/
-            cdk/cdk.context.json
-      - name: Write deploy intent
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          GH_REF_NAME: ${{ github.ref_name }}
-          DISPATCH_DEPLOY: ${{ inputs.deploy }}
-          COMPUTE_TYPE: ${{ matrix.compute_type }}
-          # Keep in sync with matrix.compute_type above, inputs.deploy.options,
-          # and deploy.yml ALLOWED_COMPUTE_TYPES
-          ALLOWED_COMPUTE_TYPES: "agentcore"
-        run: |
-          # exit (not return) — no recovery path; invalid dispatch input must abort the step
-          validate_compute_type() {
-            local type="$1"
-            for allowed in $ALLOWED_COMPUTE_TYPES; do
-              [[ "$type" == "$allowed" ]] && return 0
-            done
-            echo "::error::Invalid compute_type: '$type'. Allowed: $ALLOWED_COMPUTE_TYPES"
-            exit 1
-          }
-
-          case "$EVENT_NAME" in
-            push)
-              if [[ "$GH_REF_NAME" == "main" ]]; then
-                INTENT="$COMPUTE_TYPE"
-              else
-                INTENT="-"
-              fi
-              ;;
-            workflow_dispatch)
-              if [[ "$DISPATCH_DEPLOY" != "-" ]]; then
-                validate_compute_type "$DISPATCH_DEPLOY"
-              fi
-              INTENT="$DISPATCH_DEPLOY"
-              ;;
-            pull_request|pull_request_target)
-              INTENT="labels"
-              ;;
-            *)
-              INTENT="-"
-              ;;
-          esac
-          jq -n --arg deploy "$INTENT" '{"deploy":$deploy}' > deploy-intent.json
-          echo "Deploy intent: $INTENT"
-      - name: Upload deploy intent
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: deploy-intent
-          path: deploy-intent.json
       - name: Find mutations
         id: self_mutation
         run: |-
@@ -370,7 +245,7 @@ jobs:
 
       - name: Upload patch
         if: steps.self_mutation.outputs.self_mutation_happened
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: repo.patch
           path: repo.patch

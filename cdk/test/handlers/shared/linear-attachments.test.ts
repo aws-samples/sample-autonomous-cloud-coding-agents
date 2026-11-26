@@ -497,6 +497,41 @@ describe('downloadScreenAndStoreLinearAttachments', () => {
     ).rejects.toBeInstanceOf(LinearAttachmentError);
   });
 
+  describe('the error text is posted on the Linear issue, so it carries no internal error message', () => {
+    test('a failed screening call: the SDK error stays in the log', async () => {
+      // ApplyGuardrail denied. The SDK's text names the role and the account.
+      const sdkText = 'User: arn:aws:sts::123456789012:assumed-role/Stack-WebhookProcessorRole/fn is not authorized to perform: bedrock:ApplyGuardrail';
+      (global.fetch as jest.Mock).mockResolvedValueOnce(bytesResponse(PNG_BYTES));
+      screenImageMock.mockRejectedValueOnce(Object.assign(new Error(sdkText), { name: 'AccessDeniedException' }));
+      const logged = jest.spyOn(logger, 'error').mockImplementation(() => undefined);
+
+      const err = await downloadScreenAndStoreLinearAttachments(desc(UPLOAD_URL), 10, storageCtx()).catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(LinearAttachmentError);
+      expect((err as Error).message).toContain('could not be screened');
+      expect((err as Error).message).not.toContain('arn:aws');
+      expect((err as Error).message).not.toContain('not authorized');
+      expect(JSON.stringify(logged.mock.calls)).toContain(sdkText);
+      expect(putSendMock).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['the DNS lookup', 'getaddrinfo ENOTFOUND uploads.linear.app'],
+      ['the request', 'connect ECONNREFUSED 10.1.2.3:443'],
+    ])('a failed download, %s: the network error stays in the log', async (step, networkText) => {
+      if (step === 'the DNS lookup') dnsLookupMock.mockRejectedValueOnce(new Error(networkText));
+      else (global.fetch as jest.Mock).mockRejectedValueOnce(new Error(networkText));
+      const logged = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
+
+      const err = await downloadScreenAndStoreLinearAttachments(desc(UPLOAD_URL), 10, storageCtx()).catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(LinearAttachmentError);
+      expect((err as Error).message).toContain('could not be downloaded');
+      expect((err as Error).message).not.toContain(networkText);
+      expect(JSON.stringify(logged.mock.calls)).toContain(networkText);
+    });
+  });
+
   test('SSRF: host resolving to a private IP → LinearAttachmentError, no fetch', async () => {
     dnsLookupMock.mockResolvedValueOnce([{ address: '10.0.0.5', family: 4 }]);
     await expect(

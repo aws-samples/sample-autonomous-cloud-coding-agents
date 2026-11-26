@@ -19,15 +19,24 @@
 
 // Mock the durable execution SDK before importing orchestrate-task — its
 // `withDurableExecution` wraps the handler at module import time. We only
-// care about `notifyLinearOnConcurrencyCap` here, which is a plain async
-// function exported alongside the durable handler.
+// care about `notifyLinearOnConcurrencyCap` and `notifyJiraOnConcurrencyCap`
+// here, which are plain async functions exported alongside the durable handler.
 jest.mock('@aws/durable-execution-sdk-js', () => ({
   withDurableExecution: (fn: unknown) => fn,
 }));
 
+const postIssueCommentMock = jest.fn();
 const reportIssueFailureMock = jest.fn();
+const resolveTokenMock = jest.fn();
 jest.mock('../../src/handlers/shared/linear-feedback', () => ({
+  postIssueComment: (...args: unknown[]) => postIssueCommentMock(...args),
   reportIssueFailure: (...args: unknown[]) => reportIssueFailureMock(...args),
+  resolveToken: (...args: unknown[]) => resolveTokenMock(...args),
+}));
+
+const emitAgentActivityMock = jest.fn();
+jest.mock('../../src/handlers/shared/linear-agent-session', () => ({
+  emitAgentActivity: (...args: unknown[]) => emitAgentActivityMock(...args),
 }));
 
 const reportJiraIssueFailureMock = jest.fn();
@@ -80,13 +89,44 @@ function task(overrides: Partial<TaskRecord> = {}): TaskRecord {
   } as TaskRecord;
 }
 
-describe('notifyLinearOnConcurrencyCap', () => {
-  beforeEach(() => {
-    reportIssueFailureMock.mockReset();
-    reportIssueFailureMock.mockResolvedValue(undefined);
+describe('notifyLinearOnConcurrencyCap — agent-session tasks', () => {
+  const sessionTask = () => task({
+    channel_source: 'linear',
+    channel_metadata: { linear_issue_id: 'issue-1', linear_workspace_id: 'org-1', linear_agent_session_id: 'session-1' },
   });
 
-  test('posts Linear comment + ❌ when channel_source is linear and issue id + workspace are set', async () => {
+  beforeEach(() => {
+    postIssueCommentMock.mockReset();
+    resolveTokenMock.mockReset().mockResolvedValue('lin_tok');
+    emitAgentActivityMock.mockReset().mockResolvedValue({ ok: true });
+  });
+
+  test('says "queued" in the session, not in an issue comment', async () => {
+    await notifyLinearOnConcurrencyCap(sessionTask());
+    expect(postIssueCommentMock).not.toHaveBeenCalled();
+    expect(emitAgentActivityMock).toHaveBeenCalledWith('lin_tok', 'session-1', expect.objectContaining({ type: 'thought' }));
+    expect(emitAgentActivityMock.mock.calls[0][2].body).toMatch(/^Queued/);
+  });
+
+  test('never blocks admission: no token, a failed emit and a throw are all swallowed', async () => {
+    resolveTokenMock.mockResolvedValueOnce(null);
+    await expect(notifyLinearOnConcurrencyCap(sessionTask())).resolves.toBeUndefined();
+    emitAgentActivityMock.mockResolvedValueOnce({ ok: false, retryable: true });
+    await expect(notifyLinearOnConcurrencyCap(sessionTask())).resolves.toBeUndefined();
+    resolveTokenMock.mockRejectedValueOnce(new Error('ddb throttled'));
+    await expect(notifyLinearOnConcurrencyCap(sessionTask())).resolves.toBeUndefined();
+    expect(postIssueCommentMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('notifyLinearOnConcurrencyCap', () => {
+  beforeEach(() => {
+    postIssueCommentMock.mockReset();
+    postIssueCommentMock.mockResolvedValue({ ok: true });
+    reportIssueFailureMock.mockReset();
+  });
+
+  test('posts a plain Linear comment when channel_source is linear and issue id + workspace are set', async () => {
     await notifyLinearOnConcurrencyCap(task({
       channel_source: 'linear',
       channel_metadata: {
@@ -95,8 +135,11 @@ describe('notifyLinearOnConcurrencyCap', () => {
       },
     }));
 
-    expect(reportIssueFailureMock).toHaveBeenCalledTimes(1);
-    const [ctx, issueId, message] = reportIssueFailureMock.mock.calls[0];
+    // The task is queued, not failed: a comment without the ❌ reaction that
+    // `reportIssueFailure` adds to it.
+    expect(reportIssueFailureMock).not.toHaveBeenCalled();
+    expect(postIssueCommentMock).toHaveBeenCalledTimes(1);
+    const [ctx, issueId, message] = postIssueCommentMock.mock.calls[0];
     expect(ctx).toEqual({
       linearWorkspaceId: 'lin-org-1',
       registryTableName: process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME,
@@ -107,12 +150,12 @@ describe('notifyLinearOnConcurrencyCap', () => {
 
   test('no-ops on non-Linear channels (api / webhook / slack)', async () => {
     for (const source of ['api', 'webhook', 'slack'] as const) {
-      reportIssueFailureMock.mockClear();
+      postIssueCommentMock.mockClear();
       await notifyLinearOnConcurrencyCap(task({
         channel_source: source,
         channel_metadata: { linear_issue_id: 'lin-issue-1' }, // even if metadata is set
       }));
-      expect(reportIssueFailureMock).not.toHaveBeenCalled();
+      expect(postIssueCommentMock).not.toHaveBeenCalled();
     }
   });
 
@@ -122,12 +165,12 @@ describe('notifyLinearOnConcurrencyCap', () => {
       channel_metadata: {}, // no linear_issue_id
     }));
 
-    expect(reportIssueFailureMock).not.toHaveBeenCalled();
+    expect(postIssueCommentMock).not.toHaveBeenCalled();
   });
 
   test('no-ops when channel_metadata is undefined', async () => {
     await notifyLinearOnConcurrencyCap(task({ channel_source: 'linear' }));
-    expect(reportIssueFailureMock).not.toHaveBeenCalled();
+    expect(postIssueCommentMock).not.toHaveBeenCalled();
   });
 
   test('no-ops when LINEAR_WORKSPACE_REGISTRY_TABLE_NAME env is not set (logs warn)', async () => {
@@ -141,19 +184,19 @@ describe('notifyLinearOnConcurrencyCap', () => {
           linear_workspace_id: 'lin-org-1',
         },
       }));
-      expect(reportIssueFailureMock).not.toHaveBeenCalled();
+      expect(postIssueCommentMock).not.toHaveBeenCalled();
     } finally {
       process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME = saved;
     }
   });
 
-  test('reportIssueFailure rejection is swallowed (best-effort, never blocks rejection path)', async () => {
+  test('postIssueComment rejection is swallowed (best-effort, never blocks the admission step)', async () => {
     // Round-3 review B2 moved the try/catch inside this function so a
-    // synchronous throw from `reportIssueFailure` (e.g., transient DDB
+    // synchronous throw from the Linear helper (e.g., transient DDB
     // throttle on the registry lookup) cannot crash the durable-execution
-    // step and trigger a retry that double-emits failTask events. Contract
+    // step and trigger a retry that re-runs queueTask. Contract
     // is now: this helper never rejects.
-    reportIssueFailureMock.mockRejectedValue(new Error('boom'));
+    postIssueCommentMock.mockRejectedValue(new Error('boom'));
     await expect(
       notifyLinearOnConcurrencyCap(task({
         channel_source: 'linear',
@@ -163,7 +206,7 @@ describe('notifyLinearOnConcurrencyCap', () => {
         },
       })),
     ).resolves.toBeUndefined();
-    expect(reportIssueFailureMock).toHaveBeenCalledTimes(1);
+    expect(postIssueCommentMock).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -225,7 +268,7 @@ describe('notifyJiraOnConcurrencyCap', () => {
     }
   });
 
-  test('reportIssueFailure rejection is swallowed (never blocks the rejection path)', async () => {
+  test('reportIssueFailure rejection is swallowed (never blocks the admission step)', async () => {
     reportJiraIssueFailureMock.mockRejectedValue(new Error('boom'));
     await expect(
       notifyJiraOnConcurrencyCap(task({

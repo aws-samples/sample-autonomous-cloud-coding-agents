@@ -203,12 +203,11 @@ function resolveStackName(argv: readonly string[]): { stackName: string; source:
 
   // Persisted context — what `cdk deploy` would read when no flag is given.
   try {
-    // BOTH context files. `cdk.context.json` matters more than it looks: this repo's
-    // `cdk.json` carries no `context` block at all, so reading only that file made this
-    // branch dead code — while `.github/workflows/build.yml` writes `stackName` into
-    // `cdk.context.json` for every pipeline stack (`pr<N>-<compute>`). The CI path
-    // therefore resolved to the default and would have inspected, and deleted from, a
-    // different stack than the one being deployed.
+    // BOTH context files, because `cdk deploy` reads both. `cdk.context.json` matters
+    // more than it looks: this repo's `cdk.json` sets no `stackName`, so with that file
+    // alone this branch was dead code, and a deploy whose `stackName` is in
+    // `cdk.context.json` resolved to the default here. The preflight would have
+    // inspected, and deleted from, a different stack than the one being deployed.
     // Bare filenames, so the display name IS the path — no `file.replace('../', '')`,
     // which CodeQL flags as js/incomplete-sanitization (alert #43, HIGH) because a
     // single-occurrence replace on a path is the shape of broken traversal sanitization.
@@ -226,7 +225,7 @@ function resolveStackName(argv: readonly string[]): { stackName: string; source:
       try {
         cfg = JSON.parse(readFileSync(new URL(name, contextDir), 'utf8'));
       } catch {
-        // An absent context file is the normal case (cdk.context.json is generated, and cdk.json has no context block here), not a failure; the next source is tried and 'default' is the documented floor
+        // An absent context file is the normal case (cdk.context.json is generated, and cdk.json sets no stackName here), not a failure; the next source is tried and 'default' is the documented floor
         continue;
       }
       // `cdk.context.json` is a flat map; `cdk.json` nests under `context`.
@@ -258,8 +257,8 @@ function listStackResources(stackName: string): StackResource[] | null {
       .StackResourceSummaries;
   } catch (err) {
     const stderr = errText(err);
-    if (stderr.includes('does not exist')) return null; // nosemgrep: ts-silent-success-masking -- null is not an empty success: it is the documented fresh-install signal, and main() branches on it explicitly
-    throw new Error(`could not list resources of stack '${stackName}': ${stderr.trim()}`);
+    if (stderr.includes('does not exist')) return null; // null is not an empty success: it is the documented fresh-install signal, and main() branches on it explicitly
+    throw new Error(`could not list resources of stack '${stackName}': ${stderr.trim()}`, { cause: err });
   }
 }
 
@@ -283,9 +282,9 @@ function deleteResource(type: DeliveryType, physicalId: string): void {
     // failure. Anything else aborts the deploy; see main().
     if (stderr.includes('ResourceNotFoundException')) {
       console.log(`  already gone:   ${type} ${physicalId}`);
-      return; // nosemgrep: ts-silent-success-masking -- delete target already absent IS the goal state; treating it as success is what makes an interrupted migration safely re-runnable
+      return; // delete target already absent IS the goal state; treating it as success is what makes an interrupted migration safely re-runnable
     }
-    throw new Error(`failed to delete ${type} '${physicalId}': ${stderr.trim()}`);
+    throw new Error(`failed to delete ${type} '${physicalId}': ${stderr.trim()}`, { cause: err });
   }
   console.log(`  deleted:        ${type} ${physicalId}`);
 }

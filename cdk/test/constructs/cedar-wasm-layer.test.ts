@@ -41,9 +41,9 @@ describe('CedarWasmLayer', () => {
     template.resourceCountIs('AWS::Lambda::LayerVersion', 1);
   });
 
-  test('layer targets Node.js 20 and 22 compatible runtimes', () => {
+  test('layer targets Node.js 22 and 24, not the deprecated Node.js 20 (#889)', () => {
     template.hasResourceProperties('AWS::Lambda::LayerVersion', {
-      CompatibleRuntimes: ['nodejs20.x', 'nodejs22.x', 'nodejs24.x'],
+      CompatibleRuntimes: ['nodejs22.x', 'nodejs24.x'],
     });
   });
 
@@ -79,6 +79,20 @@ describe('CedarWasmLayer', () => {
       ),
     );
     expect(layerPkg.dependencies['@cedar-policy/cedar-wasm']).toBe(CEDAR_WASM_VERSION);
+  });
+
+  test('contracts/cedar-parity/engines/versions.json names this cedar-wasm and the one cedarpy the agent pins, exactly', () => {
+    // The pair the parity fixtures were verified against. To move to another Cedar release, bump both
+    // engines and that file in one change. With the two tests above, every manifest is held to it.
+    const repoRoot = path.join(__dirname, '..', '..', '..');
+    const exact = /^\d+\.\d+\.\d+$/;
+    const pair = JSON.parse(fs.readFileSync(path.join(repoRoot, 'contracts/cedar-parity/engines/versions.json'), 'utf-8'));
+    expect(CEDAR_WASM_VERSION).toMatch(exact);
+    expect(pair).toEqual({ '@cedar-policy/cedar-wasm': CEDAR_WASM_VERSION, 'cedarpy': expect.stringMatching(exact) });
+    // Every cedarpy requirement string of the agent: there is one, and it pins that version with ==.
+    const pyproject = fs.readFileSync(path.join(repoRoot, 'agent/pyproject.toml'), 'utf-8');
+    const requirements = [...pyproject.matchAll(/["']cedarpy(?![\w-])([^"']*)["']/g)].map((match) => match[1].replace(/\s/g, ''));
+    expect(requirements).toEqual([`==${pair.cedarpy}`]);
   });
 
   test('exposes the minimum Lambda memory requirement', () => {

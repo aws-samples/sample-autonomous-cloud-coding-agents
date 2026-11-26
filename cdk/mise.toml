@@ -1,7 +1,7 @@
 min_version = "2026.7.11"
 
 [tools]
-node = "22"
+node = "22.23.4"
 
 # CDK synth and Jest tests write large cdk.out artifacts to TMPDIR.
 # Default /tmp is often tmpfs with limited space; redirect to disk-backed dir.
@@ -18,9 +18,20 @@ run = "cd .. && yarn install --check-files"
 description = "TypeScript compile"
 run = "yarn compile"
 
+# Both eslint tasks name their configuration (--config): ESLint then applies
+# cdk/eslint.config.mjs to every file. Left to look for one from each file's directory,
+# it would let an eslint.config.* added below cdk/ (a copied directory can bring one
+# along) replace the rules for that directory, with the gate still green.
 [tasks.eslint]
 description = "ESLint"
-run = "yarn eslint"
+run = "../node_modules/.bin/eslint --config eslint.config.mjs --max-warnings 0 --fix src test scripts"
+
+# The same command without --fix, for checks that must not rewrite files (the root
+# `lint` task). Keep the targets of the two tasks identical. --max-warnings 0 in both:
+# a warning fails the task like an error.
+[tasks."eslint:check"]
+description = "ESLint without --fix: reports findings and rewrites nothing"
+run = "../node_modules/.bin/eslint --config eslint.config.mjs --max-warnings 0 src test scripts"
 
 [tasks.test]
 description = "Jest tests"
@@ -35,6 +46,25 @@ run = ["mkdir -p $TMPDIR", "yarn test"]
 [tasks.testf]
 description = "Focused jest run (no coverage, single worker)"
 run = "yarn jest --coverage=false --runInBand"
+
+# The only type check that test/ and scripts/ get: jest runs the tests through ts-jest
+# with isolatedModules, which transpiles each file and checks no types, and `compile`
+# covers src/. Without this task a type error there passes the whole build.
+#
+# tsconfig.typecheck.json is tsconfig.dev.json (src, test, scripts) with bundler-style
+# module resolution. Under the NodeNext settings of tsconfig.dev.json itself, tsc reported
+# 26 errors that were no defects when this task was added: 21 for an `await import()`
+# without a file extension in a test, which jest runs as a require, 4 that follow from
+# those, and 1 for `import.meta` in a script that node runs as an ES module.
+#
+# `wait_for`, not `depends`: it uses nothing that compile emits, so this only orders
+# the start. In a build it begins after `compile` and cannot take a slot ahead of the
+# task that heads the path deciding the build time (compile, then the tests). Run on
+# its own, it does not compile first.
+[tasks.typecheck]
+description = "Type-check src, test and scripts (tsc --noEmit); jest does not check types"
+wait_for = [":compile"]
+run = "yarn typecheck"
 
 [tasks.synth]
 description = "cdk synth"
@@ -118,7 +148,7 @@ description = "cdk deploy (pass args after --)"
 # several GB of working space, and uv/Docker caches accumulate across runs.
 # The operator console stack packages web/dist, so bundle it first.
 depends = [":clean:disk", "//web:bundle"]
-# The log-delivery preflight runs as the FIRST command of this task rather than as a
+# The log-delivery preflight runs as a command of this task rather than as a
 # `depends`, so that the arguments after `--` reach BOTH it and `cdk deploy`. As a
 # `depends` it could not see them: mise forwards `--` args only to the invoked task's own
 # `run`, so `mise //cdk:deploy -- -c stackName=x` deployed stack `x` while the preflight
@@ -126,7 +156,7 @@ depends = [":clean:disk", "//web:bundle"]
 # is a step that DELETES resources, so the two must not be able to disagree about which
 # stack, account, or region they are operating on.
 #
-# A non-zero exit from the first command aborts the task, which is the intended
+# A non-zero exit from that command aborts the task, which is the intended
 # fail-closed behaviour: the deploy must not proceed into a known-bad migration state.
 #
 # `required=false` is load-bearing — without it a bare `mise //cdk:deploy` (the common
@@ -146,15 +176,20 @@ run = [
 # ECS compute backend you must set the ComputeTypes CFN *parameter* — `cdk bootstrap`
 # has no way to pass template parameters (no --parameters flag; --context sets CDK
 # construct context, NOT a CFN parameter), so run this task once, then set the
-# parameter directly on the CDKToolkit stack:
-#   aws cloudformation update-stack --stack-name CDKToolkit --use-previous-template \
-#     --capabilities CAPABILITY_NAMED_IAM \
-#     --parameters ParameterKey=ComputeTypes,ParameterValue=agentcore\,ecs\,lambda-microvm
-#   # verify: aws cloudformation describe-stacks --stack-name CDKToolkit --query 'Stacks[0].Parameters'
+# parameter on the CDKToolkit stack with the commands under "Using these policies" in
+# docs/design/DEPLOYMENT_ROLES.md. An update that names ComputeTypes alone resets the
+# other parameters to the template defaults.
+#
+# --force (#701): without it, the CDK CLI does not overwrite a CDKToolkit stack whose
+# BootstrapVariant parameter differs from the template's. It warns, changes nothing and exits 0.
+# A standard `cdk bootstrap` records another variant, and the stack can keep it after this
+# template has replaced that bootstrap, so every later run needs the flag. The flag stays in
+# front of the pass-through arguments, so that `-- --no-force` cancels it for a run.
 [tasks.bootstrap]
-description = "Bootstrap CDK with least-privilege policies (ComputeTypes=agentcore; for ECS set the ComputeTypes CFN param on CDKToolkit — see comment above the task)"
+description = "Bootstrap CDK with least-privilege policies, replacing an existing bootstrap (ComputeTypes=agentcore; for ECS set the ComputeTypes CFN param on CDKToolkit — see comment above the task)"
 depends = [":install", ":bootstrap:generate"]
-run = "npx cdk bootstrap --template bootstrap/bootstrap-template.yaml"
+# Args after `--` (e.g. `aws://<account>/<region>`) pin the environment; `bgagent setup` passes one.
+run = "npx cdk bootstrap --force --template bootstrap/bootstrap-template.yaml {{arg(name='cdkargs', var=true, required=false)}}"
 
 [tasks."bootstrap:generate"]
 description = "Regenerate all bootstrap artifacts (policies JSON, template YAML, version/hash files)"
@@ -166,25 +201,14 @@ description = "cdk destroy"
 run = "npx cdk destroy"
 
 [tasks.diff]
-description = "cdk diff"
+description = "cdk diff (pass args after --)"
 depends = ["//web:bundle"]
-run = "npx cdk diff"
-
-[tasks.integ]
-description = "CDK deploy-then-verify integration tests (integ-runner). Needs AWS creds for the shared integ account."
-depends = [":compile"]
-run = [
-  "mkdir -p $TMPDIR",
-  # No --update-on-failed: .snapshot/ is gitignored, so there is no committed
-  # snapshot to diff against or update. --force re-runs the deploy-then-verify
-  # unconditionally, which is what we want in CI.
-  "npx integ-runner --language typescript --directory test/integ --force",
-]
+run = "npx cdk diff {{arg(name='cdkargs', var=true, required=false)}}"
 
 [tasks.bundle]
 description = "No-op bundle step for cdk/cdk.json (NodejsFunction bundles at synth time)"
 run = "node -e \"process.exit(0)\""
 
 [tasks.build]
-description = "compile, test, eslint, synth (quiet) — DAG: compile first, then test+synth+eslint in parallel"
-depends = [":test", ":eslint", ":synth:quiet"]
+description = "compile, test, eslint, typecheck, synth (quiet) — DAG: compile first, then test+typecheck+synth; eslint beside them"
+depends = [":test", ":eslint", ":typecheck", ":synth:quiet"]

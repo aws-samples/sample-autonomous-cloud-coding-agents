@@ -1,5 +1,5 @@
 ---
-title: Webhook integration
+title: "Webhook integration"
 ---
 
 Webhooks allow external systems (CI pipelines, GitHub Actions, custom automation) to create tasks without Cognito credentials. Each webhook integration has its own HMAC-SHA256 shared secret.
@@ -40,10 +40,13 @@ The response includes a `secret` field  - **store it securely, it is only shown 
     "webhook_id": "01HYX...",
     "name": "My CI Pipeline",
     "secret": "<webhook-secret-64-hex-characters>",
+    "webhook_url": "https://<api-id>.execute-api.<region>.amazonaws.com/v1/webhooks/tasks",
     "created_at": "2025-03-15T10:30:00Z"
   }
 }
 ```
+
+`webhook_url` is the endpoint to enter in the external system: the URL that [Submitting tasks via webhook](#submitting-tasks-via-webhook) posts to. It belongs to the deployment, not to the webhook, so every webhook gets the same one. `bgagent webhook create` prints it as `URL:`.
 
 Webhook names must be 1-64 characters: alphanumeric, spaces, hyphens, or underscores, starting and ending with an alphanumeric character.
 
@@ -76,7 +79,7 @@ Use the webhook endpoint with HMAC-SHA256 authentication instead of a JWT:
 ```bash
 WEBHOOK_ID="01HYX..."
 WEBHOOK_SECRET="a1b2c3d4..."
-BODY='{"repo": "owner/repo", "task_description": "Fix the login bug"}'
+BODY='{"repo": "owner/repo", "workflow_ref": "coding/new-task-v1", "task_description": "Fix the login bug"}'
 
 # Compute HMAC-SHA256 signature
 SIGNATURE=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "$WEBHOOK_SECRET" | cut -d' ' -f2)

@@ -18,8 +18,8 @@
  */
 
 import * as crypto from 'crypto';
-import { logger } from './logger';
 import sharedConstants from '../../../../contracts/constants.json';
+import { logger } from './logger';
 
 const REQUEST_TIMEOUT_MS = 5000;
 const FORGE_WEBTRIGGER_SUFFIX = sharedConstants.jira_app_actor.forge_webtrigger_suffix;

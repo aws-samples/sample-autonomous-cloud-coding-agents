@@ -108,16 +108,21 @@ export function assertLikelyEmail(email: string): void {
   }
 }
 
-/** Create a Cognito user with verified email and suppressed welcome email. */
-export async function adminCreateUser(
-  client: CognitoIdentityProviderClient,
-  userPoolId: string,
+/**
+ * Invite a user with a *temporary* password (#238): the FORCE_CHANGE_PASSWORD
+ * state it leaves them in forces a first-login rotation, so the admin-generated
+ * string stops being a valid credential once the teammate sets their own. The
+ * user is created with a verified email and the welcome email suppressed.
+ */
+export async function adminInviteUser(
+  ctx: CognitoAdminContext,
   email: string,
   temporaryPassword: string,
 ): Promise<void> {
+  const client = cognitoClient(ctx.region);
   try {
     await client.send(new AdminCreateUserCommand({
-      UserPoolId: userPoolId,
+      UserPoolId: ctx.userPoolId,
       Username: email,
       UserAttributes: [
         { Name: 'email', Value: email },
@@ -135,37 +140,6 @@ export async function adminCreateUser(
     }
     throw err;
   }
-}
-
-/** Set a permanent password (skips FORCE_CHANGE_PASSWORD on first login). */
-export async function adminSetPermanentPassword(
-  client: CognitoIdentityProviderClient,
-  userPoolId: string,
-  emailOrUsername: string,
-  password: string,
-): Promise<void> {
-  const username = await resolveCognitoUsername(client, userPoolId, emailOrUsername);
-  await client.send(new AdminSetUserPasswordCommand({
-    UserPoolId: userPoolId,
-    Username: username,
-    Password: password,
-    Permanent: true,
-  }));
-}
-
-/**
- * Invite a user with a *temporary* password (#238): the FORCE_CHANGE_PASSWORD
- * state it leaves them in forces a first-login rotation, so the admin-generated
- * string stops being a valid credential once the teammate sets their own. Kept
- * as a named seam over ``adminCreateUser`` for the command layer and tests.
- */
-export async function adminInviteUser(
-  ctx: CognitoAdminContext,
-  email: string,
-  temporaryPassword: string,
-): Promise<void> {
-  const client = cognitoClient(ctx.region);
-  await adminCreateUser(client, ctx.userPoolId, email, temporaryPassword);
 }
 
 export async function adminDeleteUser(
@@ -188,6 +162,7 @@ export async function adminDeleteUser(
   }
 }
 
+/** Set a permanent password (skips FORCE_CHANGE_PASSWORD on first login). */
 export async function adminResetPassword(
   ctx: CognitoAdminContext,
   email: string,
@@ -195,7 +170,13 @@ export async function adminResetPassword(
 ): Promise<void> {
   const client = cognitoClient(ctx.region);
   try {
-    await adminSetPermanentPassword(client, ctx.userPoolId, email, password);
+    const username = await resolveCognitoUsername(client, ctx.userPoolId, email);
+    await client.send(new AdminSetUserPasswordCommand({
+      UserPoolId: ctx.userPoolId,
+      Username: username,
+      Password: password,
+      Permanent: true,
+    }));
   } catch (err) {
     if (err instanceof Error && err.name === 'UserNotFoundException') {
       throw new CliError(`User ${email} was not found in pool ${ctx.userPoolId}.`);

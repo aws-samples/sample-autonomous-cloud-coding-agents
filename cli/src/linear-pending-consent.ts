@@ -36,7 +36,7 @@
 // with no upside).
 import * as fs from 'fs';
 import * as path from 'path';
-import { getConfigDir, SECRET_FILE_MODE } from './config';
+import { ensureConfigDir, getConfigDir, writeSecretFile } from './config';
 import { CliError } from './errors';
 
 /**
@@ -81,19 +81,17 @@ function pendingPath(slug: string): string {
 
 /** Persist the state a paste-back exchange will need. Overwrites any prior attempt. */
 export function savePendingConsent(pending: PendingConsent): void {
-  const dir = getConfigDir();
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const p = pendingPath(pending.slug);
-  fs.writeFileSync(p, JSON.stringify(pending, null, 2) + '\n', { mode: SECRET_FILE_MODE });
-  // writeFileSync only honours `mode` when CREATING the file; an overwrite leaves
-  // pre-existing loose bits untouched. Same reason config.ts chmods explicitly.
-  fs.chmodSync(p, SECRET_FILE_MODE);
+  ensureConfigDir();
+  writeSecretFile(pendingPath(pending.slug), JSON.stringify(pending, null, 2) + '\n');
 }
 
 /**
  * Load and CONSUME the pending consent for a slug. The file is deleted whether or
- * not it turns out to be usable, so a verifier is never left on disk after one
- * attempt and cannot be replayed.
+ * not it turns out to be usable, so the verifier in it gets one attempt and cannot
+ * be replayed from it. Only this file is deleted: a process killed in
+ * `savePendingConsent` between the write and the rename leaves the verifier it was
+ * saving in a temporary file beside this one, owner-only, and nothing removes that
+ * copy (see `writeSecretFile`).
  */
 export function takePendingConsent(slug: string): PendingConsent {
   const p = pendingPath(slug);

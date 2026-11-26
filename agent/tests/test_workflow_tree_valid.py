@@ -6,9 +6,10 @@ image but fails validation would be a latent runtime failure; this test is the
 synth/CI gate WORKFLOWS.md §"Validation rules" calls for, enforced in the agent
 test suite.
 
-When no first-party workflows exist yet (early Phase 1), the test passes
-vacuously but logs the count, so it starts guarding automatically as soon as
-``coding/new-task-v1.yaml`` and friends land.
+First-party workflows ship today, so finding none is itself a failure: it means
+the directory moved or the glob no longer matches, and nothing would be
+validated. The parametrized test then fails at collection (an empty parameter
+set is an error, see ``pyproject.toml``) and the second test asserts it.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from workflow import validate_workflow
+from workflow import load_workflow_file, validate_workflow
 
 _WORKFLOWS_ROOT = (Path(os.path.dirname(__file__)) / ".." / "workflows").resolve()
 
@@ -37,17 +38,19 @@ def _workflow_files() -> list[Path]:
 _FILES = _workflow_files()
 
 
-@pytest.mark.skipif(not _FILES, reason="no first-party workflow files yet (early Phase 1)")
 @pytest.mark.parametrize("path", _FILES, ids=[str(p.name) for p in _FILES])
 def test_first_party_workflow_validates(path: Path) -> None:
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     violations = validate_workflow(data)
     assert violations == [], f"committed workflow {path} fails validation: {violations}"
+    # The validator reads the raw mapping. A task reads the file through the
+    # loader, which also builds the typed model: that has to succeed as well.
+    load_workflow_file(path)
 
 
-@pytest.mark.skipif(not _FILES, reason="no first-party workflow files yet (early Phase 1)")
 def test_first_party_workflow_path_matches_id() -> None:
     """A workflow at <domain>/<name>-vN.yaml must declare id '<domain>/<name>-vN'."""
+    assert _FILES, f"no workflow file found under {_WORKFLOWS_ROOT}: nothing was validated"
     for path in _FILES:
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
         rel = path.relative_to(_WORKFLOWS_ROOT).with_suffix("")

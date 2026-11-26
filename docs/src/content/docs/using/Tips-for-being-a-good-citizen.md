@@ -1,5 +1,5 @@
 ---
-title: Tips for being a good citizen
+title: "Tips for being a good citizen"
 ---
 
 The platform is a shared resource - compute, model tokens, and GitHub API calls cost money and consume quotas. These practices help you get better results while keeping the platform healthy for everyone.
@@ -10,7 +10,7 @@ The agent is only as good as the context it receives. A well-prepared repository
 
 - **Onboard first** - Repositories must be registered via a Blueprint construct before tasks can target them. If you get a `REPO_NOT_ONBOARDED` error, contact your platform administrator.
 - **Add a CLAUDE.md** - This is the single most impactful thing you can do. The agent loads project configuration from `CLAUDE.md`, `.claude/rules/*.md`, `.claude/settings.json`, and `.mcp.json` in your repository. Use these to document build commands, coding conventions, architecture decisions, and constraints. A good `CLAUDE.md` prevents the agent from guessing and reduces wasted turns. See the [Prompt guide](/sample-autonomous-cloud-coding-agents/customizing/prompt-engineering#repo-level-instructions) for examples.
-- **Keep your PAT aligned** - If tasks fail with `preflight_failed`, the GitHub PAT likely lacks the permissions the task type needs. Check the event's `reason` field and update the secret in Secrets Manager. See [Repository preparation](/sample-autonomous-cloud-coding-agents/developer-guide/repository-preparation) for the full permissions table.
+- **Keep your PAT aligned** - If tasks fail with `preflight_failed`, the GitHub PAT likely lacks the permissions the task type needs. Check the event's `reason` field and update the secret in Secrets Manager. A task whose error starts `PushCapabilityError:` (not `Pre-flight check failed:`) passed that check, but GitHub refused the token a push when the agent tested it right after cloning, before any work was done: the error names the cause and the fix, such as the token type and the permission to add. See [Repository preparation](/sample-autonomous-cloud-coding-agents/developer-guide/repository-preparation) for the full permissions table.
 
 ### Write effective task descriptions
 
@@ -33,4 +33,4 @@ Every task consumes model tokens, compute time, and GitHub API calls. Setting li
 
 - **Content screening** - Task descriptions and PR context are screened by Bedrock Guardrails for prompt injection. If your task is unexpectedly blocked, check the task events for a `guardrail_blocked` entry and revise your description.
 - **Idempotency** - If you're creating tasks via the API and might retry on network errors, include an `Idempotency-Key` header to prevent duplicate tasks.
-- **Concurrency** - You share a per-user concurrency limit (default: 3 tasks). If you hit the limit, wait for a task to finish or cancel one you no longer need before submitting more.
+- **Concurrency** - You share a per-user concurrency limit (default: 10 tasks). If you hit the limit, new tasks are queued and start as active ones finish; cancel one you no longer need to free a slot.

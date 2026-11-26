@@ -18,9 +18,11 @@ Rationale for the Stop hook seam:
   * A module-level registry ``hooks.between_turns_hooks`` lets other
     producers (e.g. approval gates) add hooks without touching this file.
 
-Turn counting (``result.turns``) is incremented on ``AssistantMessage`` only
-and is NOT affected by the Stop hook's block/continue decision — nudge
-injection does not double-count turns.
+Turn counting (``result.turns``) follows the answers of the model, which is
+what ``max_turns`` limits: the first ``AssistantMessage`` of an answer adds one
+(the CLI sends an answer as one message per content block). It is NOT affected
+by the Stop hook's block/continue decision — nudge injection does not
+double-count turns.
 """
 
 from __future__ import annotations
@@ -28,7 +30,6 @@ from __future__ import annotations
 import os
 import subprocess
 from typing import Any, Literal
-from urllib.parse import quote
 
 from clarification_tool import (
     CLARIFICATION_SERVER_NAME,
@@ -37,17 +38,64 @@ from clarification_tool import (
 )
 from config import AGENT_WORKSPACE
 from gateway_tools import GATEWAY_SERVER_NAME, build_gateway_server
+from hooks import _map_strings, _screened
 from models import AgentResult, TaskConfig, TokenUsage
+from output_scanner import scan_tool_output
 from progress_writer import _ProgressWriter
-from shell import log, log_error_cw, truncate
+from shell import _clean_env, log, log_error_cw, truncate
 from telemetry import _TrajectoryWriter
 
 
+def _screened_text(value: Any) -> str:
+    """Return *value* as the text that is recorded of it, screened.
+
+    The input of a tool call is a dict and a tool result can be a list of
+    content blocks: both are recorded as their ``str()``. Their strings are
+    screened first, because ``str()`` escapes the quotes, tabs and newlines
+    the patterns rely on. The text as a whole then passes the scanner, for
+    what only a key and its value show together, but not the redaction of
+    log lines: that takes everything up to the next blank, which here
+    includes the quote and the comma that close a string, and the web
+    console reads the arguments of a call back from this text.
+    """
+    if isinstance(value, str):
+        return _screened(value)
+    return scan_tool_output(str(_map_strings(value, _screened))).redacted_content
+
+
 def _format_tool_result(block) -> tuple[str, str]:
-    """Extract status label and content string from a ToolResultBlock."""
+    """Extract status label and content string from a ToolResultBlock.
+
+    The content goes to the log, to the task's events and to the trajectory,
+    so it is screened here. The PostToolUse hook screens what a tool returns
+    before the model reads it, but a call that failed does not pass that hook
+    and the CLI does not take every rewrite.
+    """
     status = "ERROR" if block.is_error else "ok"
-    content = block.content if isinstance(block.content, str) else str(block.content)
-    return status, content
+    return status, _screened_text(block.content)
+
+
+def _result_error_text(message: Any) -> str:
+    """Return the error text of a result that the CLI marked ``is_error``.
+
+    The CLI's ``result`` text when it sent one: a model call that the provider
+    refused ends a run that way, under subtype "success". The error subtypes
+    (turn limit, budget, error during execution) send no ``result``. Their
+    reason is in ``errors`` and follows the wrapper that the error classifier
+    keys on. A reason is the CLI's own account of what failed and may quote a
+    command or a URL, so it is screened before it reaches the task record.
+    """
+    text = str(getattr(message, "result", None) or "").strip()
+    if text:
+        return text
+    subtype = getattr(message, "subtype", "unknown")
+    text = f"Agent session error (subtype={subtype!r})"
+    # Not for the turn limit: its reason repeats the subtype, and the pipeline
+    # appends what the stuck guard saw, of which a reply quotes 200 characters.
+    if subtype == "error_max_turns":
+        return text
+    errors = "; ".join(str(error) for error in getattr(message, "errors", None) or [])
+    return f"{text}: {_screened(errors)}" if errors else text
 
 
 def _parse_token_usage(raw_usage: Any) -> TokenUsage:
@@ -73,10 +121,13 @@ def _setup_bedrock_cost_attribution(config: TaskConfig) -> None:
 
     1. **Per-user/repo chargeback (CUR 2.0 / Cost Explorer).** Write the
        SessionRole ARN + ``{user_id, repo, task_id}`` STS tags to a 0600 file
-       that ``bedrock_creds_helper.py`` reads. Claude Code's managed-settings
-       ``awsCredentialExport`` runs that helper and signs Bedrock requests with
-       the tagged assumed-role credentials. Skipped when ``AGENT_SESSION_ROLE_ARN``
-       is unset (local/dev) — the helper then fails open to ambient creds.
+       that ``bedrock_creds_helper.py`` reads on AgentCore/ECS. Claude Code's
+       managed-settings ``awsCredentialExport`` runs that helper and signs
+       Bedrock requests with the tagged assumed-role credentials. MicroVM
+       instead uses the parent's scoped container-credential provider; its
+       export helper returns no credentials and cannot supply a wake barrier.
+       File writing is skipped when ``AGENT_SESSION_ROLE_ARN`` is unset
+       (local/dev); the non-MicroVM helper can fall back to ambient credentials.
 
     2. **Per-call forensics (model-invocation logs).** Set
        ``X-Amzn-Bedrock-Request-Metadata`` via ``ANTHROPIC_CUSTOM_HEADERS`` on the
@@ -117,15 +168,19 @@ def _setup_bedrock_cost_attribution(config: TaskConfig) -> None:
         )
 
 
-def _setup_agent_env(config: TaskConfig) -> tuple[str | None, str | None]:
+def _setup_agent_env(config: TaskConfig) -> None:
     """Configure process environment for the Claude Code CLI subprocess.
 
-    Sets Bedrock credentials, strips OTEL auto-instrumentation vars, and
-    optionally enables CLI-native OTel telemetry.
-
-    Returns (otlp_endpoint, otlp_protocol) for logging.
+    Sets Bedrock credentials and strips OTEL auto-instrumentation vars.
     """
     os.environ["CLAUDE_CODE_USE_BEDROCK"] = "1"
+    # Claude Code 2.1.311 and later load model settings on Bedrock from a signed
+    # file on downloads.claude.ai. A task keeps the model table built into the
+    # pinned CLI, as before that release: the platform's DNS allowlist
+    # (cdk/src/constructs/dns-firewall.ts) does not name that host, and what a
+    # model may do should change with a reviewed CLI bump, not between two runs
+    # of one image.
+    os.environ["CLAUDE_CODE_MODEL_CATALOG"] = "off"
     os.environ["AWS_REGION"] = config.aws_region
     os.environ["ANTHROPIC_MODEL"] = config.anthropic_model
     os.environ["GITHUB_TOKEN"] = config.github_token
@@ -146,99 +201,15 @@ def _setup_agent_env(config: TaskConfig) -> tuple[str | None, str | None]:
     # seen on WebFetch's Haiku sub-calls); config.py resolves that default.
     os.environ["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = config.haiku_model
 
-    # Save OTLP endpoint/protocol configured by ADOT auto-instrumentation
-    # before stripping, so we can re-use it for Claude Code CLI telemetry.
-    otlp_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
-    otlp_protocol = os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL")
-
     # Strip OTEL auto-instrumentation vars from os.environ so target-repo
     # child processes (mise run build, pytest, semgrep, etc.) don't attempt
     # Python OTEL auto-instrumentation using the agent's packages.
     # The agent's own TracerProvider is already configured at startup — it does
     # not re-read env vars, so removing them is safe.
-    for key in [k for k in os.environ if k.startswith("OTEL_")]:
+    cleaned = _clean_env()
+    for key in os.environ.keys() - cleaned.keys():
         del os.environ[key]
-    pythonpath = os.environ.get("PYTHONPATH", "")
-    if pythonpath:
-        cleaned = os.pathsep.join(
-            p for p in pythonpath.split(os.pathsep) if "opentelemetry" not in p
-        )
-        if cleaned:
-            os.environ["PYTHONPATH"] = cleaned
-        else:
-            os.environ.pop("PYTHONPATH", None)
-
-    # Enable Claude Code CLI's native OTel telemetry if an OTLP endpoint is
-    # available.  The CLI exports events (tool results, API requests/errors,
-    # tool decisions) as OTLP logs with per-prompt granularity — beyond the
-    # aggregate ResultMessage at session end.
-    #
-    # Gated on ENABLE_CLI_TELEMETRY env var (opt-in) because the ADOT sidecar
-    # in AgentCore Runtime is only confirmed to forward traces (configured via
-    # CfnRuntimeLogsMixin.TRACES.toXRay() in CDK). Whether the sidecar also
-    # forwards OTLP logs is unconfirmed. Set ENABLE_CLI_TELEMETRY=1 in the
-    # runtime environment to enable and verify logs appear in CloudWatch.
-    #
-    # Configuration choices based on AWS documentation:
-    #   - OTEL_METRICS_EXPORTER=none: All AWS ADOT examples disable metrics
-    #     export. CloudWatch does not ingest OTLP metrics from the sidecar.
-    #   - OTEL_TRACES_EXPORTER=none: Explicitly disabled. The agent's own
-    #     custom spans (task.pipeline, task.agent_execution, etc.) already
-    #     provide trace-level coverage via the Python ADOT auto-instrumentation.
-    #   - OTEL_LOGS_EXPORTER=otlp: SDK events (tool_result, api_request, etc.)
-    #     are the primary telemetry of interest and are exported as OTLP logs.
-    #   - OTEL_EXPORTER_OTLP_LOGS_HEADERS: Includes the application log group
-    #     name so that, if the exporter sends directly to CloudWatch's OTLP
-    #     endpoint, logs land in the correct log group. Ignored by the sidecar
-    #     if it has its own routing config.
-    #   - Protocol defaults to http/protobuf (AWS-recommended for OTLP).
-    #
-    # NOTE: These env vars are set on os.environ (process-global) because the
-    # Claude Agent SDK spawns the CLI subprocess from the process environment.
-    # This is safe for single-task-per-container deployments (AgentCore Runtime
-    # allocates one session per container).  If concurrent tasks ever share a
-    # process, this must be revisited (pass env via subprocess instead).
-    if os.environ.get("ENABLE_CLI_TELEMETRY") == "1":
-        if not otlp_endpoint:
-            log("WARN", "OTEL_EXPORTER_OTLP_ENDPOINT not set by ADOT")
-            # Default to http/protobuf on port 4318 (AWS-recommended protocol).
-            otlp_endpoint = "http://localhost:4318"
-        if not otlp_protocol:
-            otlp_protocol = "http/protobuf"
-
-        os.environ["CLAUDE_CODE_ENABLE_TELEMETRY"] = "1"
-        os.environ["OTEL_METRICS_EXPORTER"] = "none"
-        os.environ["OTEL_TRACES_EXPORTER"] = "none"
-        os.environ["OTEL_LOGS_EXPORTER"] = "otlp"
-        os.environ["OTEL_EXPORTER_OTLP_PROTOCOL"] = otlp_protocol
-        os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = otlp_endpoint
-        os.environ["OTEL_LOG_TOOL_DETAILS"] = "1"
-
-        # Route OTLP logs to the application log group. This header is used
-        # when sending directly to CloudWatch's OTLP logs endpoint
-        # (https://logs.{region}.amazonaws.com/v1/logs). If the exporter
-        # sends to the ADOT sidecar instead, the sidecar may ignore this.
-        log_group = os.environ.get("LOG_GROUP_NAME", "")
-        if log_group:
-            os.environ["OTEL_EXPORTER_OTLP_LOGS_HEADERS"] = f"x-aws-log-group={log_group}"
-
-        # Tag all SDK telemetry with task metadata for correlation in CloudWatch.
-        # Values are percent-encoded per the OTEL_RESOURCE_ATTRIBUTES spec to
-        # handle any special characters (commas, equals, spaces) in config values.
-        os.environ["OTEL_RESOURCE_ATTRIBUTES"] = (
-            f"task.id={quote(config.task_id or 'unknown', safe='')},"
-            f"repo.url={quote(config.repo_url or 'unknown', safe='')},"
-            f"agent.model={quote(config.anthropic_model or 'unknown', safe='')}"
-        )
-        log(
-            "AGENT",
-            f"Claude Code telemetry enabled: endpoint={otlp_endpoint} "
-            f"protocol={otlp_protocol} logs_log_group={log_group or '(not set)'}",
-        )
-    else:
-        log("AGENT", "Claude Code CLI telemetry disabled (set ENABLE_CLI_TELEMETRY=1 to enable)")
-
-    return otlp_endpoint, otlp_protocol
+    os.environ.update(cleaned)
 
 
 def _initialize_policy_engine_and_hooks(
@@ -287,7 +258,7 @@ def _initialize_policy_engine_and_hooks(
         task_type=config.policy_principal,
         repo=config.repo_url,
         read_only=config.read_only,
-        extra_policies=cedar_policies if cedar_policies else None,
+        blueprint_policies=cedar_policies or None,
         **engine_kwargs,
     )
     # Surface the resolved cap + its source so operators can distinguish a
@@ -351,7 +322,7 @@ _NO_CLARIFICATION_WORKFLOW_IDS = frozenset(
         "coding/pr-review-v1",
         "coding/restack-v1",
         "default/agent-v1",
-        "web/research-v1",
+        "knowledge/web-research-v1",
     )
 )
 
@@ -372,13 +343,16 @@ _NO_CLARIFICATION_WORKFLOW_IDS = frozenset(
 # ``Task``/``Agent`` are the sub-agent spawners (name varies by CLI version, so
 # block both); ``Monitor`` streams a background command's output mid-turn;
 # ``SendMessage`` resumes/relaunches background agents; the ``Cron*`` tools
-# schedule deferred work. All are "return now, work continues off-session"
+# and ``ScheduleWakeup`` schedule deferred work (a wake-up tells the model to
+# end its turn, and the runner takes that first result as final, so nothing
+# waits for it). All are "return now, work continues off-session"
 # vectors a one-shot task cannot await. NOT blockable here: background ``Bash``
 # (a ``run_in_background`` PARAMETER of Bash, not a tool name) — but a detached
 # Bash child dies with the MicroVM on return, so it can't produce
 # arrives-later work the way a cloud Workflow does; the deliver-artifact
-# deferral guard (deliverers._reject_if_deferral) is the backstop for anything
-# that still ends in a placeholder.
+# deferral guard (deliverers._reject_if_deferral) is the backstop for a final
+# message that still names that background machinery; a promise in ordinary
+# words is not matched.
 _DISALLOWED_TOOLS = [
     "Workflow",
     "Task",
@@ -388,6 +362,7 @@ _DISALLOWED_TOOLS = [
     "CronCreate",
     "CronDelete",
     "CronList",
+    "ScheduleWakeup",
 ]
 
 
@@ -513,7 +488,7 @@ def _register_gateway_server(mcp_servers: dict[str, Any]) -> None:
         log("AGENT", "AgentCore Gateway tool bridge registered (mcp__abca_gateway__*)")
 
 
-async def run_agent(
+async def run_agent(  # noqa: C901 -- 40 since #904 (37 when the ceiling of 15 was set); must not grow
     prompt: str,
     system_prompt: str,
     config: TaskConfig,
@@ -591,8 +566,7 @@ async def run_agent(
     # and ask a question instead of guessing on a vague request; the runner
     # captures the call below. Gated OFF for read-only workflows (pr-review) and
     # artifact planners — they have their own terminal shapes and
-    # shouldn't grow an ask-instead path. Best-effort: a null server (SDK missing)
-    # just means the tool isn't offered.
+    # shouldn't grow an ask-instead path.
     mcp_servers: dict[str, Any] = {}
     workflow_id = (config.resolved_workflow or {}).get("id", "")
     offer_clarification = not config.read_only and workflow_id not in _NO_CLARIFICATION_WORKFLOW_IDS
@@ -628,22 +602,33 @@ async def run_agent(
         hooks=hooks,
         max_budget_usd=config.max_budget_usd,
         stderr=_on_stderr,
-        **({"mcp_servers": mcp_servers} if mcp_servers else {}),
+        # An empty dict is the option's default, so it is passed as it is.
+        mcp_servers=mcp_servers,
     )
 
     result = AgentResult()
     message_counts = {"system": 0, "assistant": 0, "result": 0, "other": 0}
+    # The model answer that the last assistant message was part of (its id).
+    answer_id: str | None = None
 
     # Use ClaudeSDKClient (connect/query/receive_response) instead of the
     # standalone query() function.  This matches the official AWS sample:
     # https://github.com/aws-samples/sample-deploy-ClaudeAgentSDK-based-agents-to-AgentCore-Runtime
     client = ClaudeSDKClient(options=options)
-    log("AGENT", "Connecting to Claude Code CLI subprocess...")
-    await client.connect()
-    log("AGENT", "Connected. Sending prompt...")
-    await client.query(prompt=prompt)
-    log("AGENT", "Prompt sent. Receiving messages...")
+    from microvm_credentials import ScopedCredentialBroker
+    from microvm_lifecycle import get_context
+
+    broker = None
     try:
+        lifecycle = get_context(config.task_id or "")
+        if lifecycle is not None:
+            broker = ScopedCredentialBroker(lifecycle)
+            options.env.update(broker.environment)
+        log("AGENT", "Connecting to Claude Code CLI subprocess...")
+        await client.connect()
+        log("AGENT", "Connected. Sending prompt...")
+        await client.query(prompt=prompt)
+        log("AGENT", "Prompt sent. Receiving messages...")
         async for message in client.receive_response():
             if isinstance(message, SystemMessage):
                 message_counts["system"] += 1
@@ -655,14 +640,20 @@ async def run_agent(
 
             elif isinstance(message, AssistantMessage):
                 message_counts["assistant"] += 1
-                result.turns += 1
+                # A turn is one answer of the model. The CLI sends an answer as
+                # one message per content block (thinking, text, each tool call),
+                # all with the id of the answer, and a tool result may arrive
+                # between two of them. A message without an id counts as an
+                # answer of its own.
+                if message.message_id is None or message.message_id != answer_id:
+                    result.turns += 1
+                answer_id = message.message_id
                 log("TURN", f"#{result.turns} (model: {message.model})")
 
-                # Per-turn accumulators for trajectory
+                # Per-message accumulators for trajectory
                 turn_thinking = ""
                 turn_text = ""
                 turn_tool_calls: list[dict] = []
-                turn_tool_results: list[dict] = []
 
                 for block in message.content:
                     if isinstance(block, ThinkingBlock):
@@ -703,39 +694,32 @@ async def run_agent(
                         tool_use_id = getattr(block, "id", "") or getattr(block, "tool_use_id", "")
                         if tool_use_id:
                             tool_use_id_to_name[tool_use_id] = block.name
-                    elif isinstance(block, ToolResultBlock):
-                        status, content = _format_tool_result(block)
-                        log("RESULT", f"[{status}] {truncate(content)}")
-                        turn_tool_results.append(
-                            {
-                                "tool_use_id": getattr(block, "tool_use_id", ""),
-                                "is_error": block.is_error,
-                                "content": content,
-                            }
-                        )
 
-                # Write trajectory event for this turn
+                # Write trajectory event for this message. The results of its
+                # tool calls are not known yet: write_tool_result records each
+                # one when it arrives (UserMessage branch).
                 trajectory.write_turn(
                     turn=result.turns,
                     model=message.model,
                     thinking=turn_thinking.strip(),
                     text=turn_text.strip(),
                     tool_calls=turn_tool_calls,
-                    tool_results=turn_tool_results,
+                    tool_results=[],
                 )
 
-                # Write progress events for this turn
+                # Write progress events for this message. The text is screened before the
+                # writer cuts it to a preview: a credential cut in two is not recognised.
                 progress.write_agent_turn(
                     turn=result.turns,
                     model=message.model,
-                    thinking=turn_thinking.strip(),
-                    text=turn_text.strip(),
+                    thinking=_screened(turn_thinking.strip()),
+                    text=_screened(turn_text.strip()),
                     tool_calls_count=len(turn_tool_calls),
                 )
                 for tc in turn_tool_calls:
                     progress.write_agent_tool_call(
                         tool_name=tc["name"],
-                        tool_input=str(tc.get("input", "")),
+                        tool_input=_screened_text(tc.get("input", "")),
                         turn=result.turns,
                     )
                 # Tool result events are written from the UserMessage branch
@@ -748,8 +732,6 @@ async def run_agent(
                 result.status = subtype
                 result.cost_usd = getattr(message, "total_cost_usd", None)
                 result.num_turns = getattr(message, "num_turns", 0)
-                result.duration_ms = getattr(message, "duration_ms", 0)
-                result.duration_api_ms = getattr(message, "duration_api_ms", 0)
                 result.session_id = getattr(message, "session_id", "") or ""
 
                 err_payload = getattr(message, "result", None)
@@ -763,9 +745,7 @@ async def run_agent(
                 # while setting is_error for Bedrock entitlement / model-access failures.
                 # Treat that as a hard failure so the pipeline writes FAILED (not COMPLETED).
                 if is_terminal_error:
-                    err_text = (str(err_payload).strip() if err_payload else "") or (
-                        f"Agent session error (subtype={subtype!r})"
-                    )
+                    err_text = _result_error_text(message)
                     log("ERROR", err_text)
                     result.error = err_text
                     result.status = "error"
@@ -797,8 +777,8 @@ async def run_agent(
 
                 log(
                     "DONE",
-                    f"status={result.status} turns={message.num_turns} "
-                    f"cost=${message.total_cost_usd or 0:.4f} "
+                    f"status={result.status} turns={result.num_turns} "
+                    f"cost=${result.cost_usd or 0:.4f} "
                     f"duration={message.duration_ms / 1000:.1f}s",
                 )
                 if message.is_error and message.result:
@@ -811,22 +791,23 @@ async def run_agent(
                 # Write trajectory result summary (use effective status after is_error remap)
                 trajectory.write_result(
                     subtype=result.status,
-                    num_turns=getattr(message, "num_turns", 0),
-                    cost_usd=getattr(message, "total_cost_usd", None),
+                    num_turns=result.num_turns,
+                    cost_usd=result.cost_usd,
                     duration_ms=getattr(message, "duration_ms", 0),
                     duration_api_ms=getattr(message, "duration_api_ms", 0),
                     session_id=getattr(message, "session_id", ""),
                     usage=usage,
                 )
 
-                # Write progress cost update event
+                # Write progress cost update event. Its ``turn`` is the number
+                # the turn and tool events carry, not the CLI's ``num_turns``.
                 input_toks = usage.input_tokens if usage else 0
                 output_toks = usage.output_tokens if usage else 0
                 progress.write_agent_cost_update(
-                    cost_usd=getattr(message, "total_cost_usd", None),
+                    cost_usd=result.cost_usd,
                     input_tokens=input_toks,
                     output_tokens=output_toks,
-                    turn=getattr(message, "num_turns", 0),
+                    turn=result.turns,
                 )
 
             elif isinstance(message, UserMessage):
@@ -837,6 +818,12 @@ async def run_agent(
                 if isinstance(message.content, list):
                     for block in message.content:
                         if isinstance(block, ToolResultBlock):
+                            # A later project hook can deny a call our pre-hook
+                            # allowed without emitting either post-tool hook.
+                            # The CLI's error result retires only that call;
+                            # unrelated active/background work remains fenced.
+                            if lifecycle is not None and block.is_error:
+                                lifecycle.tool_finished(block.tool_use_id)
                             status, content = _format_tool_result(block)
                             log("RESULT", f"[{status}] {truncate(content)}")
                             tool_name = tool_use_id_to_name.get(
@@ -847,6 +834,12 @@ async def run_agent(
                                 is_error=bool(block.is_error),
                                 content=content,
                                 turn=result.turns,
+                            )
+                            trajectory.write_tool_result(
+                                turn=result.turns,
+                                tool_name=tool_name,
+                                is_error=bool(block.is_error),
+                                content=content,
                             )
                 elif isinstance(message.content, str):
                     log("USER", truncate(message.content))
@@ -864,13 +857,23 @@ async def run_agent(
         # see it on the dashboard widget + ``bgagent status`` and not
         # just on the runtime-DEFAULT stream.
         log_error_cw(
-            f"Exception during receive_response(): {type(e).__name__}: {e}",
+            f"Exception during Claude session: {type(e).__name__}: {e}",
             task_id=config.task_id or None,
         )
-        progress.write_agent_error(error_type=type(e).__name__, message=str(e))
+        # The text of an exception may quote a command or a URL.
+        err_text = _screened(str(e))
+        progress.write_agent_error(error_type=type(e).__name__, message=err_text)
         if result.status == "unknown":
             result.status = "error"
-            result.error = f"receive_response() failed: {e}"
+            result.error = f"Claude session failed: {err_text}"
+    finally:
+        # Also cover startup/query failure and cancellation, before pipeline
+        # teardown removes the task's lifecycle registry entry.
+        try:
+            await client.disconnect()
+        finally:
+            if broker is not None:
+                broker.close()
 
     log("AGENT", f"Generator finished. Messages received: {message_counts}")
     log("AGENT", f"CLI stderr lines received: {stderr_line_count}")

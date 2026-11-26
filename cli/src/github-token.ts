@@ -101,7 +101,17 @@ export async function resolveGithubTokenSecretArn(
   };
 }
 
-/** True when the secret already holds a non-placeholder PAT/token string. */
+/**
+ * How a GitHub token starts: one of the type prefixes GitHub documents at
+ * https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/about-authentication-to-github#githubs-token-formats
+ * or, for a token issued before GitHub introduced prefixes in 2021, 40 hex digits and nothing else.
+ */
+const GITHUB_TOKEN_SHAPE = /^(gh[pousr]_|github_pat_|[0-9a-f]{40}$)/;
+
+/**
+ * True when the secret holds a GitHub token. Presence is not enough: a secret
+ * nobody has set holds the 32-character password CloudFormation generated for it.
+ */
 export async function isGithubTokenConfigured(
   region: string,
   secretArn: string,
@@ -109,14 +119,7 @@ export async function isGithubTokenConfigured(
   const sm = makeClient(SecretsManagerClient, { region });
   try {
     const cur = await sm.send(new GetSecretValueCommand({ SecretId: secretArn }));
-    if (!cur.SecretString || cur.SecretString.length === 0) {
-      return false;
-    }
-    // CDK seeds an empty JSON placeholder on first deploy; a real PAT would not.
-    if (cur.SecretString.startsWith('{')) {
-      return false;
-    }
-    return true;
+    return GITHUB_TOKEN_SHAPE.test(cur.SecretString ?? '');
   } catch (err) {
     if ((err as { name?: string }).name === 'ResourceNotFoundException') {
       return false;

@@ -206,6 +206,43 @@ class TestLinearPath:
             assert post.call_args.kwargs["json"]["variables"]["emoji"] == EMOJI_SUCCESS
 
 
+class TestAgentSessionTasks:
+    """A task started from a native Linear agent session posts no reactions —
+    the session shows its state — but still moves the issue's workflow state."""
+
+    SESSION_METADATA: ClassVar[dict[str, str]] = {
+        "linear_issue_id": "issue-1",
+        "linear_agent_session_id": "session-1",
+    }
+
+    def test_start_skips_reaction_but_transitions_state(self, monkeypatch):
+        graphql = MagicMock()
+        transition = MagicMock()
+        monkeypatch.setattr(linear_reactions, "_graphql", graphql)
+        monkeypatch.setattr(linear_reactions, "_transition_issue_state", transition)
+
+        rid = linear_reactions.react_task_started(
+            "linear", self.SESSION_METADATA, transition_state=True
+        )
+
+        assert rid is None
+        graphql.assert_not_called()
+        transition.assert_called_once_with("issue-1", "started", ["In Progress"])
+
+    def test_finish_skips_reactions_but_transitions_state(self, monkeypatch):
+        graphql = MagicMock()
+        transition = MagicMock()
+        monkeypatch.setattr(linear_reactions, "_graphql", graphql)
+        monkeypatch.setattr(linear_reactions, "_transition_issue_state", transition)
+
+        linear_reactions.react_task_finished(
+            "linear", self.SESSION_METADATA, success=True, transition_state=True
+        )
+
+        graphql.assert_not_called()
+        transition.assert_called_once_with("issue-1", "started", ["In Review"])
+
+
 class TestFailureIsSwallowed:
     """Reactions are advisory — network/API failures never propagate."""
 
@@ -243,6 +280,26 @@ class TestFailureIsSwallowed:
         with patch("linear_reactions.requests.post") as post:
             react_task_started("linear", {"linear_issue_id": "issue-1"})
             post.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "body",
+        [b"<html><body>Sign in</body></html>", b"null", b"[]", b"42", b'"scalar"'],
+        ids=["html", "null", "list", "number", "string"],
+    )
+    def test_200_without_a_json_object_does_not_raise(self, monkeypatch, body):
+        """A 200 whose body is a proxy's HTML page, or JSON that is not an object,
+        is one more failure: raised out of the hook, it would turn a finished task
+        into FAILED. A real ``requests.Response``, so it fails the way requests does."""
+        import requests as rq
+
+        monkeypatch.setenv("LINEAR_API_TOKEN", "lin_api_test")
+        resp = rq.Response()
+        resp.status_code = 200
+        resp._content = body
+        with patch("linear_reactions.requests.post", return_value=resp):
+            # must not raise
+            react_task_finished("linear", {"linear_issue_id": "issue-1"}, success=True)
+            assert linear_reactions._graphql("query Q { x }", {}) is None
 
 
 class TestSweepStaleReactions:
@@ -411,6 +468,81 @@ class TestSweepStaleReactions:
             ]
             # The new 👀 must NOT be deleted; only the old ❌ should be.
             assert delete_ids == ["r-old-x"]
+
+    def test_sweep_finishes_with_the_token_it_was_started_with(self, monkeypatch):
+        """The sweep is a thread and can still be running when its task ends,
+        which is when ``run_task`` takes ``LINEAR_API_TOKEN`` out of the
+        environment."""
+        monkeypatch.setenv("LINEAR_API_TOKEN", "lin_api_test")
+        responses = iter(
+            [
+                _ok_response(reaction_id="r-new-eyes"),
+                _viewer_response("viewer-bot"),
+                _reactions_response(
+                    [{"id": "r-old-x", "emoji": EMOJI_FAILURE, "user": {"id": "viewer-bot"}}]
+                ),
+                _ok_delete_response(),
+            ]
+        )
+
+        def linear(_url, **request):
+            if "Viewer" in request["json"]["query"]:  # the first call of the sweep
+                monkeypatch.delenv("LINEAR_API_TOKEN")  # the task ends
+            return next(responses)
+
+        with patch("linear_reactions.requests.post", side_effect=linear) as post:
+            react_task_started("linear", {"linear_issue_id": "issue-1"})
+            _join_sweep_thread()
+
+        sent_with = [call.kwargs["headers"]["Authorization"] for call in post.call_args_list]
+        assert sent_with == ["lin_api_test"] * 4  # the 👀, then the three calls of the sweep
+
+    def test_sweep_sends_each_call_with_its_own_token(self, monkeypatch):
+        """``LINEAR_API_TOKEN`` is the token of the task that is running, which
+        need not be the task of the sweep any more."""
+        monkeypatch.setenv("LINEAR_API_TOKEN", "lin_api_of_the_next_task")
+        with patch(
+            "linear_reactions.requests.post",
+            side_effect=[
+                _viewer_response("viewer-bot"),
+                _reactions_response(
+                    [{"id": "r-old-x", "emoji": EMOJI_FAILURE, "user": {"id": "viewer-bot"}}]
+                ),
+                _ok_delete_response(),
+            ],
+        ) as post:
+            linear_reactions._sweep_stale_reactions("issue-1", "lin_api_test")
+
+        sent_with = [call.kwargs["headers"]["Authorization"] for call in post.call_args_list]
+        assert sent_with == ["lin_api_test"] * 3  # the viewer, the reactions, the delete
+
+    def test_logged_answer_does_not_show_the_token_the_sweep_was_given(self, monkeypatch, capfd):
+        """In what ``_graphql`` logs of an answer and of an error, ``***`` stands
+        for a token that was handed to the call. Without one, the text is logged
+        as it is."""
+        import requests as rq
+
+        monkeypatch.setenv("LINEAR_API_TOKEN", "lin_api_of_the_next_task")
+        answer = MagicMock(status_code=200, content=b"{}")
+        answer.json.return_value = {"errors": [{"message": "refused lin_api_test"}]}
+        with patch(
+            "linear_reactions.requests.post",
+            side_effect=[answer, rq.ConnectionError("aborted lin_api_test"), rq.Timeout("slow")],
+        ):
+            linear_reactions._graphql("query Q { x }", {}, token="lin_api_test")
+            linear_reactions._graphql("query Q { x }", {}, token="lin_api_test")
+            linear_reactions._graphql("query Q { x }", {})
+
+        logged = capfd.readouterr().out
+        assert "GraphQL errors: [{'message': 'refused ***'}]" in logged
+        assert "request failed (ConnectionError): aborted ***" in logged
+        assert "request failed (Timeout): slow" in logged
+
+    def test_logged_crash_of_the_sweep_does_not_show_the_token_it_was_given(self, capfd):
+        with patch("linear_reactions.requests.post", side_effect=RuntimeError("boom lin_api_test")):
+            linear_reactions._sweep_stale_reactions_safe("issue-1", "lin_api_test")
+
+        assert "sweep thread crashed (RuntimeError): boom ***" in capfd.readouterr().out
 
 
 class TestAuthCircuitBreaker:
@@ -583,6 +715,27 @@ class TestTransitionIssueState:
         with patch("linear_reactions._graphql", side_effect=fake_graphql):
             linear_reactions._transition_issue_state("issue-1", "started", ["In Progress"])
         assert set_calls == []  # backward move (completed → started) skipped
+
+    def test_without_a_preferred_name_the_lowest_position_state_wins(self):
+        """No state of the type carries a preferred name: take the first one in
+        the team's own workflow order (lowest position; list order breaks a tie)."""
+        states = [
+            {"id": "s-backlog", "name": "Backlog", "type": "backlog", "position": 0},
+            {"id": "s-qa", "name": "QA", "type": "started", "position": 7},
+            {"id": "s-doing", "name": "Doing", "type": "started", "position": 3},
+            {"id": "s-pairing", "name": "Pairing", "type": "started", "position": 3},
+        ]
+        set_calls = []
+
+        def fake_graphql(query, variables):
+            if "IssueStates" in query:
+                return {"issue": {"state": states[0], "team": {"states": {"nodes": states}}}}
+            set_calls.append(variables)
+            return {"issueUpdate": {"success": True}}
+
+        with patch("linear_reactions._graphql", side_effect=fake_graphql):
+            linear_reactions._transition_issue_state("issue-1", "started", ["In Progress"])
+        assert [call["stateId"] for call in set_calls] == ["s-doing"]
 
     def test_no_op_when_already_in_target_state(self):
         set_calls = []

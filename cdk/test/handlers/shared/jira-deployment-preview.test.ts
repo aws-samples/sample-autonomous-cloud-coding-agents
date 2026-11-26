@@ -20,7 +20,8 @@
 import { GetCommand, QueryCommand, UpdateCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { deliverJiraDeploymentPreview } from '../../../src/handlers/shared/jira-deployment-preview';
 import { postIssueCommentAdf, updateIssueCommentAdf } from '../../../src/handlers/shared/jira-feedback';
-import { updateJiraIterationComment } from '../../../src/handlers/shared/jira-preview';
+import { updateJiraIterationComment } from '../../../src/handlers/shared/jira-iteration-comment';
+import { logger } from '../../../src/handlers/shared/logger';
 import { INTEGRATION_NODE_SUFFIX } from '../../../src/handlers/shared/orchestration-integration-node';
 import type { TaskRecord } from '../../../src/handlers/shared/types';
 
@@ -29,20 +30,26 @@ jest.mock('../../../src/handlers/shared/jira-feedback', () => ({
   postIssueCommentAdf: jest.fn(),
   updateIssueCommentAdf: jest.fn(),
 }));
-jest.mock('../../../src/handlers/shared/jira-preview', () => ({
-  ...jest.requireActual('../../../src/handlers/shared/jira-preview'),
+jest.mock('../../../src/handlers/shared/jira-iteration-comment', () => ({
+  ...jest.requireActual('../../../src/handlers/shared/jira-iteration-comment'),
   updateJiraIterationComment: jest.fn(),
 }));
 const post = jest.mocked(postIssueCommentAdf);
 const edit = jest.mocked(updateIssueCommentAdf);
 const iteration = jest.mocked(updateJiraIterationComment);
-const original = {
+const original: TaskRecord = {
   task_id: 'original',
+  user_id: 'user-1',
+  status: 'COMPLETED',
   repo: 'owner/repo',
+  branch_name: 'bgagent/original/eng-42',
   channel_source: 'jira',
   head_sha: 'initial',
   channel_metadata: { jira_cloud_id: 'cloud', jira_issue_key: 'ENG-42' },
-} as TaskRecord;
+  status_created_at: 'COMPLETED#2026-01-01T00:00:00Z',
+  created_at: '2026-01-01T00:00:00Z',
+  updated_at: '2026-01-01T00:00:00Z',
+};
 const shot = 'https://cdn.example.com/shot.png';
 const preview = 'https://preview.example.com';
 let records: Record<string, TaskRecord>;
@@ -79,6 +86,8 @@ beforeEach(() => {
   edit.mockResolvedValue({ ok: true });
   iteration.mockResolvedValue({ ok: true });
 });
+
+afterEach(() => jest.restoreAllMocks());
 
 test('standalone Jira task posts ADF screenshot and live links on its stored issue', async () => {
   await deliver();
@@ -183,6 +192,9 @@ test('the standalone claim is conditional on an absent claim attribute', async (
   expect(claim.input.ConditionExpression).toBe('attribute_exists(task_id) AND attribute_not_exists(jira_preview_claimed)');
 });
 
+// A stored `false` would block every later delivery, as `true` does.
+const _claimIsTrueOrAbsent: [Exclude<TaskRecord['jira_preview_claimed'], true | undefined>] extends [never] ? true : never = true;
+
 test('an iteration with a synthetic reply target never calls Jira', async () => {
   await deliver({
     ...original,
@@ -198,8 +210,24 @@ test('an iteration with a synthetic reply target never calls Jira', async () => 
 });
 
 test('untrusted screenshots are rejected before claiming or posting', async () => {
+  const warn = jest.spyOn(logger, 'warn');
   await deliverJiraDeploymentPreview(ddb, 'tasks', 'registry', original, 'owner/repo', 'initial', 'https://localhost/a', preview, () => 30_000);
-  expect(send).not.toHaveBeenCalled();
+  expect(records.original.jira_preview_claimed).toBeUndefined();
+  expect(post).not.toHaveBeenCalled();
+  expect(warn).toHaveBeenCalledWith('Jira deployment preview feedback failed (non-fatal)', {
+    event: 'screenshot.jira_delivery_failed', task_id: 'original', error: 'Jira screenshot URL is not allowed',
+  });
+});
+
+test('an untrusted screenshot does not keep an iteration from refreshing its status comment', async () => {
+  // The writer is mocked here. The real one leaves out a URL that is not allowed,
+  // which jira-iteration-comment.test.ts covers.
+  const task = {
+    ...original,
+    channel_metadata: { ...original.channel_metadata, trigger_comment_id: 'trigger', iteration_reply_comment_id: '123' },
+  };
+  await deliverJiraDeploymentPreview(ddb, 'tasks', 'registry', task, 'owner/repo', 'initial', 'https://localhost/a', preview, () => 30_000);
+  expect(iteration).toHaveBeenCalledWith(ddb, 'tasks', 'original', expect.anything(), 'ENG-42', '123', undefined, expect.anything());
   expect(post).not.toHaveBeenCalled();
 });
 

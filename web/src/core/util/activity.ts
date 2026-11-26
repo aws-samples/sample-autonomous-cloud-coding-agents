@@ -47,6 +47,22 @@ function str(meta: Record<string, unknown>, key: string): string | null {
   return typeof v === 'string' && v.trim() !== '' ? v.trim() : null;
 }
 
+/** How a pull request ended, in the words of its line in the activity. */
+const PULL_REQUEST_ENDS = {
+  merged: 'Pull request merged on GitHub',
+  closed: 'Pull request closed on GitHub without merging',
+} as const;
+
+/**
+ * How the task's pull request ended, when the event is the one ABCA writes once its hourly
+ * read of GitHub has recorded that; null for any other event and for a state it does not know.
+ * The task the API returns does not carry it, so the activity and the page's banner both read it here.
+ */
+export function pullRequestEnd(event: TaskEvent): keyof typeof PULL_REQUEST_ENDS | null {
+  const state = event.event_type === 'pr_outcome_recorded' ? event.metadata?.pr_state : null;
+  return state === 'merged' || state === 'closed' ? state : null;
+}
+
 /** Shows a path relative to the repository when possible: `/workspace/acme/api/src/a.ts` → `src/a.ts`. */
 export function displayPath(path: string, repo?: string | null): string {
   const name = repo?.split('/')[1];
@@ -125,6 +141,7 @@ function milestone(meta: Record<string, unknown>): Pick<ActivityLine, 'text' | '
     const message = /\):\s*(.*)$/s.exec(details)?.[1];
     return { kind: 'message', text: message ? `Read your message: "${shorten(message, 80)}"` : 'Read your message' };
   }
+  if (name === 'approval_requested') return { kind: 'problem', text: `Asked for approval: ${str(meta, 'reason') ?? 'an action needs approval'}` };
   if (name === 'approval_granted') return { kind: 'step', text: 'Your approval came through, so it carried on' };
   if (name === 'approval_denied') return { kind: 'problem', text: 'You said no, so it skipped that action' };
   if (name === 'approval_timed_out') return { kind: 'problem', text: 'Nobody answered the approval request in time' };
@@ -136,7 +153,13 @@ function milestone(meta: Record<string, unknown>): Pick<ActivityLine, 'text' | '
     if (phase === 'start') {
       if (area === 'working') return { kind: 'step', text: 'Started on the change' };
       if (area === 'checking') return { kind: 'step', text: 'Checking that it builds and the tests pass' };
-      if (area === 'pull-request') return { kind: 'step', text: 'Opening a pull request' };
+      if (area === 'pull-request') {
+        // By the name of the step: a task without a repository delivers its result (`deliver`), and
+        // an iteration, a review or a restack ends on a pull request that exists (`resolve_pr`).
+        if (/deliver/i.test(key)) return { kind: 'step', text: 'Delivering the result' };
+        if (/resolve/i.test(key)) return { kind: 'step', text: 'Finishing up on the pull request' };
+        return { kind: 'step', text: 'Opening a pull request' };
+      }
       return null;
     }
     if (phase === 'failed') return { kind: 'problem', text: area === 'checking' ? 'The build or tests failed' : `Step "${key}" failed` };
@@ -176,8 +199,14 @@ export function describeEvent(event: TaskEvent, repo?: string | null, step?: Too
     }
     case 'agent_blocked':
       return { ...base, kind: 'problem', text: str(meta, 'remediation_hint') ?? 'It got stuck and could not continue' };
-    case 'approval_requested':
-      return { ...base, kind: 'problem', text: `Asked for approval: ${str(meta, 'reason') ?? 'an action needs approval'}` };
+    case 'pr_outcome_recorded': {
+      // The line carries GitHub's time for the merge or the close. The event's own is the time of the read,
+      // minutes to days later: it stands in when the metadata holds nothing that reads as a time.
+      const end = pullRequestEnd(event);
+      const closedAt = str(meta, 'pr_closed_at');
+      const at = closedAt !== null && !Number.isNaN(Date.parse(closedAt)) ? closedAt : event.timestamp;
+      return end && { ...base, at, kind: 'step', text: PULL_REQUEST_ENDS[end] };
+    }
     case 'task_failed':
       return { ...base, kind: 'problem', text: str(meta, 'reason') ? `Stopped: ${str(meta, 'reason')}` : 'Stopped with an error' };
     case 'task_completed':

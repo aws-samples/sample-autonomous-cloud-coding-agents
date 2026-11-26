@@ -1,0 +1,63 @@
+name: emulator
+# ADR-013 Tier 2a: runs ABCA's real handler, CLI and agent code against the AWS Emulator
+# (https://github.com/aws/aws-emulator) instead of module-level SDK mocks. No AWS account,
+# role or secret is involved, so it runs unchanged for fork pull requests.
+#
+# Advisory: the job is not in the required status checks of the `main` ruleset, so a red run
+# is visible on the pull request but does not block the merge. To make it required, add the
+# job name ("Emulator integration tests") to the ruleset; it already runs on merge_group,
+# which a required check must do or the merge queue deadlocks (#327).
+#
+# A workflow of its own and not a step of the build job, on purpose: that job is the required
+# check `build (agentcore)`, and a red run of this advisory tier must not turn it red.
+on:
+  pull_request: {}
+  merge_group: {}
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: emulator-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  emulator:
+    name: Emulator integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      CI: "true"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install mise
+        uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785 # v5.2.8
+        with:
+          version: 2026.10.25 # exact mise release for every workflow (#890); bump by PR
+          cache: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.x
+
+      - name: Install dependencies
+        run: mise run install
+
+      # Builds the pinned, signature-verified emulator image, starts a fresh emulator on
+      # loopback, runs the cdk, cli and agent emulator suites, and stops it.
+      - name: Emulator integration tests
+        run: mise run test:integration
+
+      - name: Emulator log (on failure)
+        if: failure()
+        run: |
+          docker ps -a --filter name=abca-aws-emulator --format '{{.Names}}' \
+            | xargs -r -n1 docker logs --tail 200 || true

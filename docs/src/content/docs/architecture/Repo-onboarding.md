@@ -1,13 +1,11 @@
 ---
-title: Repo onboarding
+title: "Repository onboarding"
 ---
-
-# Repository onboarding
 
 Before users can submit tasks for a repository, that repository must be onboarded to the platform. Onboarding registers the repo and produces a per-repo configuration that the orchestrator uses at task time: compute strategy, model, credentials, networking, and pipeline customizations. If a user submits a task for a non-onboarded repo, the API returns `422 REPO_NOT_ONBOARDED`.
 
 - **Use this doc for:** the Blueprint construct interface, RepoConfig schema, override precedence, compute strategy interface, and pipeline customization model.
-- **For practical usage:** see [Quick Start](../guides/QUICK_START.mdx) for onboarding your first repo and [User Guide](/sample-autonomous-cloud-coding-agents/using/overview) for per-repo overrides.
+- **For practical usage:** see [Quick Start](/sample-autonomous-cloud-coding-agents/getting-started/quick-start) for onboarding your first repo and [User Guide](/sample-autonomous-cloud-coding-agents/using/overview) for per-repo overrides.
 - **Related docs:** [ORCHESTRATOR.md](/sample-autonomous-cloud-coding-agents/architecture/orchestrator) for how the orchestrator consumes blueprint config, [COMPUTE.md](/sample-autonomous-cloud-coding-agents/architecture/compute) for compute backends, [SECURITY.md](/sample-autonomous-cloud-coding-agents/architecture/security) for custom step trust boundaries.
 
 ## Why onboarding?
@@ -36,11 +34,11 @@ For operators with IAM access to the deployed stack, `bgagent repo onboard` and 
 | **Soft-delete** | `status=removed` + 30-day TTL on stack removal | Same semantics on `offboard` |
 | **Custom runtime / token IAM** | `additionalRuntimeArns` / `additionalSecretArns` in CDK | Stored in the row, but orchestrator IAM still requires a CDK deploy |
 | **Cedar, egress, pipeline steps** | Supported via construct props | Not exposed — use CDK |
-| **Audit trail** | CloudFormation change set + deploy logs | CLI stdout only today (see [ADR-017](/sample-autonomous-cloud-coding-agents/architecture/adr-017-operator-cli-repo-onboarding)) |
+| **Audit trail** | CloudFormation change set + deploy logs | CLI stdout only today (see [ADR-017](/sample-autonomous-cloud-coding-agents/decisions/adr-017-operator-cli-repo-onboarding)) |
 
 Use the CLI path for quick day-2 registration with platform defaults (runtime ARN, GitHub token secret). Use CDK when the repo needs durable infrastructure, custom IAM, Cedar policies, egress rules, or pipeline customization. The onboard command prints notes explaining which platform defaults apply and when a redeploy is still required.
 
-See also: [Using the CLI — operator commands](/sample-autonomous-cloud-coding-agents/using/overview#operator-commands-stack-admin) and [ADR-017](/sample-autonomous-cloud-coding-agents/architecture/adr-017-operator-cli-repo-onboarding).
+See also: [Using the CLI — operator commands](/sample-autonomous-cloud-coding-agents/using/using-the-cli#operator-commands-stack-admin) and [ADR-017](/sample-autonomous-cloud-coding-agents/decisions/adr-017-operator-cli-repo-onboarding).
 
 ### Blueprint construct
 
@@ -83,7 +81,15 @@ interface BlueprintProps {
 }
 ```
 
-At deploy time, the construct creates a CDK custom resource that writes (PutItem) the `RepoConfig` record with `status: 'active'`. When removed from the stack, it soft-deletes (`status: 'removed'`). Redeploying with updated props overwrites the record.
+At deploy time, the construct creates a CDK custom resource that writes the `RepoConfig` record:
+
+- **Create** (the first deploy of the construct): `PutItem` writes the whole record with `status: 'active'` and every override the Blueprint declares. It replaces a record that already exists for the repo.
+- **Update** (every later deploy): `UpdateItem` sets `status: 'active'`, `updated_at` and every override the Blueprint declares. It removes the registry asset lists (`mcp_servers`, `cedar_policy_modules`, `skills`) that the Blueprint does not declare, and leaves every other attribute as it is.
+- **Delete** (the construct is removed from the stack): `UpdateItem` soft-deletes the record (`status: 'removed'`).
+
+A redeploy therefore does not overwrite the record. An override that was deleted from the Blueprint keeps its last value: a deleted `agent.maxBudgetUsd` is still the repo's default budget, and a deleted `agent.modelId` still selects the old model. This holds for every override except the asset lists: `compute_type`, `runtime_arn`, `model_id`, `max_turns`, `max_budget_usd`, `memory_token_budget`, `system_prompt_overrides`, `github_token_secret_arn`, `poll_interval_ms`, `build_command`, `lint_command`, `egress_allowlist`, `cedar_policies` and `approval_gate_cap`. An empty string or an empty list does not clear one either.
+
+The update is selective on purpose. `bgagent repo onboard` writes the same record ([ADR-017](/sample-autonomous-cloud-coding-agents/decisions/adr-017-operator-cli-repo-onboarding)), and the update runs on every deploy: if it cleared what the Blueprint does not declare, an unrelated deploy would delete a value an operator set with the CLI, such as a model pin. So a Blueprint owns the attributes it declares, which every deploy writes again, and the three asset lists. Any other attribute stays as its last writer left it. To clear one, see [Removing a per-repo override](/sample-autonomous-cloud-coding-agents/customizing/per-repo-overrides#removing-a-per-repo-override).
 
 ### RepoConfig schema
 
@@ -127,7 +133,7 @@ From lowest to highest priority:
 | `model_id` | `global.anthropic.claude-opus-5-5` | injected by the stack as `ANTHROPIC_MODEL` from `bedrockGeoRegion`; `agent/src/config.py` holds the no-env fallback — see [Model configuration](/sample-autonomous-cloud-coding-agents/developer-guide/model-configuration) |
 | `max_turns` | 100 | Platform constant |
 | `max_budget_usd` | None (unlimited) | No platform default by design — a global ceiling would kill long tasks mid-change. Set a per-repo default with Blueprint `agent.maxBudgetUsd` (`0.01`–`100`, validated at synth) or per task with `--max-budget` / `max_budget_usd`. See [Per-repo overrides](/sample-autonomous-cloud-coding-agents/customizing/per-repo-overrides) for the complete list of surfaces a budget can come from |
-| `memory_token_budget` | 2000 | Platform constant |
+| `memory_token_budget` | 2000 | Platform constant (`DEFAULT_MEMORY_TOKEN_BUDGET` in `cdk/src/handlers/shared/memory.ts`). Set a per-repo value with Blueprint `agent.memoryTokenBudget` (a positive integer, validated at synth); there is no per-task override |
 | `github_token_secret_arn` | Stack-level secret | CDK stack props |
 | `poll_interval_ms` | 30000 | Orchestrator constant |
 
@@ -139,7 +145,7 @@ The orchestrator reads `RepoConfig` at task time. Each pipeline step consumes sp
 |---|---|
 | `load-blueprint` | `compute_type`, `custom_steps`, `step_sequence` |
 | `admission-control` | `status` (defense-in-depth) |
-| `hydrate-context` | `github_token_secret_arn`, `system_prompt_overrides` |
+| `hydrate-context` | `github_token_secret_arn`, `system_prompt_overrides`, `memory_token_budget` |
 | `pre-flight` | `github_token_secret_arn` |
 | `start-session` | `compute_type`, `runtime_arn`, `model_id`, `max_turns`, `max_budget_usd` |
 | `await-agent-completion` | `poll_interval_ms` |

@@ -13,7 +13,6 @@
 .gitleaks.toml                      @aws-samples/coding-agents-admin
 .gitleaksignore                     @aws-samples/coding-agents-admin
 .mergify.yml                        @aws-samples/coding-agents-admin
-.npmignore                          @aws-samples/coding-agents-admin
 .pre-commit-config.yaml             @aws-samples/coding-agents-admin
 .semgrep                            @aws-samples/coding-agents-admin
 .threat-composer                    @aws-samples/coding-agents-admin

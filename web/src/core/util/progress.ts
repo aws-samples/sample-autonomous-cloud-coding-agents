@@ -18,7 +18,7 @@
  */
 
 import type { TaskDetail, TaskEvent } from '../api/types';
-import { stepArea, type StepArea } from './activity';
+import { pullRequestEnd, stepArea, type StepArea } from './activity';
 import { formatDuration } from './format';
 import { hasStaleHeartbeat } from './task-health';
 
@@ -83,7 +83,7 @@ function minutesSince(iso: string | null, now: Date): number | null {
 }
 
 /** One plain sentence about where the task stands, or null while it is simply working. */
-export function outcomeOf(task: TaskDetail, now: Date = new Date()): Outcome | null {
+export function outcomeOf(task: TaskDetail, events: readonly TaskEvent[], now: Date = new Date()): Outcome | null {
   switch (task.status) {
     case 'AWAITING_APPROVAL':
       return { type: 'warning', title: 'Waiting for your approval', text: 'The agent paused before an action that a person has to approve. Approve or deny it below.', offer: 'approval' };
@@ -94,10 +94,16 @@ export function outcomeOf(task: TaskDetail, now: Date = new Date()): Outcome | n
         title: task.queue_position ? `Waiting in line (number ${task.queue_position})` : 'Waiting to start',
         ...(task.estimated_wait_s ? { text: `Should start in about ${formatDuration(task.estimated_wait_s)}.` } : {}),
       };
-    case 'COMPLETED':
-      return task.pr_url
-        ? { type: 'success', title: `Done: pull request${task.pr_number ? ` #${task.pr_number}` : ''} is ready for review` }
-        : { type: 'success', title: 'Done' };
+    case 'COMPLETED': {
+      if (!task.pr_url) return { type: 'success', title: 'Done' };
+      const pullRequest = `pull request${task.pr_number ? ` #${task.pr_number}` : ''}`;
+      // The task the API returns does not say how its pull request ended. The event of ABCA's read of GitHub
+      // does, once it is written and among the events: until then the pull request is the one the task left.
+      const end = events.map(pullRequestEnd).find((state) => state !== null);
+      if (end === 'merged') return { type: 'success', title: `Done: ${pullRequest} was merged` };
+      if (end === 'closed') return { type: 'info', title: `Done: ${pullRequest} was closed without merging` };
+      return { type: 'success', title: `Done: ${pullRequest} is ready for review` };
+    }
     case 'CANCELLED':
       return { type: 'info', title: 'Cancelled', offer: 'retry' };
     case 'TIMED_OUT':

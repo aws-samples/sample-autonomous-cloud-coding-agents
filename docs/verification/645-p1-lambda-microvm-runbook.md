@@ -21,7 +21,7 @@ world and must be adjusted by whoever runs this again:
 |---|---|---|
 | 1.2 | ~~unescaped `ParameterValue=agentcore,lambda-microvm`; bootstrap without `--force`~~ | **CORRECTED IN PLACE** — the comma is now escaped (`agentcore\,lambda-microvm`) and both bootstrap invocations carry `--force`. F14/F10 are the evidence; nothing is left to adjust here |
 | 2.2 | "a 443-only security group" and one `AWS::Lambda::NetworkConnector` | **two** security groups (443-only runtime, 443 + 80 build) and **two** connectors, plus a connector operator role; a seventh output `MicrovmBuildEgressConnectorArns` |
-| 2.3 | `list-stack-resources --query "…|[0]"` | needs `--no-paginate` (F14) |
+| 2.3 | `list-stack-resources --query "…\|[0]"` | needs `--no-paginate` (F14) |
 | 4.3 | `export IMAGE_VERSION=1` | the service returns `1.0`; there are two builds per version (one per chipset) |
 | 5.1 / 5.9 | `--image-identifier "$IMAGE_NAME"` | an **ARN** is required (F3); use the `imageArn` the script prints |
 | 5.9 | 16 384 / 16 385-byte probes | the real boundary is **4 096 / 4 097** (F6) |
@@ -145,7 +145,7 @@ python3 --version | tee "$EVIDENCE_DIR/python-version.txt"
 zip -v | tee "$EVIDENCE_DIR/zip-version.txt"
 rsync --version | tee "$EVIDENCE_DIR/rsync-version.txt"
 
-MISE_EXPERIMENTAL=1 mise run install
+mise run install
 ```
 
 **Raw fallback if `mise` is absent:**
@@ -216,7 +216,7 @@ context is not a substitute for this CloudFormation parameter.
 # AdministratorAccess attached while looking like a success (F10). Note also that
 # BootstrapVariant stays 'AWS CDK: Default Resources' afterwards, so every future
 # non-forced bootstrap refuses again.
-MISE_EXPERIMENTAL=1 mise //cdk:bootstrap -- --force
+mise //cdk:bootstrap -- --force
 
 # The comma MUST be backslash-escaped. The CLI's shorthand parser otherwise splits
 # on it and rejects the call (F14):
@@ -297,11 +297,11 @@ only if specifically requested, and destroy every scratch bootstrap resource.
 and logs exist while no image or orchestrator image configuration exists.
 
 ```bash
-MISE_EXPERIMENTAL=1 mise //cdk:synth -- \
+mise //cdk:synth -- \
   "$STACK_NAME" --context compute_type=lambda-microvm \
   2>&1 | tee "$EVIDENCE_DIR/substrate-synth.txt"
 
-MISE_EXPERIMENTAL=1 mise //cdk:deploy -- \
+mise //cdk:deploy -- \
   "$STACK_NAME" --require-approval never \
   --context compute_type=lambda-microvm \
   2>&1 | tee "$EVIDENCE_DIR/substrate-deploy.txt"
@@ -422,7 +422,7 @@ service that omits tags as a defect rather than silently accepting it.
 ```bash
 env AWS_REGION=eu-central-1 AWS_DEFAULT_REGION=eu-central-1 \
   CDK_DEFAULT_REGION=eu-central-1 CDK_DEFAULT_ACCOUNT="$ACCOUNT_ID" \
-  MISE_EXPERIMENTAL=1 mise //cdk:synth -- \
+  mise //cdk:synth -- \
   "$STACK_NAME" --context compute_type=lambda-microvm \
   >"$EVIDENCE_DIR/unsupported-region-synth.txt" 2>&1 && {
     echo "ERROR: unsupported-region synth unexpectedly succeeded" >&2; exit 1;
@@ -451,7 +451,7 @@ env AWS_REGION=eu-central-1 AWS_DEFAULT_REGION=eu-central-1 \
 ```bash
 env AWS_REGION=eu-central-1 AWS_DEFAULT_REGION=eu-central-1 \
   CDK_DEFAULT_REGION=eu-central-1 CDK_DEFAULT_ACCOUNT="$ACCOUNT_ID" \
-  MISE_EXPERIMENTAL=1 mise //cdk:synth -- \
+  mise //cdk:synth -- \
   "$STACK_NAME" --context compute_type=lambda-microvm \
   --context microvm_region_override=true \
   2>&1 | tee "$EVIDENCE_DIR/unsupported-region-override-synth.txt"
@@ -635,7 +635,7 @@ quota external fact.
 IAM scoping.
 
 ```bash
-MISE_EXPERIMENTAL=1 mise //cdk:deploy -- \
+mise //cdk:deploy -- \
   "$STACK_NAME" --require-approval never \
   --context compute_type=lambda-microvm \
   --context microvm_image_identifier="$IMAGE_NAME" \
@@ -1037,7 +1037,7 @@ take `--region`/`--stack-name`; configured Region is a fallback; API commands
 also need Cognito configuration/login.
 
 ```bash
-MISE_EXPERIMENTAL=1 mise //cli:build
+mise //cli:build
 bgagent() { node cli/lib/bin/bgagent.js "$@"; }
 bgagent configure --stack-name "$STACK_NAME" --region "$AWS_REGION"
 bgagent platform outputs --stack-name "$STACK_NAME" --region "$AWS_REGION"
@@ -1182,7 +1182,7 @@ follow the returned conflict remedy and record actual order.
 the account's reusable CDK bootstrap.
 
 ```bash
-MISE_EXPERIMENTAL=1 mise //cdk:destroy -- \
+mise //cdk:destroy -- \
   "$STACK_NAME" --force \
   --context compute_type=lambda-microvm \
   --context microvm_image_identifier="$IMAGE_NAME" \

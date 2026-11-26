@@ -3,5 +3,4 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
-export MISE_EXPERIMENTAL=1
 exec mise run build

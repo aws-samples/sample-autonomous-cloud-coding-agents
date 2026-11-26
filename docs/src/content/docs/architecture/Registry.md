@@ -1,8 +1,6 @@
 ---
-title: Registry
+title: "Agent asset registry"
 ---
-
-# Agent asset registry
 
 A **registry asset** is a versioned, immutable-per-version runtime artifact that a task can load — an MCP server, a Cedar policy module, or a skill. Today those artifacts are vendored into the container image (`agent/src/channel_mcp.py`), inlined on the Blueprint construct (Cedar policies), or committed to a repo (`.mcp.json`). None of them are versioned, none carry an audit trail, and adding one means a **core-code change plus a CDK deploy**. The registry replaces that with a catalog: publishers push typed, versioned records via an API; blueprints pin them by `registry://kind/namespace/name@constraint`; the orchestrator resolves the pins at task start; and the agent receives a resolved bundle.
 
@@ -34,12 +32,18 @@ A **registry asset** is a versioned, immutable-per-version runtime artifact that
 
 | Kind | MVP status | Runtime payload | Applied by |
 |------|-----------|----------------|-----------|
-| `mcp_server` | **implemented E2E** | `.mcp.json` connection config (transport/url/headers/tool_prefix) | agent → merged into `.mcp.json` |
+| `mcp_server` | **implemented E2E** | `.mcp.json` connection config (transport/url/headers). `tool_prefix` is accepted but not applied: the server is keyed `<namespace>__<name>`, so the tools of `acme/pdf-tools` surface as `mcp__acme__pdf-tools__*` | agent → merged into `.mcp.json` |
 | `cedar_policy_module` | **implemented E2E** | `cedar_text` (Cedar policy source) | orchestrator → merged into the `cedar_policies` payload (byte-identical to inline blueprint policies) → agent `PolicyEngine` |
 | `skill` | **implemented E2E** | `prompt_fragment` (+ `tool_hints`) | agent → appended to the system prompt |
 | `plugin`, `subagent`, `prompt_fragment`, `capability` | **reserved** | — | — (grammar accepts them; publish rejects until a loader ships) |
 
 **Cedar parity.** Registry Cedar text reaches the agent through the **same** `cedar_policies` payload field as inline blueprint policies, so it is byte-identical from the `PolicyEngine`'s view. **Skills** are prompt text only: a skill cannot invoke tools; its `tool_hints` are advisory prose referencing tools an MCP server separately provides (no transitive dependency — the operator attaches both).
+
+### 2.1 Runtime network restriction for MCP servers
+
+The agent connects to an `mcp_server` asset from inside the task's compute session, so the session's egress rules decide whether the server can be reached. On every compute backend (AgentCore, ECS and Lambda MicroVMs) the runtime security group allows outbound TCP 443 only; [COMPUTE.md](/sample-autonomous-cloud-coding-agents/architecture/compute#network-architecture) describes that rule and the DNS Firewall allowlist. An `http` or `sse` server therefore has to be served on port 443, the default of an `https://` URL: a server on another port is not supported on any backend. A `stdio` server starts inside the session, and the calls it makes are bound by the same rules.
+
+Neither publish (§7.1) nor resolution (§8) looks at the port or tests connectivity. A pin to a server the session cannot reach resolves and loads like any other: the task starts, and the agent cannot use the server's tools.
 
 ## 3. Substrate mapping (the core design)
 
@@ -68,7 +72,7 @@ Agent Registry has no namespace concept, so ABCA folds `kind/namespace/name` int
 
 ## 5. Provisioning
 
-The registry itself is provisioned by a CDK **Provider-framework custom resource** (`cdk/src/constructs/registry.ts`), because standalone `CreateRegistry` and `DeleteRegistry` are asynchronous and there is no CDK L1/L2 construct yet. `onEvent` starts the operation; `isComplete` polls `GetRegistry` until `READY` or until deletion returns not found. Standalone deletion removes the registry and its records, so the custom resource no longer drains records first. The stack exposes `AgentRegistryId` / `AgentRegistryArn` outputs.
+The registry itself is provisioned by a CDK **Provider-framework custom resource** (`cdk/src/constructs/registry.ts`), because standalone `CreateRegistry` and `DeleteRegistry` are asynchronous and there is no CDK L1/L2 construct yet. `onEvent` starts the operation; `isComplete` polls `GetRegistry` until `READY` or until deletion returns not found. AWS refuses `DeleteRegistry` while the registry holds a record, so on deletion both handlers first delete the records, for a bounded time per invocation, and then the registry. The stack exposes `AgentRegistryId` / `AgentRegistryArn` outputs.
 
 The namespace migration is a **fresh-registry cutover** for ABCA. The custom-resource type changes from `Custom::AgentCoreRegistry` to `Custom::AgentRegistry`, forcing CloudFormation replacement because a registry id from the former namespace cannot be updated through the standalone API. Existing assets are not copied by this deployment: re-publish them into the new registry, or use AWS's migration tooling outside ABCA before switching workloads.
 
@@ -98,7 +102,8 @@ So the port's **`publish` is a multi-call operation**, not one SDK call:
 
 ```
 CreateRegistryRecord → poll until not CREATING
-  → (if autoApprove) SubmitRegistryRecordForApproval → UpdateRegistryRecordStatus(APPROVED)
+  → SubmitRegistryRecordForApproval
+  → (if autoApprove) UpdateRegistryRecordStatus(APPROVED)
 ```
 
 "Dev auto-approve" therefore means *ABCA orchestrating these calls under an approver identity*, not the Agent Registry `autoApproval` flag. This maps cleanly onto the two Cognito groups (§9): a `RegistryPublisher` publishes (record lands `PENDING_APPROVAL` after submit); a `RegistryApprover` drives the final `UpdateRegistryRecordStatus`.
@@ -122,6 +127,7 @@ The registry API is a **separate API Gateway** from the main Task API (its own `
 
 - Auth: `RegistryPublisher`. `auto_approve` additionally requires `RegistryApprover`.
 - Validates kind ∈ MVP kinds (reserved kinds rejected), namespace/name shape, exact semver.
+- For `mcp_server` the runtime is validated as well: `transport` is `http`, `sse` or `stdio`; `url` (http, sse) or `command` (stdio) is a non-empty string; `headers`, when present, is an object with string values and `args` a list of strings; a field other than `transport`, `url`, `command`, `args`, `headers` and `tool_prefix` is refused. A runtime that fails one of these is answered `400`.
 - **Immutability:** an existing `(kind, namespace, name, version)` → `409 REGISTRY_VERSION_EXISTS`.
 - Response `201`: `{ kind, namespace, name, version, status, storage_mode }`.
 
@@ -160,7 +166,7 @@ The registry API is a **separate API Gateway** from the main Task API (its own `
 |--------|-----------|----------|
 | `APPROVED` | yes | silent |
 | `DEPRECATED` | yes | resolves + `warnings: ["DEPRECATED"]` |
-| `DRAFT`, `PENDING_APPROVAL`, `REJECTED`, `CREATING` | no | not a candidate; if the only match → `NO_MATCHING_VERSION` |
+| any other (`DRAFT`, `PENDING_APPROVAL`, `REJECTED`, `CREATING`, `UPDATING`, `CREATE_FAILED`, `UPDATE_FAILED`), including a status the service adds later | no | not a candidate; if the only match → `NO_MATCHING_VERSION` |
 
 **Fail-closed:** any unresolved ref fails task admission with `REGISTRY_RESOLUTION_FAILED`. A running task never re-resolves or substitutes. A candidate whose descriptor is present but unparseable rejects the ref with `MALFORMED` — it is never silently skipped in favour of a lower valid version, so a corrupt payload cannot cause a stale downgrade (#791).
 
@@ -191,7 +197,21 @@ The strict grammar is implemented by `parseRef` (TS) and `parse_ref` (Python), k
 
 **PR 1 (this work)** ships the resolver library, port, adapter, provisioning, API, and CLI — purely additive; nothing in the orchestrator/agent calls it yet.
 
-**PR 2** wired the resolve step in the orchestrator (not create-task — see note below): it collects `registry://` refs from the Blueprint, resolves them via the `RegistryClient` (fail-closed — an unresolved ref fails the task), stamps `resolved_assets: [{kind, id, version}]` on the `TaskRecord`, threads the bundle into the agent payload, and loads `mcp_server` assets (merge into `.mcp.json`).
+**PR 2** wired the resolve step in the orchestrator (not create-task — see note below): it collects `registry://` refs from the Blueprint, resolves them via the `RegistryClient` (fail-closed — an unresolved ref fails the task), stamps `resolved_assets: [{kind, id, version}]` on the `TaskRecord`, threads the bundle into the agent payload, and loads `mcp_server` assets (merge into `.mcp.json`). An `mcp_server` asset whose key (`<namespace>__<name>`) or connection config contains `linear`, in any letter case, cannot be loaded: the agent runtime removes every such server from `.mcp.json` ([ADR-016](/sample-autonomous-cloud-coding-agents/decisions/adr-016-pluggable-identity-and-auth): the agent must have no Linear tools), and the task fails with `RegistryAssetLoadError` before the agent starts.
+
+The merged `.mcp.json` may hold secrets (bearer headers, a token in a URL, an API-key argument), so the agent runtime makes git leave the file out of the commits made in the clone:
+
+- Through the clone's `.git/info/exclude`, when the repository does not track `.mcp.json`.
+- With git's `skip-worktree` flag, when the repository tracks the file, or when the exclude file does not make git ignore it (for example because the repository's own `.gitignore` re-includes it).
+
+Where that cannot be established, the task fails with `RegistryAssetLoadError` before the agent starts:
+
+- The repository's `.mcp.json` is a symbolic link (the config is not written through it).
+- The `skip-worktree` flag cannot be read back from the index (another git process holds `index.lock`, `.mcp.json` has an unresolved merge conflict, or sparse checkout is enabled in the clone).
+
+A file that the exclude file covers needs no index entry, so a held `index.lock` or sparse checkout does not fail its task.
+
+For the length of a task that loads a registry `mcp_server`, the file is platform-managed. A change the agent itself makes to `.mcp.json` is not committed either, and git reports the path as ignored or as outside the sparse-checkout definition. The agent log records the cause in a `Registry: … is platform-managed for this task` line. [#760](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/760) tracks lifting that limit.
 
 **PR 3** added the `cedar_policy_module` and `skill` loaders: resolved Cedar text is concatenated into the **same** `cedar_policies` payload field as inline blueprint policies (byte-identical from the `PolicyEngine`'s view — cedar-parity holds by construction), and resolved skill `prompt_fragment`s are appended to the system prompt (`prompt_builder.py`, after channel guidance).
 

@@ -9,6 +9,7 @@ tested independently of the real (SDK/git/boto3-backed) handlers.
 from __future__ import annotations
 
 import json
+import os
 from typing import TYPE_CHECKING
 
 import pytest
@@ -98,9 +99,9 @@ def test_runs_all_steps_in_order_and_succeeds():
             {"kind": "ensure_pr", "strategy": "create"},
         ]
     )
-    handlers: dict[str, StepHandler] = {
-        k: track for k in ("clone_repo", "hydrate_context", "run_agent", "ensure_pr")
-    }
+    handlers: dict[str, StepHandler] = dict.fromkeys(
+        ("clone_repo", "hydrate_context", "run_agent", "ensure_pr"), track
+    )
     result = run_workflow(wf, _ctx(wf), handlers=handlers)
     assert seen == ["clone_repo", "hydrate_context", "run_agent", "ensure_pr"]
     assert result.succeeded
@@ -199,6 +200,36 @@ def test_milestone_uses_kind_when_name_absent():
     progress = _RecordingProgress()
     run_workflow(wf, _ctx(wf, progress), handlers={"run_agent": _ok()})
     assert "step:run_agent:start" in progress.milestones
+
+
+def test_running_step_is_named_in_the_environment_of_the_commit_hook(monkeypatch):
+    # prepare-commit-msg.sh writes WORKFLOW_ID and WORKFLOW_STEP on a commit as its
+    # Workflow-Id and Workflow-Step trailers (#560).
+    monkeypatch.setenv("WORKFLOW_ID", "default/agent-v1")  # left by an earlier run
+    monkeypatch.setenv("WORKFLOW_STEP", "deliver")
+    named: list[tuple[str, str]] = []
+
+    def record(step: Step, ctx: StepContext) -> StepOutcome:
+        named.append((os.environ["WORKFLOW_ID"], os.environ["WORKFLOW_STEP"]))
+        return StepOutcome(kind=step.kind, name=_step_key(step), status="succeeded")
+
+    wf = _workflow(
+        [
+            {"kind": "clone_repo", "name": "setup"},
+            {"kind": "run_agent", "name": "implement"},
+            {"kind": "ensure_pr", "strategy": "create"},  # no name: named by its kind
+        ]
+    )
+    handlers: dict[str, StepHandler] = dict.fromkeys(
+        ("clone_repo", "run_agent", "ensure_pr"), record
+    )
+    run_workflow(wf, _ctx(wf), handlers=handlers)
+
+    assert named == [
+        ("coding/new-task-v1", "setup"),
+        ("coding/new-task-v1", "implement"),
+        ("coding/new-task-v1", "ensure_pr"),
+    ]
 
 
 class TestCheckpointResume:
@@ -634,6 +665,34 @@ class TestCloneAndHydrateHandlers:
         outcome = _handle_hydrate_context(wf.steps[0], ctx)
         assert ctx.system_prompt == ""
         assert outcome.data["system_prompt_built"] is False
+
+    @staticmethod
+    def _hydrate_user_prompt(**ctx_fields) -> str:
+        """The user prompt after the hydrate_context step, whose context was
+        hydrated by the orchestrator with the prompt ``HYDRATED``."""
+        from models import HydratedContext
+        from workflow.runner import _handle_hydrate_context
+
+        wf = _workflow(
+            [
+                {"kind": "hydrate_context"},
+                {"kind": "run_agent"},
+                {"kind": "ensure_pr", "strategy": "create"},
+            ]
+        )
+        ctx = _real_ctx(wf, hydrated=HydratedContext(user_prompt="HYDRATED"), **ctx_fields)
+        _handle_hydrate_context(wf.steps[0], ctx)
+        return ctx.user_prompt
+
+    def test_hydrate_context_takes_the_hydrated_prompt(self):
+        assert self._hydrate_user_prompt() == "HYDRATED"
+
+    def test_hydrate_context_keeps_a_prompt_the_caller_built(self):
+        # The pipeline hands the step the hydrated prompt with the attachment
+        # references appended. The step must not put the bare one back.
+        built = "HYDRATED\n\nAttachments: `Read /workspace/.attachments/att-1/report.txt`"
+
+        assert self._hydrate_user_prompt(user_prompt=built) == built
 
 
 class TestRunAgentHandler:

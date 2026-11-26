@@ -63,6 +63,15 @@ describe('Bootstrap template', () => {
         'ABCA: Least-Privilege Bootstrap',
       );
     });
+
+    // #701: the CDK CLI compares the default above with the `BootstrapVariant` parameter of
+    // the account's CDKToolkit stack: see the comment above the bootstrap task in cdk/mise.toml.
+    it('replaces a bootstrap of another variant, because the bootstrap task passes --force', () => {
+      const command = readFileSync(join(__dirname, '..', '..', 'mise.toml'), 'utf-8')
+        .split('\n')
+        .find((line) => line.startsWith('run = "npx cdk bootstrap '));
+      expect(command).toContain(' --force ');
+    });
   });
 
   describe('Conditions', () => {
@@ -132,6 +141,10 @@ describe('Bootstrap template', () => {
       expect(passRole!.Resource).toEqual([
         'arn:aws:iam::*:role/backgroundagent-dev-LambdaMicrovmComputeBuild*',
         'arn:aws:iam::*:role/backgroundagent-dev-LambdaMicrovmComputeConnector*',
+        'arn:aws:iam::*:role/backgroundagent-dev-MicrovmBuildRole',
+        'arn:aws:iam::*:role/backgroundagent-dev-*-MicrovmBuildRole',
+        'arn:aws:iam::*:role/backgroundagent-dev-MicrovmConnectorRole',
+        'arn:aws:iam::*:role/backgroundagent-dev-*-MicrovmConnectorRole',
       ]);
     });
 
@@ -154,6 +167,25 @@ describe('Bootstrap template', () => {
   });
 
   describe('CloudFormationExecutionRole', () => {
+    it('can pass only itself to CloudFormation for nested stacks', () => {
+      const role = template.Resources.CloudFormationExecutionRole.Properties;
+      const policy = role.Policies?.find(
+        (item: any) => item.PolicyName === 'PassExecutionRoleToCloudFormation',
+      );
+      expect(policy?.PolicyDocument).toEqual({
+        Version: '2012-10-17',
+        Statement: [{
+          Sid: 'PassSelfToCloudFormation',
+          Effect: 'Allow',
+          Action: 'iam:PassRole',
+          Resource: {
+            'Fn::Sub': `arn:\${AWS::Partition}:iam::\${AWS::AccountId}:role/${role.RoleName['Fn::Sub']}`,
+          },
+          Condition: { StringEquals: { 'iam:PassedToService': 'cloudformation.amazonaws.com' } },
+        }],
+      });
+    });
+
     it('exists and is an IAM Role', () => {
       expect(template.Resources.CloudFormationExecutionRole).toBeDefined();
       expect(template.Resources.CloudFormationExecutionRole.Type).toBe('AWS::IAM::Role');

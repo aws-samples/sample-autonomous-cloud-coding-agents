@@ -17,9 +17,6 @@
  *  SOFTWARE.
  */
 
-import { execFile } from 'child_process';
-import * as readline from 'readline';
-import { CloudFormationClient, DescribeStacksCommand } from '@aws-sdk/client-cloudformation';
 import {
   CreateSecretCommand,
   GetSecretValueCommand,
@@ -28,11 +25,13 @@ import {
   ResourceExistsException,
   SecretsManagerClient,
 } from '@aws-sdk/client-secrets-manager';
-import { DynamoDBDocumentClient, PutCommand, ScanCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, GetCommand, PutCommand, ScanCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { Command } from 'commander';
 import { ApiClient } from '../api-client';
-import { loadConfig, loadCredentials } from '../config';
+import { cognitoSubFromSession } from '../auth';
+import { loadConfig } from '../config';
 import { CliError } from '../errors';
+import { requireDeployedFeature } from '../feature-guard';
 import { formatJson } from '../format';
 import { generateInviteCode } from '../invite-code';
 import {
@@ -46,7 +45,6 @@ import {
   readExistingOauthTokens,
   resolveStoredGrantFields,
   readExistingWebhookSecret,
-  resolveWebhookSecretAction,
   StoredLinearOauthToken,
 } from '../linear-oauth';
 import {
@@ -64,8 +62,9 @@ import {
   probeLinearVaultCallbackUrl,
   upsertLinearCredentialProvider,
 } from '../linear-vault';
-import { awaitOauthCallback, CALLBACK_URL } from '../oauth-callback-server';
-import { promptSecret } from '../prompt-secret';
+import { awaitOauthCallback, CALLBACK_URL, openBrowser, randomState } from '../oauth-callback-server';
+import { promptLine, promptSecret } from '../prompt-secret';
+import { findStackOutput } from '../stack-outputs';
 import type { CliConfig } from '../types';
 import { makeClient, makeDocClient } from '../ua';
 
@@ -97,13 +96,13 @@ const LINEAR_VAULT_WORKLOAD_NAME_FALLBACK = 'abca_linear_oauth';
  * way: consent succeeds, the grant just lands under an identity nothing resolves.
  */
 async function resolveLinearVaultWorkloadName(region: string, stackName: string): Promise<string> {
-  // No `.catch` here on purpose. `getStackOutput` already returns null for a stack that
+  // No `.catch` here on purpose. `findStackOutput` already returns null for a stack that
   // does not exist and rethrows auth and other errors, and swallowing those turned a
   // DescribeStacks AccessDenied into the fallback name — which no current stack uses,
   // since the name became stack-scoped. The operator then got a mint failure against an
   // identity that was never provisioned instead of being told they cannot read the stack.
   // The fallback is for the one thing it documents: a stack deployed before this output.
-  const fromStack = await getStackOutput(region, stackName, 'LinearVaultWorkloadName');
+  const fromStack = await findStackOutput(region, stackName, 'LinearVaultWorkloadName');
   return fromStack?.trim() || LINEAR_VAULT_WORKLOAD_NAME_FALLBACK;
 }
 
@@ -127,7 +126,7 @@ export function parsePastedAuthorization(raw: string): { code: string; state?: s
 }
 
 /** Agent name used when the operator does not choose one. */
-export const DEFAULT_APP_NAME = 'bgagent';
+const DEFAULT_APP_NAME = 'bgagent';
 
 /**
  * The literal token a comment must contain to summon the agent.
@@ -138,7 +137,7 @@ export const DEFAULT_APP_NAME = 'bgagent';
  * here rather than imported because the CLI does not depend on the CDK package;
  * the two must be changed together.
  */
-export const COMMENT_TRIGGER_TOKEN = '@bgagent';
+const COMMENT_TRIGGER_TOKEN = '@bgagent';
 
 /**
  * Column the `←` annotations start at, so operator-chosen values of different
@@ -173,7 +172,6 @@ export interface LinearAppTemplateOptions {
   readonly developerName?: string;
   readonly developerUrl?: string;
   readonly description?: string;
-  readonly awsCallbackUrl?: string;
   /**
    * AgentCore provider callback URL (`…/identities/oauth2/callback/<uuid>`), for
    * rendering a COMPLETE template once the credential provider exists. Omitted on
@@ -210,7 +208,7 @@ export interface LinearAppTemplateOptions {
 const WEBHOOK_URL_HINT = '(run `bgagent linear webhook-info`)';
 
 /** ABCA's Linear webhook endpoint for a configured API URL. */
-export function linearWebhookUrl(apiUrl: string): string {
+function linearWebhookUrl(apiUrl: string): string {
   return `${apiUrl.replace(/\/+$/, '')}/linear/webhook`;
 }
 
@@ -248,12 +246,12 @@ export async function resolveTemplateCallbackUrls(args: {
   const region = args.region ?? config?.region;
   if (!region) return { webhookUrl };
 
-  // `getStackOutput` already returns null for a stack that is not deployed and throws for
+  // `findStackOutput` already returns null for a stack that is not deployed and throws for
   // anything else. Keep that distinction: a swallowed credentials or region error would
   // render a vault stack's template as a no-vault one, with no sign anything went wrong.
   const failures: string[] = [];
   const hostedConsentUrl = args.stackName
-    ? await getStackOutput(region, args.stackName, 'LinearVaultConsentUrl').catch((err: unknown) => {
+    ? await findStackOutput(region, args.stackName, 'LinearVaultConsentUrl').catch((err: unknown) => {
       failures.push(`stack ${args.stackName} in ${region} (${(err as Error)?.name ?? 'Error'})`);
       return null;
     })
@@ -295,13 +293,7 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
   const developerName = opts.developerName ?? 'ABCA';
   const developerUrl = opts.developerUrl ?? 'https://github.com/aws-samples/sample-autonomous-cloud-coding-agents';
   const description = opts.description ?? 'Autonomous Background Coding Agent';
-  // Phase 2.0b-O2 (shipped) uses a localhost callback that
-  // `bgagent linear setup` listens on for the one-time redirect. The
-  // `awsCallbackUrl` option is retained for the parked Phase 2.0a flow
-  // and (rare) operators forwarding the callback through a fixed
-  // upstream URL — but the localhost default works for everyone running
-  // setup interactively from their machine.
-  const callbackUrl = opts.awsCallbackUrl ?? 'http://localhost:8080/oauth/callback';
+  const callbackUrl = CALLBACK_URL;
 
   const bar = '═'.repeat(BANNER_WIDTH);
   return [
@@ -355,7 +347,7 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
     '  Webhooks:            ON      ← this IS ABCA\'s webhook; no second one needed',
     `    Webhook URL:       ${opts.webhookUrl ?? WEBHOOK_URL_HINT}`,
     '    Data change events:  Issues + Comments   ← both, see below',
-    '    App events:          all OFF             ← see below',
+    '    App events:          all OFF             ← see below (one opt-in exception)',
     '    Copy the "Webhook signing secret" (lin_wh_…) — setup asks for it.',
     '',
     'Click Create, then come back with the Client ID, Client Secret and that',
@@ -383,7 +375,9 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
     '    signing secrets, and only one of them can verify.',
     '  • Leave App events (agent session / inbox / permissions) OFF, or Linear turns',
     '    @mentions into an interactive agent surface instead of a comment thread,',
-    '    which breaks the reply/reaction UX ABCA depends on.',
+    '    which breaks the reply/reaction UX ABCA depends on. Exception: a stack',
+    '    deployed with `--context enableLinearAgentSessions=true` answers natively —',
+    '    tick only "Agent session events" there (see the Linear setup guide).',
     `  • The app name is not the trigger: that is always \`${COMMENT_TRIGGER_TOKEN} <request>\`, however`,
     '    you name the app (Linear lowercases the name for the display handle).',
     '  • actor=app cannot also request the `admin` scope — Linear rejects the pair.',
@@ -402,59 +396,94 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
  */
 const SLUG_RE = /^[a-zA-Z0-9_-]{4,50}$/;
 
-/**
- * Open `url` in the user's default browser. Returns true on best-effort
- * success, false if no opener is available (e.g. headless SSH session) so
- * callers can fall back to printing the URL.
- *
- * Uses `child_process.execFile` directly rather than a dependency like
- * `open` — no need for a 200-line module to spawn one shell command.
- */
-export function openBrowser(url: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    let opener: { cmd: string; args: string[] };
-    if (process.platform === 'darwin') {
-      opener = { cmd: 'open', args: [url] };
-    } else if (process.platform === 'win32') {
-      // `start` is a cmd.exe builtin; URLs need empty title arg + escaping.
-      opener = { cmd: 'cmd', args: ['/c', 'start', '""', url] };
-    } else {
-      opener = { cmd: 'xdg-open', args: [url] };
-    }
-    execFile(opener.cmd, opener.args, (err) => {
-      resolve(!err);
-    });
-  });
+/** Refuse a slug that {@link SLUG_RE} does not accept: the first check of the five commands that take the slug as their argument. */
+function assertWorkspaceSlug(slug: string): void {
+  if (!SLUG_RE.test(slug)) {
+    throw new CliError(
+      `Invalid workspace slug '${slug}'. Must be 4-50 chars matching [a-zA-Z0-9_-]. `
+      + 'This is the Linear urlKey, e.g. \'acme\' from linear.app/acme/...',
+    );
+  }
 }
 
 /**
- * Check whether the LinearWebhookSecret already holds a real Linear
- * signing secret (vs CDK's autogenerated placeholder). Used to decide
- * whether to prompt for the webhook secret on subsequent setup runs.
+ * Refuse a slug under which the workspace just authorized must not be stored. `setup` and
+ * `add-workspace` ask once Linear has said which workspace that is, before they write. The
+ * bundle is named by the slug and the registry row is keyed by the workspace, so under a
+ * slug that another workspace is registered with, the writes would replace that
+ * workspace's token and leave its row reading this one's.
+ *
+ * - `priorRow`, the row found for the slug, is this workspace's: go on, also when the
+ *   workspace was renamed in Linear.
+ * - It is another workspace's: refuse, whatever the urlKey of the one authorized. A
+ *   workspace can give its urlKey up and another take it, and a workspace can be registered
+ *   under a slug that is not its urlKey. One registration does not count when the urlKey
+ *   is the slug: the one `remove-workspace` ended, whose bundle is deleted and whose row is
+ *   only a record.
+ * - No row, and a urlKey that is not the slug: the browser was on another workspace, or
+ *   the slug is mistyped. Refuse, unless SLUG_RE rejects the urlKey (Linear has
+ *   three-character URL keys): such a workspace can only be set up under another slug, so
+ *   a refusal would leave it no way in.
+ */
+function assertSlugFreeFor(
+  slug: string,
+  organization: LinearOrganization,
+  priorRow: Record<string, unknown> | undefined,
+): void {
+  if (priorRow?.linear_workspace_id === organization.id) {
+    return;
+  }
+  if (organization.urlKey && organization.urlKey !== slug) {
+    if (priorRow || SLUG_RE.test(organization.urlKey)) {
+      throw new CliError(
+        `Slug '${slug}' does not match Linear's urlKey '${organization.urlKey}' for the authorized `
+        + 'workspace, so nothing was written to Secrets Manager or the registry. Re-run with the correct '
+        + `slug, or authorize workspace '${slug}' instead of '${organization.urlKey}'. If `
+        + `'${organization.urlKey}' is onboarded on this stack, check it with \`bgagent platform `
+        + 'doctor`: the authorization just given can replace the grant it had.',
+      );
+    }
+    return;
+  }
+  if (priorRow && priorRow.revoked_reason !== 'admin_removed') {
+    throw new CliError(
+      `Slug '${slug}' is registered to another Linear workspace (${String(priorRow.linear_workspace_id)}), `
+      + 'whose token the one just issued would have replaced, so nothing was written to Secrets Manager '
+      + 'or the registry. If that workspace is still used, set it up again under its own urlKey; if not, '
+      + `remove it with \`bgagent linear remove-workspace ${slug}\`. Then re-run this command. If the `
+      + 'workspace just authorized is onboarded on this stack, check it with `bgagent platform doctor`: '
+      + 'the authorization just given can replace the grant it had.',
+    );
+  }
+}
+
+/**
+ * The real Linear signing secret that the stack-wide LinearWebhookSecret
+ * holds, or undefined while it holds CDK's autogenerated placeholder or
+ * does not exist. `setup` compares it with the secret a workspace stores:
+ * only one that differs from it is known not to be a copy of it.
  *
  * Linear's webhook signing secrets start with `lin_wh_` — the placeholder
  * is a CDK-generated random JSON-encoded string that doesn't match.
- *
- * Returns true if a real secret is stored, false otherwise (including
- * any error fetching — best-effort; a re-prompt is harmless).
  */
-export async function isWebhookSecretConfigured(
+export async function readStackWideWebhookSecret(
   client: SecretsManagerClient,
   secretArn: string,
-): Promise<boolean> {
+): Promise<string | undefined> {
   try {
     const result = await client.send(new GetSecretValueCommand({ SecretId: secretArn }));
     const value = result.SecretString;
-    return typeof value === 'string' && value.startsWith('lin_wh_');
+    return typeof value === 'string' && value.startsWith('lin_wh_') ? value.trim() : undefined;
   } catch (err) {
-    // Only treat "secret doesn't exist yet" as a clean false — any
+    // Only treat "secret doesn't exist yet" as nothing stored — any
     // other error (AccessDenied, KMS decrypt failure, throttling) is
     // actionable and we should surface it. A bare `catch { return
-    // false }` here makes setup re-prompt for a webhook secret when
-    // the real problem is IAM, which is a confusing UX for operators.
+    // undefined }` here leaves setup nothing to compare a stored secret
+    // with when the real problem is IAM, and a secret inherited from
+    // this one then counts as the workspace's own.
     const errorName = (err as { name?: string }).name;
     if (errorName === 'ResourceNotFoundException') {
-      return false;
+      return undefined;
     }
     const message = err instanceof Error ? err.message : String(err);
     throw new CliError(
@@ -463,20 +492,6 @@ export async function isWebhookSecretConfigured(
       + '`secretsmanager:GetSecretValue` on this ARN.',
     );
   }
-}
-
-/**
- * Generate an opaque, URL-safe `state` value for OAuth CSRF protection.
- * 32 bytes of crypto-randomness — enough that collisions and guesses
- * are not realistic concerns.
- */
-function randomState(): string {
-  // Lazy import to keep `crypto` out of module-load surface for non-OAuth
-  // uses of this command file.
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { randomBytes } = require('crypto') as typeof import('crypto');
-  const STATE_BYTES = 32;
-  return randomBytes(STATE_BYTES).toString('base64url');
 }
 
 /**
@@ -544,17 +559,9 @@ export async function findReusableOauthAppCredentials(
   sm: SecretsManagerClient,
   registryTableName: string,
 ): Promise<{ clientId: string; clientSecret: string; sourceSlug: string } | null> {
-  // Limit=1 keeps the scan cheap. The registry table is one row per
-  // workspace install (small N) so a scan is acceptable here.
-  const scan = await ddb.send(new ScanCommand({
-    TableName: registryTableName,
-    FilterExpression: '#status = :active',
-    ExpressionAttributeNames: { '#status': 'status' },
-    ExpressionAttributeValues: { ':active': 'active' },
-    Limit: 1,
-  }));
-  const row = scan.Items?.[0];
-  if (!row || !row.oauth_secret_arn || !row.workspace_slug) {
+  const row = (await listActiveWorkspaceRows(ddb, registryTableName))
+    .find((r) => r.oauth_secret_arn && r.workspace_slug);
+  if (!row) {
     return null;
   }
   const value = await sm.send(new GetSecretValueCommand({ SecretId: row.oauth_secret_arn as string }));
@@ -601,6 +608,12 @@ export async function findReusableOauthAppCredentials(
  * lookup told an already-onboarded workspace to run `setup` again). The registry
  * holds one small row per workspace install, so an unbounded scan is both cheap
  * and correct. Exported for tests.
+ *
+ * A slug can carry two rows: `remove-workspace` keeps the row of the registration it
+ * ends, a workspace whose grant died keeps its row, and another workspace can be
+ * registered with the slug afterwards. An active row is returned then, the one the
+ * removal endpoint takes; without one, a row that is still a registration; whichever
+ * the scan reads first.
  */
 export async function findWorkspaceRowBySlug(
   ddb: DynamoDBDocumentClient,
@@ -612,7 +625,10 @@ export async function findWorkspaceRowBySlug(
     FilterExpression: 'workspace_slug = :s',
     ExpressionAttributeValues: { ':s': slug },
   }));
-  return (result.Items ?? []).find((item) => item.workspace_slug === slug);
+  const rows = (result.Items ?? []).filter((item) => item.workspace_slug === slug);
+  return rows.find((row) => row.status === 'active')
+    ?? rows.find((row) => row.revoked_reason !== 'admin_removed')
+    ?? rows[0];
 }
 
 /**
@@ -647,8 +663,8 @@ export async function listActiveWorkspaceRows(
  *
  * The registry is authoritative when present because it carries `status`, so a revoked
  * install is not offered as a candidate. Installs predating the registry have only the
- * `bgagent-linear-oauth-*` secrets, so that prefix listing is the fallback — the same
- * two-source order `list-projects` uses.
+ * `bgagent-linear-oauth-*` secrets, so that prefix listing is the fallback — and all that
+ * `list-projects` reads, which passes no registry.
  */
 export async function listOnboardedWorkspaceSlugs(args: {
   readonly sm: SecretsManagerClient;
@@ -696,13 +712,14 @@ export type SecretProvenance = 'own' | 'inherited' | 'absent';
 /**
  * Decide whether a workspace's signing secret is provably its own.
  *
- * Sound in ONE direction only, and the asymmetry is the whole point. `mirror-stackwide`
- * can copy nothing except the stack-wide value, so a secret that DIFFERS from it was
- * never mirrored and is therefore owned — a conclusion that cannot be wrong. The
+ * Sound in ONE direction only, and the asymmetry is the whole point. Older releases of
+ * `setup` could mirror nothing except the stack-wide value, so a secret that DIFFERS from
+ * it was never mirrored and is therefore owned — a conclusion that cannot be wrong. The
  * converse is not available: a secret that EQUALS the stack-wide value is equally
- * consistent with a healthy single-workspace install, whose first `setup` stamps the
- * same real secret into both slots. That is why `inherited` withholds a verdict rather
- * than asserting "not owned", and why only the `own` case is written to the registry.
+ * consistent with a healthy single-workspace install, whose first `setup` on such a
+ * release stamped the same real secret into both slots. That is why `inherited` withholds
+ * a verdict rather than asserting "not owned", and why only the `own` case is written to
+ * the registry.
  *
  * A stack with no stack-wide secret at all cannot have mirrored anything, so any stored
  * per-workspace secret there is owned by the same argument.
@@ -836,7 +853,14 @@ export async function findProjectOwnerWorkspace(args: {
       }
       const body = await res.json() as {
         data?: { organization?: { id?: string }; project?: { id?: string } | null };
+        errors?: Array<{ message?: string }>;
       };
+      // An `errors` answer also comes with a 200 (see queryLinearTeamKeys): a token
+      // Linear refuses gets one. That is a failure to report, not the miss below.
+      if (body.errors) {
+        errors.push(`${slug}: ${body.errors.map((e) => e.message).join('; ')}`);
+        continue;
+      }
       // A workspace whose token cannot see the project answers `project: null` with a
       // 200 — that is the "not this workspace" signal, not an error worth reporting.
       const foundId = body.data?.project?.id;
@@ -863,7 +887,6 @@ export function makeLinearCommand(): Command {
       .option('--developer-name <name>', 'Developer name shown on Linear\'s consent screen')
       .option('--developer-url <url>', 'Developer URL shown on Linear\'s consent screen')
       .option('--description <text>', 'App description shown on Linear\'s consent screen')
-      .option('--aws-callback-url <url>', 'AWS-hosted callback URL from create-oauth2-credential-provider')
       .option('--vault-callback-url <url>', 'AgentCore provider callback URL — looked up automatically for --slug; this overrides it')
       .option('--hosted-consent-url <url>', 'Hosted consent page URL — read from the stack automatically; this overrides it')
       .option('--slug <slug>', 'Workspace slug, so an existing vault callback URL can be looked up and listed')
@@ -888,7 +911,6 @@ export function makeLinearCommand(): Command {
           developerName: opts.developerName,
           developerUrl: opts.developerUrl,
           description: opts.description,
-          awsCallbackUrl: opts.awsCallbackUrl,
           vaultCallbackUrl: opts.vaultCallbackUrl ?? looked.vaultCallbackUrl,
           hostedConsentUrl: opts.hostedConsentUrl ?? looked.hostedConsentUrl,
           lookupWarning: looked.lookupWarning,
@@ -997,7 +1019,7 @@ export function makeLinearCommand(): Command {
       .option(
         '--webhook-secret <secret>',
         'Webhook signing secret from the app\'s Webhooks section (else prompted; prefer interactive). '
-        + 'Pass an empty value to skip and set it later with `update-webhook-secret`.',
+        + 'Pass an empty value to keep the secret already stored for this workspace.',
       )
       .option('--no-browser', 'Print the authorization URL instead of opening a browser (for SSH/headless)')
       .option('--no-actor-app', 'Drop actor=app from the OAuth flow (diagnostic: isolates whether agent-install is blocking)')
@@ -1007,13 +1029,9 @@ export function makeLinearCommand(): Command {
         'Finish a hosted consent: the authorization code shown on the consent page. Uses the PKCE '
         + 'verifier saved by the first run, so it must be the same machine and the same workspace.',
       )
+      // eslint-disable-next-line complexity -- predates the ceiling (97, down from 115 when it landed); must not grow
       .action(async (slug: string, opts) => {
-        if (!SLUG_RE.test(slug)) {
-          throw new CliError(
-            `Invalid workspace slug '${slug}'. Must be 4-50 chars matching [a-zA-Z0-9_-]. `
-            + 'This is the Linear urlKey, e.g. \'acme\' from linear.app/acme/...',
-          );
-        }
+        assertWorkspaceSlug(slug);
         const config = loadConfig();
         const region = opts.region || config.region;
         const stackName = opts.stackName;
@@ -1024,9 +1042,9 @@ export function makeLinearCommand(): Command {
           userMappingTable,
           webhookSecretArn,
         ] = await Promise.all([
-          getStackOutput(region, stackName, 'LinearWorkspaceRegistryTableName'),
-          getStackOutput(region, stackName, 'LinearUserMappingTableName'),
-          getStackOutput(region, stackName, 'LinearWebhookSecretArn'),
+          findStackOutput(region, stackName, 'LinearWorkspaceRegistryTableName'),
+          findStackOutput(region, stackName, 'LinearUserMappingTableName'),
+          findStackOutput(region, stackName, 'LinearWebhookSecretArn'),
         ]);
 
         const missing: string[] = [];
@@ -1041,19 +1059,7 @@ export function makeLinearCommand(): Command {
         }
 
         // ─── Resolve caller identity ──────────────────────────────────
-        const creds = loadCredentials();
-        if (!creds?.id_token) {
-          throw new CliError('Not authenticated — run `bgagent login` first.');
-        }
-        let cognitoSub: string;
-        try {
-          cognitoSub = extractCognitoSub();
-        } catch (err) {
-          throw new CliError(
-            `Could not read Cognito sub from cached id_token: ${err instanceof Error ? err.message : String(err)}. `
-            + 'Run `bgagent login` to refresh credentials.',
-          );
-        }
+        const cognitoSub = cognitoSubFromSession();
 
         // ─── Linear OAuth app credentials ──────────────────────────────
         // Prompted up-front so the wizard doesn't get halfway through the
@@ -1099,18 +1105,11 @@ export function makeLinearCommand(): Command {
             + 'after fixing access.',
           );
         }
-        const stackWideAlreadyConfigured = await isWebhookSecretConfigured(sm, webhookSecretArn!);
         // The stack-wide value is only used to tell an INHERITED secret from one this
-        // workspace owns; they are byte-identical on disk otherwise.
-        let stackWideSecretValue: string | undefined;
-        if (stackWideAlreadyConfigured && webhookSecretArn) {
-          try {
-            const sw = await sm.send(new GetSecretValueCommand({ SecretId: webhookSecretArn }));
-            stackWideSecretValue = sw.SecretString?.trim();
-          } catch {
-            stackWideSecretValue = undefined;
-          }
-        }
+        // workspace owns; they are byte-identical on disk otherwise. Read once, and a
+        // failed read stops the run: with nothing to compare against, an inherited
+        // secret would pass for the workspace's own and be recorded as owned.
+        const stackWideSecretValue = await readStackWideWebhookSecret(sm, webhookSecretArn!);
         // A stored secret equal to the stack-wide one was inherited by an earlier
         // mirror, not read from this workspace's webhook — so it does not count as
         // "already have one", and the operator must supply the real thing.
@@ -1143,13 +1142,22 @@ export function makeLinearCommand(): Command {
         }
         if (suppliedWebhookSecret && !suppliedWebhookSecret.startsWith('lin_wh_')) {
           // Reject before consent rather than after: a bad paste is cheap to fix now
-          // and expensive once the operator has been through the browser.
+          // and expensive once the operator has been through the browser. Enter is
+          // offered only where the check above accepts it: with a secret to keep.
           throw new CliError(
             'That does not look like a Linear webhook signing secret (they start with `lin_wh_`). '
-            + 'Copy it from the app\'s Webhooks section, or press Enter to skip and set it later '
-            + `with \`bgagent linear update-webhook-secret ${slug}\`.`,
+            + 'Copy it from the app\'s Webhooks section'
+            + (holdsOwnWebhookSecret ? ', or press Enter to keep the one already stored.' : '.'),
           );
         }
+
+        // The registry row of this slug, if it has one: it says whether the workspace
+        // is on the vault, and which workspace the slug is registered to. No `.catch`:
+        // a read that failed is not "no row". Read before `--code` uses up the saved
+        // consent below, so that a failed read does not cost the operator that consent.
+        const priorRow = workspaceRegistryTable
+          ? await findWorkspaceRowBySlug(makeDocClient({ region }), workspaceRegistryTable, slug)
+          : undefined;
 
         // HOSTED FINISH. `--code` resumes the consent an earlier run started: the
         // PKCE verifier and `state` come from the saved pending entry (the code alone
@@ -1202,13 +1210,9 @@ export function makeLinearCommand(): Command {
         // long-lived Linear credential is stored in Secrets Manager. The fallback is
         // automatic and silent-by-design-but-announced, because AgentCore Identity is
         // not available in every region and onboarding must still work there.
-        const consentPageUrl = await getStackOutput(region, stackName, 'LinearVaultConsentUrl');
+        const consentPageUrl = await findStackOutput(region, stackName, 'LinearVaultConsentUrl');
         // Is this workspace ALREADY on the vault? If so a vault hiccup must not
         // silently move it to Secrets Manager (see the fallback below).
-        const priorRow = workspaceRegistryTable
-          ? await findWorkspaceRowBySlug(makeDocClient({ region }), workspaceRegistryTable, slug)
-            .catch(() => undefined)
-          : undefined;
         const alreadyOnVault = Boolean(priorRow?.provider_name);
         const useVault = Boolean(consentPageUrl) && !resumed;
         // A workspace already on the vault must never take the Secrets-Manager path by
@@ -1543,6 +1547,15 @@ export function makeLinearCommand(): Command {
         }
         console.log(` ✓ (${identity.organization.name ?? identity.organization.urlKey ?? identity.organization.id})`);
 
+        // Stop before the writes when the slug stands for another workspace than the one
+        // authorized: the cases are with assertSlugFreeFor.
+        //
+        // Not on the vault path, which keeps the warning: there AgentCore has stored
+        // this consent under the slug already, and the next run reuses a stored consent
+        // instead of asking again — so a refusal would repeat on every later run.
+        if (!vaultAccessToken) {
+          assertSlugFreeFor(slug, identity.organization, priorRow);
+        }
         if (identity.organization.urlKey && identity.organization.urlKey !== slug) {
           console.log(
             `  ⚠ Slug '${slug}' does not match Linear's urlKey '${identity.organization.urlKey}'. `
@@ -1593,14 +1606,11 @@ export function makeLinearCommand(): Command {
           installed_at: now,
           updated_at: now,
           installed_by_platform_user_id: cognitoSub,
-          // Fold the preserved secret into the INITIAL bundle so that
-          // the OAuth-secret write below lands the correct bundle in ONE
-          // PutSecretValue, and the preserve path skips the later re-write. This
-          // also closes a narrow window — if any fallible step between the two
-          // writes threw, the bundle was left persisted WITHOUT the secret (401
-          // until update-webhook-secret). Only set for a real `lin_wh_` value;
-          // mirror-stackwide / prompt cases add it in the mirror-back below.
-          ...(existingWebhookSecret ? { webhook_signing_secret: existingWebhookSecret } : {}),
+          // The signing secret, in the same write as the token: the one the operator
+          // entered, else the one this workspace already stores (the two checks before
+          // consent leave no third case). Written here so that the registry row below
+          // never records ownership of a secret the bundle does not hold yet.
+          webhook_signing_secret: suppliedWebhookSecret || existingWebhookSecret,
         };
         // Only the Secrets-Manager path self-renews, so only it needs a refresh
         // token. Demanding one on the vault path would reject a correct setup.
@@ -1617,6 +1627,9 @@ export function makeLinearCommand(): Command {
         if (preservedTokens) {
           console.log('  ✓ Kept the existing Secrets Manager token as a fallback');
         }
+        console.log(suppliedWebhookSecret
+          ? '  ✓ Using the webhook signing secret you entered'
+          : '  ✓ Preserving this workspace\'s existing webhook signing secret (re-run — not overwriting)');
 
         // ─── Step 5: Persist registry + user-mapping rows ─────────────
         const ddb = makeDocClient({ region });
@@ -1637,8 +1650,8 @@ export function makeLinearCommand(): Command {
         // Provenance of the signing secret, recorded so verification can tell a
         // workspace's OWN secret from a copy of another workspace's. Derived from where
         // the value came from, never from comparing it to the stack-wide copy: a healthy
-        // single-workspace install holds a secret equal to that copy, because the first
-        // install stamps the same real secret into both slots.
+        // single-workspace install can hold a secret equal to that copy, because the first
+        // install of an older release stamped the same real secret into both slots.
         //
         // Either input proves ownership. `suppliedWebhookSecret` was read off the app
         // being onboarded moments ago, and `holdsOwnWebhookSecret` means a stored
@@ -1690,137 +1703,7 @@ export function makeLinearCommand(): Command {
         // processor drops their tasks with "no linked platform user".
         // The admin self-link picker further down replaces that path.
 
-        // ─── Step 6: Webhook signing secret (per-workspace + stack-wide) ───
-        //
-        // Webhook subscriptions in Linear are workspace-scoped, and Linear
-        // generates a fresh signing secret per subscription. To verify
-        // events from N workspaces we need N signing secrets, looked up
-        // by orgId. We store the workspace's signing secret on its OAuth
-        // bundle (per-workspace path) AND mirror to the stack-wide secret
-        // (back-compat path) when (a) it's the first install (stack-wide
-        // is empty), or (b) the user explicitly asked to rotate.
-        //
-        // The webhook receiver tries per-workspace first and falls back
-        // to the stack-wide secret, so existing installs keep working
-        // without re-onboarding. Multi-workspace installs need each
-        // workspace to own its own per-workspace signing secret — only
-        // the FIRST install can populate the stack-wide one usefully.
-        //
-        // resolveWebhookSecretAction picks one of three outcomes from
-        // (existingWebhookSecret, stackWideAlreadyConfigured):
-        //   • preserve      — this workspace ALREADY has its own `lin_wh_`
-        //                     secret (a re-run). Keep it; do NOT overwrite from
-        //                     the stack-wide fallback, which is a DIFFERENT
-        //                     workspace's secret once >1 is installed. The
-        //                     stack-wide value is NOT necessarily this
-        //                     workspace's, so overwriting from it breaks
-        //                     signature verification for this workspace.
-        //   • mirror-stackwide — no per-workspace secret yet but stack-wide is
-        //                     set: mirror it (correct for the first/only
-        //                     workspace; warn for an additional one).
-        //   • prompt        — nothing to go on: ask for the signing secret.
-        // Rotation is not setup's job: use
-        // `bgagent linear update-webhook-secret <slug>` to rotate.
-        // Both already read before the prompt above.
-        let webhookSigningSecret: string | undefined;
-        const secretAction = resolveWebhookSecretAction(
-          existingWebhookSecret,
-          stackWideAlreadyConfigured,
-          stackWideSecretValue,
-        );
-        if (suppliedWebhookSecret) {
-          // The operator just read this off the app they are onboarding, which is more
-          // authoritative than anything already stored — so no mirror, no inherit, and
-          // no second command afterwards.
-          webhookSigningSecret = suppliedWebhookSecret;
-          console.log('  ✓ Using the webhook signing secret you entered');
-          // Deliberately NOT also stamped as the stack-wide fallback. That fallback
-          // exists for installs predating per-workspace signing; seeding it here
-          // would make the NEXT workspace silently inherit this one's secret instead
-          // of being asked for its own — the failure this prompt removes.
-        } else if (secretAction.kind === 'preserve-inherited') {
-          console.log('  ⚠ This workspace\'s stored webhook signing secret is the STACK-WIDE one,');
-          console.log('    inherited by an earlier run — not read from this workspace\'s webhook.');
-          console.log('    Correct for the first workspace; WRONG for any other, and every');
-          console.log('    delivery then fails signature verification with a 401. Confirm with:');
-          console.log(`      bgagent linear update-webhook-secret ${slug}`);
-          webhookSigningSecret = secretAction.secret;
-        } else if (secretAction.kind === 'preserve') {
-          // This workspace already had its own signing secret — keep it. Do NOT
-          // overwrite from the stack-wide fallback (a DIFFERENT workspace's
-          // secret once >1 is installed). Re-run case; rotation is
-          // `update-webhook-secret`'s job, not setup's.
-          console.log('  ✓ Preserving this workspace\'s existing webhook signing secret (re-run — not overwriting)');
-          webhookSigningSecret = secretAction.secret;
-        } else if (secretAction.kind === 'mirror-stackwide') {
-          // Mirroring is only ever correct for the first/only workspace: the stack-wide
-          // value IS that workspace's own secret. For an additional workspace it copies a
-          // DIFFERENT tenant's secret into this one's bundle, after which both verify
-          // under the same key and either can sign an event whose routing values the
-          // other's are read from.
-          //
-          // Unreachable from here today: the up-front prompt above collects this
-          // workspace's own secret and throws when neither a supplied nor a legitimately
-          // stored one exists, which are the only ways into this branch. Left as-is
-          // rather than hardened, because the value it would produce is no longer
-          // trusted on its own — the receiver rejects a secret that is not recorded as
-          // the workspace's own once a second workspace is active. If that prompt is
-          // ever relaxed, this branch needs to refuse rather than warn.
-          console.log('  ✓ No per-workspace secret yet; mirroring the stack-wide signing secret');
-          console.log('    (if this is an ADDITIONAL workspace, its Linear webhook secret differs —');
-          console.log(`     run \`bgagent linear update-webhook-secret ${slug}\` with this workspace's secret.)`);
-          try {
-            const value = await sm.send(new GetSecretValueCommand({ SecretId: webhookSecretArn! }));
-            if (value.SecretString && value.SecretString.startsWith('lin_wh_')) {
-              webhookSigningSecret = value.SecretString;
-            }
-          } catch (err) {
-            console.log(`  ⚠ Could not read stack-wide secret to mirror: ${err instanceof Error ? err.message : String(err)}`);
-          }
-        } else {
-          const apiBaseUrl = config.api_url.replace(/\/+$/, '');
-          console.log();
-          console.log('  Webhook signing secret needed.');
-          console.log('  In Linear → Settings → API → Webhooks, create a webhook pointing at:');
-          console.log(`    ${apiBaseUrl}/linear/webhook`);
-          console.log('  Subscribe to: Issues AND Comments (Comments carries the @bgagent trigger).');
-          console.log('  Copy the signing secret from the webhook detail page.');
-          console.log();
-          const webhookSecret = await promptSecret('Webhook signing secret (lin_wh_…): ');
-          if (!webhookSecret) {
-            throw new CliError('Webhook signing secret is required.');
-          }
-          if (!webhookSecret.startsWith('lin_wh_')) {
-            throw new CliError(
-              'Webhook signing secrets start with \'lin_wh_\'. Got something different — re-check the Linear webhook detail page.',
-            );
-          }
-          // First install: stamp BOTH stack-wide (back-compat fallback
-          // for installs predating per-workspace signing) and the
-          // per-workspace OAuth bundle (the verifier's primary path).
-          await sm.send(new PutSecretValueCommand({
-            SecretId: webhookSecretArn!,
-            SecretString: webhookSecret,
-          }));
-          console.log('  ✓ Stored webhook signing secret (stack-wide back-compat)');
-          webhookSigningSecret = webhookSecret;
-        }
-
-        // Mirror into the per-workspace OAuth secret so the receiver can look it
-        // up by orgId. In the PRESERVE case the secret is already in `stored`
-        // (folded above) and was written by the OAuth-secret upsert — no re-write
-        // needed. Only mirror-stackwide / prompt produce a NEW secret to persist.
-        if (webhookSigningSecret && webhookSigningSecret !== stored.webhook_signing_secret) {
-          const merged: StoredLinearOauthToken = {
-            ...stored,
-            webhook_signing_secret: webhookSigningSecret,
-            updated_at: new Date().toISOString(),
-          };
-          await upsertOauthSecret(sm, secretName, merged, slug);
-          console.log('  ✓ Mirrored signing secret to per-workspace OAuth bundle');
-        }
-
-        // ─── Step 7: Self-link picker ──────────────────────────────────
+        // ─── Step 6: Self-link picker ──────────────────────────────────
         // With actor=app, Linear's `viewer` returns the bot user, not
         // you. We can't auto-link from the OAuth dance — instead we
         // show the workspace member list so you can pick yourself.
@@ -1867,12 +1750,7 @@ export function makeLinearCommand(): Command {
       .option('--no-actor-app', 'Drop actor=app from the OAuth flow (diagnostic)')
       .option('--no-force-consent', 'Omit prompt=consent (diagnostic)')
       .action(async (slug: string, opts) => {
-        if (!SLUG_RE.test(slug)) {
-          throw new CliError(
-            `Invalid workspace slug '${slug}'. Must be 4-50 chars matching [a-zA-Z0-9_-]. `
-            + 'This is the Linear urlKey, e.g. \'acme\' from linear.app/acme/...',
-          );
-        }
+        assertWorkspaceSlug(slug);
         const config = loadConfig();
         const region = opts.region || config.region;
         const stackName = opts.stackName;
@@ -1886,8 +1764,8 @@ export function makeLinearCommand(): Command {
           workspaceRegistryTable,
           userMappingTable,
         ] = await Promise.all([
-          getStackOutput(region, stackName, 'LinearWorkspaceRegistryTableName'),
-          getStackOutput(region, stackName, 'LinearUserMappingTableName'),
+          findStackOutput(region, stackName, 'LinearWorkspaceRegistryTableName'),
+          findStackOutput(region, stackName, 'LinearUserMappingTableName'),
         ]);
 
         const missing: string[] = [];
@@ -1901,19 +1779,7 @@ export function makeLinearCommand(): Command {
         }
 
         // ─── Resolve caller identity ──────────────────────────────────
-        const creds = loadCredentials();
-        if (!creds?.id_token) {
-          throw new CliError('Not authenticated — run `bgagent login` first.');
-        }
-        let cognitoSub: string;
-        try {
-          cognitoSub = extractCognitoSub();
-        } catch (err) {
-          throw new CliError(
-            `Could not read Cognito sub from cached id_token: ${err instanceof Error ? err.message : String(err)}. `
-            + 'Run `bgagent login` to refresh credentials.',
-          );
-        }
+        const cognitoSub = cognitoSubFromSession();
 
         const sm = makeClient(SecretsManagerClient, { region });
         const ddb = makeDocClient({ region });
@@ -2006,7 +1872,7 @@ export function makeLinearCommand(): Command {
         if (callback.kind !== 'direct-oauth') {
           throw new CliError(
             'Localhost callback returned an AgentCore session_id, not a direct OAuth code. '
-            + 'Verify Linear\'s redirect URI is set to http://localhost:8080/oauth/callback and re-run.',
+            + `Verify Linear's redirect URI is set to ${CALLBACK_URL} and re-run.`,
           );
         }
         if (callback.state !== state) {
@@ -2048,11 +1914,12 @@ export function makeLinearCommand(): Command {
         // Different from `setup`, which is intentionally idempotent: the
         // explicit add-workspace verb implies "new workspace", and silently
         // overwriting a registry row could mask a wrong-account login.
+        // No `Limit`: DynamoDB applies it before the filter (see findWorkspaceRowBySlug),
+        // so `Limit: 1` misses this workspace unless its row is the one row read.
         const dupCheck = await ddb.send(new ScanCommand({
           TableName: workspaceRegistryTable!,
           FilterExpression: 'linear_workspace_id = :id',
           ExpressionAttributeValues: { ':id': identity.organization.id },
-          Limit: 1,
         }));
         if (dupCheck.Items && dupCheck.Items.length > 0) {
           throw new CliError(
@@ -2060,9 +1927,13 @@ export function makeLinearCommand(): Command {
             + 'Use `bgagent linear setup` to re-authorize an existing workspace, or remove the registry row manually before retrying.',
           );
         }
+        // And refuse a slug that another workspace is registered with, whose bundle the
+        // write below would replace: the check `setup` makes.
+        assertSlugFreeFor(slug, identity.organization, await findWorkspaceRowBySlug(ddb, workspaceRegistryTable!, slug));
 
         // ─── Persist token to per-workspace SM ─────────────────────────
-        process.stdout.write('  → Storing OAuth token...');
+        // Built here, while the token is fresh: `expires_at` counts from now, and the
+        // prompt below can keep the operator for minutes.
         const now = new Date().toISOString();
         const stored: StoredLinearOauthToken = {
           access_token: tokenResponse.access_token,
@@ -2083,50 +1954,14 @@ export function makeLinearCommand(): Command {
             + 're-check that the Linear OAuth app permits refresh-token grants.',
           );
         }
-        const secretName = linearOauthSecretName(slug);
-        const oauthSecretArn = await upsertOauthSecret(sm, secretName, stored, slug);
-        console.log(` ✓ (${secretName})`);
-
-        // ─── Persist registry + user-mapping rows ──────────────────────
-        // Fetch team keys for prefix-routing (see same call in `setup`).
-        const teamKeysResult = await queryLinearTeamKeys(`Bearer ${tokenResponse.access_token}`);
-        if (!teamKeysResult.ok) {
-          console.log(
-            '  ⚠ Could not read this workspace\'s Linear team keys — recording the workspace '
-            + 'without them. Issue lookups will fall back to scanning every workspace; re-run '
-            + 'add-workspace later to record team keys for faster prefix-routing.',
-          );
-        }
-        const teamKeys = teamKeysResult.ok ? teamKeysResult.keys : [];
-        await ddb.send(new PutCommand({
-          TableName: workspaceRegistryTable!,
-          Item: {
-            linear_workspace_id: identity.organization.id,
-            workspace_slug: slug,
-            oauth_secret_arn: oauthSecretArn,
-            installed_by_platform_user_id: cognitoSub,
-            installed_at: now,
-            updated_at: now,
-            status: 'active',
-            ...(teamKeys.length > 0 ? { team_keys: teamKeys } : {}),
-          },
-        }));
-        console.log(
-          teamKeys.length > 0
-            ? `  ✓ Recorded workspace in registry (team keys: ${teamKeys.join(', ')})`
-            : '  ✓ Recorded workspace in registry',
-        );
-
-        // No auto-link — see the same comment in `setup` above. With
-        // actor=app, Linear's `viewer` returns the bot user; auto-
-        // linking that maps the wrong UUID. The admin self-link picker
-        // further down replaces that path.
 
         // ─── Per-workspace webhook signing secret ──────────────────────
         // Linear webhook subscriptions are workspace-scoped, with a fresh
         // signing secret per subscription. Each workspace needs to own
         // its own signing secret so the receiver can verify by orgId.
-        // Always prompt — there's no shared secret we can reuse.
+        // Always prompt — there's no shared secret we can reuse. Asked
+        // before anything is stored, so that a bad paste cannot leave an
+        // active registry row whose bundle has no signing secret.
         const apiBaseUrl = config.api_url.replace(/\/+$/, '');
         console.log();
         console.log(`  Webhook signing secret needed for '${slug}'.`);
@@ -2145,16 +1980,54 @@ export function makeLinearCommand(): Command {
           );
         }
 
-        // Re-upsert the OAuth secret with the signing secret merged in.
-        // We don't touch the stack-wide secret here — that's reserved
-        // for the FIRST install (back-compat fallback).
-        const merged: StoredLinearOauthToken = {
-          ...stored,
-          webhook_signing_secret: webhookSigningSecret,
-          updated_at: new Date().toISOString(),
-        };
-        await upsertOauthSecret(sm, secretName, merged, slug);
-        console.log('  ✓ Stored webhook signing secret on per-workspace OAuth bundle');
+        // One write, with the signing secret in it. We don't touch the
+        // stack-wide secret here — that's reserved for the FIRST install
+        // (back-compat fallback).
+        process.stdout.write('  → Storing OAuth token...');
+        const secretName = linearOauthSecretName(slug);
+        const oauthSecretArn = await upsertOauthSecret(
+          sm, secretName, { ...stored, webhook_signing_secret: webhookSigningSecret }, slug,
+        );
+        console.log(` ✓ (${secretName})`);
+
+        // ─── Persist registry + user-mapping rows ──────────────────────
+        // Fetch team keys for prefix-routing (see same call in `setup`).
+        const teamKeysResult = await queryLinearTeamKeys(`Bearer ${tokenResponse.access_token}`);
+        if (!teamKeysResult.ok) {
+          console.log(
+            '  ⚠ Could not read this workspace\'s Linear team keys — recording the workspace '
+            + 'without them. Issue lookups will fall back to scanning every workspace; re-run '
+            + `\`bgagent linear setup ${slug}\` later to record team keys for faster prefix-routing.`,
+          );
+        }
+        const teamKeys = teamKeysResult.ok ? teamKeysResult.keys : [];
+        await ddb.send(new PutCommand({
+          TableName: workspaceRegistryTable!,
+          Item: {
+            linear_workspace_id: identity.organization.id,
+            workspace_slug: slug,
+            oauth_secret_arn: oauthSecretArn,
+            installed_by_platform_user_id: cognitoSub,
+            installed_at: now,
+            updated_at: now,
+            status: 'active',
+            // The operator read the secret off this workspace's webhook a moment ago: the
+            // evidence of ownership that `setup` and `update-webhook-secret` record too.
+            // Without the flag the receiver answers this workspace's deliveries with 401.
+            webhook_secret_owned: true,
+            ...(teamKeys.length > 0 ? { team_keys: teamKeys } : {}),
+          },
+        }));
+        console.log(
+          teamKeys.length > 0
+            ? `  ✓ Recorded workspace in registry (team keys: ${teamKeys.join(', ')})`
+            : '  ✓ Recorded workspace in registry',
+        );
+
+        // No auto-link — see the same comment in `setup` above. With
+        // actor=app, Linear's `viewer` returns the bot user; auto-
+        // linking that maps the wrong UUID. The admin self-link picker
+        // further down replaces that path.
 
         // ─── Self-link picker (same as setup; see explanation there) ───
         console.log();
@@ -2174,7 +2047,8 @@ export function makeLinearCommand(): Command {
         console.log();
         console.log('Next steps:');
         if (!linked) {
-          console.log(`  1. Re-run \`bgagent linear add-workspace ${slug}\` to retry the self-link picker,`);
+          // `setup`, not this command: it refuses the workspace it has just registered.
+          console.log(`  1. Re-run \`bgagent linear setup ${slug}\` to retry the self-link picker,`);
           console.log('     OR label a test issue and the resulting CloudWatch warning will tell you');
           console.log('     your Linear UUID. (Required — without linking, your Linear-triggered tasks are dropped.)');
           console.log('  2. Onboard a Linear project to a GitHub repo:');
@@ -2200,12 +2074,7 @@ export function makeLinearCommand(): Command {
         // installed in the workspace (Linear returns access_denied),
         // so this command sidesteps it entirely — read the existing
         // OAuth bundle, swap the signing-secret field, write it back.
-        if (!SLUG_RE.test(slug)) {
-          throw new CliError(
-            `Invalid workspace slug '${slug}'. Must be 4-50 chars matching [a-zA-Z0-9_-]. `
-            + 'This is the Linear urlKey, e.g. \'acme\' from linear.app/acme/...',
-          );
-        }
+        assertWorkspaceSlug(slug);
         const config = loadConfig();
         const region = opts.region || config.region;
 
@@ -2225,9 +2094,10 @@ export function makeLinearCommand(): Command {
         } catch (err) {
           const errorName = (err as { name?: string }).name;
           if (errorName === 'ResourceNotFoundException') {
+            // `setup` only: `add-workspace` refuses a removed workspace, whose row is kept.
             throw new CliError(
               `Workspace '${slug}' is not installed (no Secrets Manager secret '${secretName}'). `
-              + `Run \`bgagent linear setup ${slug}\` or \`bgagent linear add-workspace ${slug}\` first.`,
+              + `Run \`bgagent linear setup ${slug}\` first.`,
             );
           }
           if (err instanceof CliError) throw err;
@@ -2282,7 +2152,7 @@ export function makeLinearCommand(): Command {
         // A hard failure rather than a warning: the secret write above already
         // succeeded, so a silent miss here leaves the operator believing the fix landed
         // when the state that verification reads is unchanged.
-        const registryTableName = await getStackOutput(region, opts.stackName, 'LinearWorkspaceRegistryTableName');
+        const registryTableName = await findStackOutput(region, opts.stackName, 'LinearWorkspaceRegistryTableName');
         if (!registryTableName) {
           // Refuse rather than skip. Skipping is the failure this whole block exists to
           // avoid: the secret write above already succeeded, so an operator who defaulted
@@ -2354,12 +2224,7 @@ export function makeLinearCommand(): Command {
         // Project→repo mappings are NOT touched: mapping rows carry no
         // workspace id, so they can't be attributed to a workspace. Remove
         // a mapping by project id (see LINEAR_SETUP_GUIDE).
-        if (!SLUG_RE.test(slug)) {
-          throw new CliError(
-            `Invalid workspace slug '${slug}'. Must be 4-50 chars matching [a-zA-Z0-9_-]. `
-            + 'This is the Linear urlKey, e.g. \'acme\' from linear.app/acme/...',
-          );
-        }
+        assertWorkspaceSlug(slug);
 
         const purge = Boolean(opts.purge);
 
@@ -2451,19 +2316,14 @@ export function makeLinearCommand(): Command {
         //
         // Self-linking the admin themselves is folded into `setup` /
         // `add-workspace` — no separate command for that case.
-        if (!SLUG_RE.test(slug)) {
-          throw new CliError(
-            `Invalid workspace slug '${slug}'. Must be 4-50 chars matching [a-zA-Z0-9_-]. `
-            + 'This is the Linear urlKey, e.g. \'acme\' from linear.app/acme/...',
-          );
-        }
+        assertWorkspaceSlug(slug);
         const config = loadConfig();
         const region = opts.region || config.region;
         const stackName = opts.stackName;
 
         const [workspaceRegistryTable, userMappingTable] = await Promise.all([
-          getStackOutput(region, stackName, 'LinearWorkspaceRegistryTableName'),
-          getStackOutput(region, stackName, 'LinearUserMappingTableName'),
+          findStackOutput(region, stackName, 'LinearWorkspaceRegistryTableName'),
+          findStackOutput(region, stackName, 'LinearUserMappingTableName'),
         ]);
         const missing: string[] = [];
         if (!workspaceRegistryTable) missing.push('LinearWorkspaceRegistryTableName');
@@ -2475,27 +2335,18 @@ export function makeLinearCommand(): Command {
           );
         }
 
-        const creds = loadCredentials();
-        if (!creds?.id_token) {
-          throw new CliError('Not authenticated — run `bgagent login` first.');
-        }
-        const callerCognitoSub = extractCognitoSub();
+        const callerCognitoSub = cognitoSubFromSession();
 
         // ─── Resolve workspace + OAuth secret arn ──────────────────────
         const sm = makeClient(SecretsManagerClient, { region });
         const ddb = makeDocClient({ region });
-        const registryScan = await ddb.send(new ScanCommand({
-          TableName: workspaceRegistryTable!,
-          FilterExpression: 'workspace_slug = :slug AND #status = :active',
-          ExpressionAttributeNames: { '#status': 'status' },
-          ExpressionAttributeValues: { ':slug': slug, ':active': 'active' },
-          Limit: 1,
-        }));
-        const registryRow = registryScan.Items?.[0];
+        const registryRow = (await listActiveWorkspaceRows(ddb, workspaceRegistryTable!))
+          .find((row) => row.workspace_slug === slug);
         if (!registryRow) {
+          // `setup` only: `add-workspace` refuses a removed workspace, whose row is kept.
           throw new CliError(
             `Workspace '${slug}' is not in the registry (or status != 'active'). `
-            + `Run \`bgagent linear setup ${slug}\` or \`bgagent linear add-workspace ${slug}\` first.`,
+            + `Run \`bgagent linear setup ${slug}\` first.`,
           );
         }
         const workspaceId = registryRow.linear_workspace_id as string;
@@ -2610,7 +2461,7 @@ export function makeLinearCommand(): Command {
         const config = loadConfig();
         const region = opts.region || config.region;
 
-        const tableName = await getStackOutput(region, opts.stackName, 'LinearProjectMappingTableName');
+        const tableName = await findStackOutput(region, opts.stackName, 'LinearProjectMappingTableName');
         if (!tableName) {
           console.error('Could not find LinearProjectMappingTableName in stack outputs. Deploy the stack first.');
           process.exit(1);
@@ -2652,7 +2503,7 @@ export function makeLinearCommand(): Command {
         } else {
           process.stdout.write('→ Resolving which workspace owns the project...');
           const sm = makeClient(SecretsManagerClient, { region });
-          const registryTableName = await getStackOutput(region, opts.stackName, 'LinearWorkspaceRegistryTableName');
+          const registryTableName = await findStackOutput(region, opts.stackName, 'LinearWorkspaceRegistryTableName');
           const slugs = opts.slug
             ? [opts.slug as string]
             : await listOnboardedWorkspaceSlugs({ sm, ddb, registryTableName: registryTableName ?? undefined });
@@ -2684,6 +2535,14 @@ export function makeLinearCommand(): Command {
           console.log(' ✓');
         }
 
+        // The put replaces the row, so read the date the project was first
+        // mapped and write it back. A read that fails stops the command:
+        // taking the row for new would date the mapping from today.
+        const existing = await ddb.send(new GetCommand({
+          TableName: tableName,
+          Key: { linear_project_id: projectId },
+          ConsistentRead: true,
+        }));
         await ddb.send(new PutCommand({
           TableName: tableName,
           Item: {
@@ -2693,7 +2552,7 @@ export function makeLinearCommand(): Command {
             label_filter: opts.label,
             ...(opts.teamId && { team_id: opts.teamId }),
             status: 'active',
-            onboarded_at: now,
+            onboarded_at: existing.Item?.onboarded_at ?? now,
             updated_at: now,
           },
         }));
@@ -2718,8 +2577,8 @@ export function makeLinearCommand(): Command {
         const region = opts.region || config.region;
 
         const [registryTableName, webhookSecretArn] = await Promise.all([
-          getStackOutput(region, opts.stackName, 'LinearWorkspaceRegistryTableName'),
-          getStackOutput(region, opts.stackName, 'LinearWebhookSecretArn'),
+          findStackOutput(region, opts.stackName, 'LinearWorkspaceRegistryTableName'),
+          findStackOutput(region, opts.stackName, 'LinearWebhookSecretArn'),
         ]);
         if (!registryTableName) {
           console.error('Could not find LinearWorkspaceRegistryTableName in stack outputs. Deploy the stack first.');
@@ -2808,20 +2667,22 @@ export function makeLinearCommand(): Command {
           if (opts.dryRun) {
             console.log(`  would record ${slug} as owning its secret`);
           } else {
-            await ddb.send(new UpdateCommand({
-              TableName: registryTableName,
-              Key: { linear_workspace_id: workspaceId },
-              UpdateExpression: 'SET webhook_secret_owned = :t, updated_at = :u',
-              // Do not resurrect a row deleted mid-run.
-              ConditionExpression: 'attribute_exists(linear_workspace_id)',
-              ExpressionAttributeValues: { ':t': true, ':u': new Date().toISOString() },
-            })).catch((err: unknown) => {
+            try {
+              await ddb.send(new UpdateCommand({
+                TableName: registryTableName,
+                Key: { linear_workspace_id: workspaceId },
+                UpdateExpression: 'SET webhook_secret_owned = :t, updated_at = :u',
+                // Do not resurrect a row deleted mid-run.
+                ConditionExpression: 'attribute_exists(linear_workspace_id)',
+                ExpressionAttributeValues: { ':t': true, ':u': new Date().toISOString() },
+              }));
+            } catch (err) {
               if ((err as { name?: string })?.name === 'ConditionalCheckFailedException') {
                 console.log(`  · ${slug}: row changed underneath the backfill — skipped`);
-                return;
+                continue;
               }
               throw err;
-            });
+            }
             console.log(`  ✓ ${slug}: recorded as owning its secret`);
           }
           recorded += 1;
@@ -2860,35 +2721,10 @@ export function makeLinearCommand(): Command {
         // Resolve the set of workspace slugs to query. Either an
         // explicit `--slug` (one workspace) or every Linear workspace
         // we have an OAuth secret for (list every `bgagent-linear-oauth-*`).
-        let slugs: string[];
-        if (opts.slug) {
-          slugs = [opts.slug];
-        } else {
-          // ListSecretsCommand caps at 100 results per page. Paginate
-          // so a deployment with >100 Linear workspaces (or >100 SM
-          // secrets matching the prefix filter) doesn't silently miss
-          // installs after the first page.
-          const collected: string[] = [];
-          let nextToken: string | undefined;
-          do {
-            const listed = await sm.send(new ListSecretsCommand({
-              Filters: [{ Key: 'name', Values: [LINEAR_OAUTH_SECRET_PREFIX] }],
-              MaxResults: 100,
-              NextToken: nextToken,
-            }));
-            for (const s of listed.SecretList ?? []) {
-              const name = s.Name ?? '';
-              if (name.startsWith(LINEAR_OAUTH_SECRET_PREFIX)) {
-                collected.push(name.slice(LINEAR_OAUTH_SECRET_PREFIX.length));
-              }
-            }
-            nextToken = listed.NextToken;
-          } while (nextToken);
-          slugs = collected;
-          if (slugs.length === 0) {
-            console.error('No Linear OAuth installs found. Run `bgagent linear setup <slug>` first.');
-            process.exit(1);
-          }
+        const slugs: string[] = opts.slug ? [opts.slug] : await listOnboardedWorkspaceSlugs({ sm });
+        if (slugs.length === 0) {
+          console.error('No Linear OAuth installs found. Run `bgagent linear setup <slug>` first.');
+          process.exit(1);
         }
 
         type ProjectRow = {
@@ -2898,11 +2734,12 @@ export function makeLinearCommand(): Command {
           team?: string;
         };
         const rows: ProjectRow[] = [];
+        let answered = 0; // workspaces Linear answered for
 
         // Vault-first, exactly like the runtime resolver. A vault-managed workspace
         // has no usable Secrets Manager token, so reading the bundle alone reports a
         // bare 401 on precisely the workspaces that are working fine.
-        const registryTableForVault = await getStackOutput(region, opts.stackName as string, 'LinearWorkspaceRegistryTableName');
+        const registryTableForVault = await findStackOutput(region, opts.stackName as string, 'LinearWorkspaceRegistryTableName');
         const ddbForVault = registryTableForVault ? makeDocClient({ region }) : undefined;
         // Hoisted out of the per-slug loop below: one DescribeStacks, not one per
         // workspace.
@@ -2911,62 +2748,21 @@ export function makeLinearCommand(): Command {
           : LINEAR_VAULT_WORKLOAD_NAME_FALLBACK;
 
         for (const slug of slugs) {
-          const secretName = linearOauthSecretName(slug);
-          let accessToken: string | undefined;
-
-          if (ddbForVault && registryTableForVault) {
-            const row = await findWorkspaceRowBySlug(ddbForVault, registryTableForVault, slug)
-              .catch(() => undefined);
-            const providerName = row?.provider_name as string | undefined;
-            if (providerName) {
-              const workspaceId = row?.linear_workspace_id as string | undefined;
-              const recorded = row?.vault_user_id as string | undefined;
-              const userId = recorded
-                ?? (workspaceId ? linearVaultUserId(workspaceId) : linearVaultUserIdForSlug(slug));
-              const minted = await mintLinearTokenFromVault({
-                region,
-                workloadName: vaultWorkloadName,
-                providerName,
-                userId,
-              });
-              accessToken = minted.kind === 'token' ? minted.accessToken : undefined;
-            }
-          }
-
-          if (!accessToken) {
-            try {
-              const resp = await sm.send(new GetSecretValueCommand({ SecretId: secretName }));
-              const stored = JSON.parse(resp.SecretString ?? '{}') as { access_token?: string };
-              if (!stored.access_token) {
-                console.error(`Secret ${secretName} is missing access_token; skipping.`);
-                continue;
-              }
-              accessToken = stored.access_token;
-            } catch (err) {
-              console.error(`Failed to read ${secretName}: ${err instanceof Error ? err.message : String(err)}`);
-              continue;
-            }
+          const token = await resolveWorkspaceAccessToken({
+            slug,
+            sm,
+            ddb: ddbForVault,
+            registryTableName: registryTableForVault ?? undefined,
+            region,
+            vaultWorkloadName,
+          });
+          if (token.kind !== 'token') {
+            console.error(`Skipping '${slug}': ${token.reason}`);
+            continue;
           }
 
           try {
-            const res = await fetch('https://api.linear.app/graphql', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${accessToken}`,
-              },
-              body: JSON.stringify({
-                query: '{ projects(first: 100) { nodes { id name teams(first: 1) { nodes { name } } } } }',
-              }),
-            });
-            if (!res.ok) {
-              console.error(`Linear API returned ${res.status} for workspace '${slug}'`);
-              continue;
-            }
-            const body = await res.json() as {
-              data?: { projects?: { nodes?: Array<{ id: string; name: string; teams?: { nodes?: Array<{ name: string }> } }> } };
-            };
-            for (const p of body.data?.projects?.nodes ?? []) {
+            for (const p of await queryLinearProjects(token.accessToken)) {
               rows.push({
                 slug,
                 id: p.id,
@@ -2974,10 +2770,17 @@ export function makeLinearCommand(): Command {
                 team: p.teams?.nodes?.[0]?.name,
               });
             }
+            answered += 1;
           } catch (err) {
             console.error(`Failed to fetch projects for '${slug}': ${err instanceof Error ? err.message : String(err)}`);
             continue;
           }
+        }
+
+        // A workspace that could not be asked: what is printed below is not the whole list.
+        // The reason is on stderr above, and the exit code is all a script reading the JSON has.
+        if (answered < slugs.length) {
+          process.exitCode = 1;
         }
 
         if (opts.output === 'json') {
@@ -2986,8 +2789,12 @@ export function makeLinearCommand(): Command {
         }
 
         if (rows.length === 0) {
-          // The Linear API call succeeded for every workspace (otherwise the
-          // continue-on-error branches above would have logged), so the
+          if (answered < slugs.length) {
+            // Not "no projects": a workspace could not be asked. Its error is on stderr above.
+            console.log(`No projects listed: ${slugs.length - answered} of ${slugs.length} workspace(s) could not be queried (see the errors above).`);
+            return;
+          }
+          // The Linear API call succeeded for every workspace, so the
           // workspaces are reachable — they just don't have any projects.
           // Surface that explicitly so the user doesn't read "No projects
           // visible" as an OAuth-scope or IAM problem and start chasing
@@ -3017,75 +2824,7 @@ export function makeLinearCommand(): Command {
       }),
   );
 
-  return linear;
-}
-
-// ─── Prompts ─────────────────────────────────────────────────────────────────
-
-/**
- * Read a single line from stdin, with an optional default that's accepted on
- * empty input (Enter without typing). Visible echo — use only for non-secret
- * fields. For secrets, use `promptSecret`.
- *
- * Implemented with the same raw-mode stdin pattern as `promptSecret` (just
- * echoing the typed character instead of '*') so that chaining a promptLine
- * call followed by a promptSecret call works — `readline.createInterface`
- * + `rl.close()` would leave stdin in an EOF state and the next prompt
- * would reject immediately on its own readline `close` event.
- */
-function promptLine(label: string, defaultValue?: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const display = defaultValue ? `${label} [${defaultValue}]: ` : `${label}: `;
-    process.stderr.write(display);
-
-    if (!process.stdin.isTTY) {
-      const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
-      rl.once('line', (line) => {
-        rl.close();
-        resolve(line.trim() || defaultValue || '');
-      });
-      rl.once('close', () => reject(new Error('No input provided.')));
-      return;
-    }
-
-    process.stdin.setRawMode(true);
-    process.stdin.resume();
-
-    let value = '';
-
-    const cleanup = () => {
-      process.stdin.removeListener('data', onData);
-      process.stdin.setRawMode(false);
-      process.stdin.pause();
-    };
-
-    const onData = (chunk: Buffer) => {
-      const str = chunk.toString();
-      for (const char of str) {
-        if (char === '\n' || char === '\r') {
-          cleanup();
-          process.stderr.write('\n');
-          resolve(value.trim() || defaultValue || '');
-          return;
-        } else if (char === '') {
-          cleanup();
-          process.stderr.write('\n');
-          reject(new Error('Cancelled.'));
-          return;
-        } else if (char === '' || char === '\b') {
-          if (value.length > 0) {
-            value = value.slice(0, -1);
-            process.stderr.write('\b \b');
-          }
-        } else {
-          value += char;
-          process.stderr.write(char);
-        }
-      }
-    };
-
-    process.stdin.on('data', onData);
-  });
+  return requireDeployedFeature(linear, 'linear');
 }
 
 // ─── Auto-link ───────────────────────────────────────────────────────────────
@@ -3186,6 +2925,42 @@ export async function queryLinearTeamKeys(authorizationHeader: string): Promise<
   }
 }
 
+/** A project as `list-projects` reads it from Linear. */
+interface LinearProject {
+  readonly id: string;
+  readonly name: string;
+  readonly teams?: { readonly nodes?: Array<{ readonly name: string }> };
+}
+
+/**
+ * The projects a workspace's token can see. Throws on every failure, the answer
+ * {@link queryLinearTeamKeys} describes included: HTTP 200 with an `errors` array
+ * and no `data`. Read as a project list, that answer is a workspace without projects.
+ */
+async function queryLinearProjects(accessToken: string): Promise<LinearProject[]> {
+  const res = await fetch('https://api.linear.app/graphql', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify({
+      query: '{ projects(first: 100) { nodes { id name teams(first: 1) { nodes { name } } } } }',
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(`Linear API returned ${res.status}`);
+  }
+  const body = await res.json() as {
+    data?: { projects?: { nodes?: LinearProject[] } };
+    errors?: Array<{ message?: string }>;
+  };
+  if (body.errors) {
+    throw new Error(body.errors.map((e) => e.message).join('; '));
+  }
+  return body.data?.projects?.nodes ?? [];
+}
+
 /**
  * Query the workspace's human members. Used by the inline self-link picker
  * in `setup` / `add-workspace` — surfaces the list of Linear users the
@@ -3248,7 +3023,7 @@ async function runSelfLinkPicker(args: {
   if (!members || members.length === 0) {
     console.log(' ✗');
     console.log('  ⚠ Could not list workspace members; skipping self-link.');
-    console.log(`    Re-run \`bgagent linear ${args.linkMethod === 'add-workspace' ? 'add-workspace' : 'setup'} ${args.slug}\` and answer "y" at the self-link prompt, or label an issue and follow the warning.`);
+    console.log(`    Re-run \`bgagent linear setup ${args.slug}\` to retry the self-link picker, or label an issue and follow the warning.`);
     return false;
   }
   const humans = members.filter((m) => !(m.email ?? '').endsWith('@oauthapp.linear.app'));
@@ -3290,10 +3065,8 @@ async function runSelfLinkPicker(args: {
 }
 
 /**
- * Query the Linear `viewer` + `organization` GraphQL fields with whatever
- * Authorization header the caller hands us. Used both by the legacy
- * PAK-era auto-link (header value = bare `lin_api_…` token) and the
- * Phase 2.0b OAuth dance (header value = `Bearer <oauth-token>`).
+ * Query the Linear `viewer` + `organization` GraphQL fields with the
+ * Authorization header the caller hands us (`Bearer <oauth-token>`).
  *
  * Returns null on any failure so callers can fall back to a warning
  * without blowing up the higher-level flow.
@@ -3323,116 +3096,5 @@ async function queryLinearIdentity(
   } catch (err) {
     console.log(`  ⚠ Could not query Linear identity: ${err instanceof Error ? err.message : String(err)}`);
     return null; // nosemgrep: ts-silent-success-masking -- auto-link is optional setup UX; null skips gracefully so admin can link manually
-  }
-}
-
-/**
- * Query `viewer` + `organization` on the Linear API and write an active
- * LinearUserMapping row binding the token owner to the Cognito user running
- * the CLI. Skips gracefully on any failure — the admin can still link manually.
- *
- * Exported for test. Not part of the public CLI surface.
- */
-export async function autoLinkTokenOwner(args: {
-  region: string;
-  apiToken: string;
-  userMappingTable: string;
-}): Promise<void> {
-  let viewer: LinearViewer;
-  let organization: LinearOrganization;
-  try {
-    const res = await fetch('https://api.linear.app/graphql', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': args.apiToken,
-      },
-      body: JSON.stringify({
-        query: '{ viewer { id name email } organization { id name } }',
-      }),
-    });
-    if (!res.ok) {
-      throw new Error(`Linear API returned ${res.status}`);
-    }
-    const body = await res.json() as { data?: { viewer?: LinearViewer; organization?: LinearOrganization } };
-    if (!body.data?.viewer?.id || !body.data.organization?.id) {
-      throw new Error('Linear API response missing viewer.id or organization.id');
-    }
-    viewer = body.data.viewer;
-    organization = body.data.organization;
-  } catch (err) {
-    console.log(`  ⚠ Could not auto-link token owner: ${err instanceof Error ? err.message : String(err)}`);
-    console.log('    The Linear API token is stored, but you are not yet linked as a platform user.');
-    console.log('    Workarounds:');
-    console.log('      • Re-run `bgagent linear setup` once Linear API is reachable (most common — transient failures).');
-    console.log('      • If the failure persists, an admin can insert your linked identity directly into the');
-    console.log(`        ${args.userMappingTable} DynamoDB table (linear_identity = "<workspaceId>#<viewerId>",`);
-    console.log('        platform_user_id = your Cognito sub). See docs/guides/LINEAR_SETUP_GUIDE.md.');
-    console.log('    `bgagent linear link <code>` is a v3 feature that requires Linear OAuth bot install (not in v1).');
-    return;
-  }
-
-  let cognitoSub: string;
-  try {
-    cognitoSub = extractCognitoSub();
-  } catch (err) {
-    console.log(`  ⚠ Could not resolve your platform user (${err instanceof Error ? err.message : String(err)}).`);
-    console.log('    Run `bgagent login`, then re-run `bgagent linear setup` to finish auto-linking.');
-    return;
-  }
-
-  const ddb = makeDocClient({ region: args.region });
-  await ddb.send(new PutCommand({
-    TableName: args.userMappingTable,
-    Item: {
-      linear_identity: `${organization.id}#${viewer.id}`,
-      platform_user_id: cognitoSub,
-      linear_workspace_id: organization.id,
-      linear_user_id: viewer.id,
-      linked_at: new Date().toISOString(),
-      status: 'active',
-      link_method: 'auto_setup',
-    },
-  }));
-
-  const label = viewer.name ?? viewer.email ?? viewer.id;
-  console.log(`  ✓ Linked Linear user ${label} (${organization.name ?? organization.id}) → platform user ${cognitoSub}`);
-}
-
-function extractCognitoSub(): string {
-  const creds = loadCredentials();
-  if (!creds?.id_token) {
-    throw new Error('not authenticated — run `bgagent login`');
-  }
-  const JWT_SEGMENTS = 3; // header.payload.signature
-  const parts = creds.id_token.split('.');
-  if (parts.length !== JWT_SEGMENTS) {
-    throw new Error('malformed id_token in ~/.bgagent/credentials.json');
-  }
-  const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8')) as { sub?: string };
-  if (!payload.sub) {
-    throw new Error('id_token missing `sub` claim');
-  }
-  return payload.sub;
-}
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-async function getStackOutput(region: string, stackName: string, outputKey: string): Promise<string | null> {
-  try {
-    const cfn = makeClient(CloudFormationClient, { region });
-    const result = await cfn.send(new DescribeStacksCommand({ StackName: stackName }));
-    const outputs = result.Stacks?.[0]?.Outputs ?? [];
-    const output = outputs.find((o) => o.OutputKey === outputKey);
-    return output?.OutputValue ?? null;
-  } catch (err) {
-    // Mirror cli/src/commands/slack.ts: swallow "stack does not exist" as null,
-    // surface auth/other errors.
-    const name = (err as Error)?.name ?? '';
-    const message = (err as Error)?.message ?? '';
-    if (name === 'ValidationError' && /does not exist/i.test(message)) {
-      return null; // nosemgrep: ts-silent-success-masking -- "stack does not exist" is the not-deployed-yet contract; auth/other errors rethrow below
-    }
-    throw err;
   }
 }

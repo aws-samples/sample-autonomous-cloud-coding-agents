@@ -23,7 +23,7 @@ import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import { TaskApi, type TaskApiProps } from '../../src/constructs/task-api';
 
-function createStack(overrides?: Partial<TaskApiProps>): { stack: Stack; template: Template } {
+function createStack(overrides?: Partial<TaskApiProps>, withUploads = false): { stack: Stack; template: Template } {
   const app = new App();
   const stack = new Stack(app, 'TestStack');
 
@@ -39,6 +39,12 @@ function createStack(overrides?: Partial<TaskApiProps>): { stack: Stack; templat
   new TaskApi(stack, 'TaskApi', {
     taskTable,
     taskEventsTable,
+    ...(withUploads && {
+      attachmentsBucket: new s3.Bucket(stack, 'UploadsBucket'),
+      userConcurrencyTable: new dynamodb.Table(stack, 'CapacityTable', {
+        partitionKey: { name: 'user_id', type: dynamodb.AttributeType.STRING },
+      }),
+    }),
     ...overrides,
   });
 
@@ -92,6 +98,31 @@ function createStackWithBudget(): { stack: Stack; template: Template } {
     taskTable,
     taskEventsTable,
     budgetTable,
+  });
+  return { stack, template: Template.fromStack(stack) };
+}
+
+// Presigned-upload flow: the attachments bucket and the user-concurrency table
+// together are what make TaskApi create the confirm-uploads Lambda.
+function createStackWithAttachments(overrides?: Partial<TaskApiProps>): { stack: Stack; template: Template } {
+  const app = new App();
+  const stack = new Stack(app, 'TestStack');
+  const taskTable = new dynamodb.Table(stack, 'TaskTable', {
+    partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+  });
+  const taskEventsTable = new dynamodb.Table(stack, 'TaskEventsTable', {
+    partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'event_id', type: dynamodb.AttributeType.STRING },
+  });
+  const userConcurrencyTable = new dynamodb.Table(stack, 'UserConcurrencyTable', {
+    partitionKey: { name: 'user_id', type: dynamodb.AttributeType.STRING },
+  });
+  new TaskApi(stack, 'TaskApi', {
+    taskTable,
+    taskEventsTable,
+    attachmentsBucket: new s3.Bucket(stack, 'AttachmentsBucket'),
+    userConcurrencyTable,
+    ...overrides,
   });
   return { stack, template: Template.fromStack(stack) };
 }
@@ -242,6 +273,24 @@ describe('TaskApi construct', () => {
     expect(replayFn![1].Properties.MemorySize).toBe(512);
   });
 
+  test('ListTasksFn gets raised timeout/memory, not the 3s/128MB defaults (#51)', () => {
+    // A filtered list pages until the page is full (up to 10 Queries).
+    const functions = baseTemplate.findResources('AWS::Lambda::Function');
+    const listTasksFn = Object.entries(functions).find(([id]) => id.startsWith('TaskApiListTasksFn'));
+    expect(listTasksFn).toBeDefined();
+    expect(listTasksFn![1].Properties.Timeout).toBe(15);
+    expect(listTasksFn![1].Properties.MemorySize).toBe(256);
+  });
+
+  test('ListTasksFn may describe the task table: it asks whether the list index is ACTIVE (#51)', () => {
+    const policies = baseTemplate.findResources('AWS::IAM::Policy');
+    const listTasksPolicy = Object.entries(policies)
+      .find(([id]) => id.startsWith('TaskApiListTasksFnServiceRoleDefaultPolicy'));
+    const statements = (listTasksPolicy?.[1].Properties.PolicyDocument.Statement ?? []) as { Action: string[]; Resource: unknown }[];
+    const taskTableRead = statements.find((statement) => JSON.stringify(statement.Resource).includes('"TaskTable'));
+    expect(taskTableRead?.Action).toEqual(expect.arrayContaining(['dynamodb:Query', 'dynamodb:DescribeTable']));
+  });
+
   test('Lambda functions have correct environment variables', () => {
     const functions = baseTemplate.findResources('AWS::Lambda::Function');
 
@@ -341,46 +390,74 @@ describe('TaskApi construct', () => {
     });
   });
 
-  test('allows large HMAC-verified Jira webhook bodies through the WAF common rule set', () => {
-    const webAcls = baseTemplate.findResources('AWS::WAFv2::WebACL');
-    const webAcl = Object.values(webAcls)[0] as any;
-    const rules = webAcl.Properties.Rules as any[];
-    const largeBodyRule = rules.find(
-      rule => rule.Name === 'AWSManagedRulesCommonRuleSet-TaskPaths',
-    );
-    const fullCommonRule = rules.find(
-      rule => rule.Name === 'AWSManagedRulesCommonRuleSet',
-    );
+  const wafRules = (template: Template): any[] =>
+    (Object.values(template.findResources('AWS::WAFv2::WebACL'))[0] as any).Properties.Rules;
+  const byteMatchPaths = (statement: any): string[] => (statement.OrStatement?.Statements ?? [statement])
+    .map((s: any) => s.ByteMatchStatement.SearchString);
 
-    expect(
-      largeBodyRule.Statement.ManagedRuleGroupStatement.ExcludedRules,
-    ).toEqual([{ Name: 'SizeRestrictions_BODY' }]);
-    expect(
-      largeBodyRule.Statement.ManagedRuleGroupStatement.ScopeDownStatement
-        .OrStatement.Statements,
-    ).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        ByteMatchStatement: expect.objectContaining({
-          PositionalConstraint: 'EXACTLY',
-          SearchString: '/v1/jira/webhook',
-        }),
-      }),
-    ]));
-    expect(
-      fullCommonRule.Statement.ManagedRuleGroupStatement.ScopeDownStatement
-        .AndStatement.Statements,
-    ).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        NotStatement: expect.objectContaining({
-          Statement: expect.objectContaining({
-            ByteMatchStatement: expect.objectContaining({
-              PositionalConstraint: 'EXACTLY',
-              SearchString: '/v1/jira/webhook',
-            }),
-          }),
-        }),
-      }),
-    ]));
+  test('the task-paths rule covers /v1/tasks only and keeps blocking XSS there', () => {
+    const rule = wafRules(baseTemplate).find(r => r.Name === 'AWSManagedRulesCommonRuleSet-TaskPaths');
+    const group = rule.Statement.ManagedRuleGroupStatement;
+    expect(group.ExcludedRules).toEqual([{ Name: 'SizeRestrictions_BODY' }]);
+    expect(group.RuleActionOverrides).toBeUndefined();
+    expect(group.ScopeDownStatement.ByteMatchStatement).toMatchObject({ PositionalConstraint: 'STARTS_WITH', SearchString: '/v1/tasks' });
+  });
+
+  test('signed webhook routes get the common rule set with XSS and body size counted, not blocked (#1063)', () => {
+    const rules = wafRules(baseTemplate);
+    const rule = rules.find(r => r.Name === 'AWSManagedRulesCommonRuleSet-SignedWebhooks');
+    const group = rule.Statement.ManagedRuleGroupStatement;
+    // Overrides only: WAF rejects excludedRules alongside ruleActionOverrides.
+    expect(group.ExcludedRules).toBeUndefined();
+    expect(group.RuleActionOverrides).toEqual([
+      { Name: 'SizeRestrictions_BODY', ActionToUse: { Count: {} } },
+      { Name: 'CrossSiteScripting_BODY', ActionToUse: { Count: {} } },
+    ]);
+    expect(byteMatchPaths(group.ScopeDownStatement).sort()).toEqual(['/v1/github/webhook', '/v1/jira/webhook', '/v1/linear/webhook']);
+    // The full rule set still excludes the webhook routes, so nothing else changes for them.
+    const fullCommon = rules.find(r => r.Name === 'AWSManagedRulesCommonRuleSet');
+    expect(JSON.stringify(fullCommon.Statement.ManagedRuleGroupStatement.ScopeDownStatement)).toContain('/v1/linear/webhook');
+    // The XSS matches let through are counted under their own metric, and alarmed.
+    expect(rules.find(r => r.Name === 'SignedWebhookXssCounted')).toMatchObject({
+      Action: { Count: {} },
+      Statement: { LabelMatchStatement: { Scope: 'LABEL', Key: 'awswaf:managed:aws:core-rule-set:CrossSiteScripting_Body' } },
+      VisibilityConfig: { MetricName: 'SignedWebhookXssCounted' },
+    });
+    expect(new Set(rules.map(r => r.Priority)).size).toBe(rules.length);
+    baseTemplate.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      Namespace: 'AWS/WAFV2',
+      MetricName: 'CountedRequests',
+      Dimensions: Match.arrayWith([
+        { Name: 'Rule', Value: 'SignedWebhookXssCounted' },
+        // The web ACL's name, which WAF uses as the metric dimension (not the
+        // visibilityConfig metric name `TaskApiWebAcl`).
+        { Name: 'WebACL', Value: { 'Fn::Select': [0, { 'Fn::Split': ['|', { Ref: Match.stringLikeRegexp('WebAcl') }] }] } },
+      ]),
+      Threshold: 20,
+      ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+      TreatMissingData: 'notBreaching',
+    });
+  });
+
+  test('without webhook routes there is no signed-webhook rule and no alarm', () => {
+    const { template } = createStack({ largeBodyWebhookPaths: [] });
+    const names = wafRules(template).map(r => r.Name);
+    expect(names).not.toContain('AWSManagedRulesCommonRuleSet-SignedWebhooks');
+    expect(names).not.toContain('SignedWebhookXssCounted');
+    template.resourcePropertiesCountIs('AWS::CloudWatch::Alarm', { MetricName: 'CountedRequests' }, 0);
+  });
+
+  test('WAF replaces the two credential headers in the request samples it keeps', () => {
+    // WAF keeps the headers of sampled requests for three hours. The L1 types
+    // both enumerations as string: these are the values CloudFormation accepts
+    // for AWS::WAFv2::WebACL DataProtect.Action and FieldToProtect.FieldType.
+    const [webAcl] = Object.values(baseTemplate.findResources('AWS::WAFv2::WebACL'));
+    expect(webAcl.Properties.DataProtectionConfig).toEqual({
+      DataProtections: [{
+        Action: 'SUBSTITUTION',
+        Field: { FieldType: 'SINGLE_HEADER', FieldKeys: ['authorization', 'x-api-key'] },
+      }],
+    });
   });
 
   test('associates WAF with the API Gateway stage', () => {
@@ -652,6 +729,24 @@ describe('TaskApi construct with webhooks', () => {
   });
 });
 
+describe('TaskApi construct — confirm-uploads admission cap', () => {
+  /** MAX_CONCURRENT_TASKS_PER_USER as the confirm-uploads Lambda receives it. */
+  function confirmUploadsCap(template: Template): unknown {
+    const confirmUploadsFn = Object.entries(template.findResources('AWS::Lambda::Function'))
+      .find(([id]) => id.startsWith('TaskApiConfirmUploadsFn'));
+    expect(confirmUploadsFn).toBeDefined();
+    return confirmUploadsFn![1].Properties.Environment.Variables.MAX_CONCURRENT_TASKS_PER_USER;
+  }
+
+  test('ConfirmUploadsFn gets the per-user cap (default 10), not the handler fallback of 3', () => {
+    expect(confirmUploadsCap(createStackWithAttachments().template)).toBe('10');
+  });
+
+  test('ConfirmUploadsFn respects custom maxConcurrentTasksPerUser', () => {
+    expect(confirmUploadsCap(createStackWithAttachments({ maxConcurrentTasksPerUser: 5 }).template)).toBe('5');
+  });
+});
+
 describe('TaskApi construct — nudge endpoint (Phase 2)', () => {
   let nudgeTemplate: Template;
 
@@ -901,5 +996,63 @@ describe('TaskApi construct — trace endpoint (design §10.1)', () => {
     expect(traceFn).toBeDefined();
     expect(traceFn!.Properties.Timeout).toBe(15);
     expect(traceFn!.Properties.MemorySize).toBe(512);
+  });
+});
+
+describe('MicroVM approval wake wiring', () => {
+  const IMAGE_ARN = 'arn:aws:lambda:us-east-1:123456789012:microvm-image:agent';
+  let configured: Template;
+  let unconfigured: Template;
+  function fixture(imageArn?: string): Template {
+    const stack = new Stack(new App(), 'ApiTest');
+    const table = (id: string, sortKey?: string) => new dynamodb.Table(stack, id, {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      ...(sortKey && { sortKey: { name: sortKey, type: dynamodb.AttributeType.STRING } }),
+    });
+    new TaskApi(stack, 'Api', {
+      taskTable: table('Tasks'),
+      taskEventsTable: table('Events', 'event_id'),
+      taskApprovalsTable: table('Approvals', 'request_id'),
+      lambdaMicrovmImageArn: imageArn,
+    });
+    return Template.fromStack(stack);
+  }
+  type Statement = { Action: string | string[]; Resource: unknown };
+  function grants(template: Template, functionName: string): Statement[] {
+    return Object.entries(template.findResources('AWS::IAM::Policy'))
+      .filter(([id]) => id.includes(functionName))
+      .flatMap(([, policy]) => policy.Properties.PolicyDocument.Statement as Statement[])
+      .filter(statement => JSON.stringify(statement.Action).includes('Microvm'));
+  }
+  beforeAll(() => {
+    configured = fixture(IMAGE_ARN);
+    unconfigured = fixture();
+  });
+
+  test.each(['ApproveTaskFn', 'DenyTaskFn'])('%s gets only Get/Resume against this image', name => {
+    expect(grants(configured, name)).toEqual([expect.objectContaining({
+      Action: ['lambda:GetMicrovm', 'lambda:ResumeMicrovm'],
+      Resource: [IMAGE_ARN, `${IMAGE_ARN}:*`],
+    })]);
+  });
+
+  test('cancel keeps only Terminate against the same image', () => {
+    expect(grants(configured, 'CancelTaskFn')).toEqual([expect.objectContaining({
+      Action: 'lambda:TerminateMicrovm', Resource: [IMAGE_ARN, `${IMAGE_ARN}:*`],
+    })]);
+  });
+
+  test.each(['ApproveTaskFn', 'DenyTaskFn', 'CancelTaskFn'])('%s gets no lifecycle grant without an image', name => {
+    expect(grants(unconfigured, name)).toEqual([]);
+  });
+
+  test('the decision APIs keep their15s Lambda budget and read worker IDs from saved task metadata', () => {
+    const functions = Object.entries(configured.findResources('AWS::Lambda::Function'))
+      .filter(([id]) => id.includes('ApproveTaskFn') || id.includes('DenyTaskFn'));
+    expect(functions).toHaveLength(2);
+    for (const [, resource] of functions) {
+      expect(resource.Properties.Timeout).toBe(15);
+      expect(resource.Properties.Environment.Variables.MICROVM_IMAGE_IDENTIFIER).toBeUndefined();
+    }
   });
 });

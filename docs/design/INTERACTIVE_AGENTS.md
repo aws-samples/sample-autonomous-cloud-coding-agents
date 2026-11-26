@@ -174,7 +174,7 @@ A single AgentCore Runtime, invoked via `bedrock-agentcore:InvokeAgentRuntime` w
 Durable-execution Lambda that owns the task lifecycle from submission to terminal state.
 
 Responsibilities:
-- **Admission control** — atomic DDB conditional update on `UserConcurrencyTable` (`active_count < max`); reject with 429 if over quota.
+- **Admission control** — atomic DDB conditional update on `UserConcurrencyTable` (`active_count < max`); a task over the limit is parked as `QUEUED` (#441).
 - **State transition** `SUBMITTED → HYDRATING → RUNNING → FINALIZING → terminal`.
 - **Invocation** — calls `InvokeAgentRuntime` with SigV4.
 - **Poll loop** — waits for the agent to land a terminal status in `TaskTable`; enforces heartbeat watchdog; transitions to `FAILED` if the container dies.
@@ -197,7 +197,7 @@ The durable event spine. PK = `task_id`, SK = `event_id` (ULID), TTL enabled, **
 
 Writers:
 - `ProgressWriter` (inside the agent container) — per tool call, per turn, per milestone, cost updates, errors.
-- `OrchestratorFn` — `task_created`, `hydration_*`, `session_started`, `task_*`, `preflight_*`, `admission_rejected`, `guardrail_blocked`.
+- `OrchestratorFn` — `task_created`, `hydration_*`, `session_started`, `task_*`, `preflight_*`, `admission_queued`, `guardrail_blocked`.
 - Cancel/reconciler handlers — `task_cancelled`, `task_stranded`.
 
 Readers:
@@ -294,7 +294,7 @@ Authentication: Cognito User Pool ID token in `Authorization` header for all RES
 | `agent_tool_call` | Runner / PreToolUse hook | About to invoke a tool |
 | `agent_tool_result` | Runner / PostToolUse hook | Tool returned |
 | `agent_milestone` | Agent code (pipeline, hooks) | Named checkpoint (`repo_cloned`, `pr_opened`, `nudge_acknowledged`, ...) |
-| `agent_cost_update` | Runner | Cumulative token + dollar cost |
+| `agent_cost_update` | Runner | Cumulative token + dollar cost; its `turn` is the turn number the `agent_turn` events carry |
 | `agent_error` | Runner | Handled exception |
 | `approval_required` (P3) | PreToolUse Cedar hook | Cedar policy requires user decision |
 | `approval_decided` (P3) | Approve/Deny Lambda | User responded |
@@ -334,7 +334,7 @@ Deterministic, templated snapshot. No LLM.
 $ bgagent status abc123
 Task abc123 — RUNNING (3m 14s elapsed)
   Repo: org/repo
-  Turn: 7 / ~12
+  Turn: 7 / 12
   Last milestone: nudge_acknowledged (42s ago)
   Current: Bash tool call
   Cost: $0.18 / budget $2.00
@@ -345,6 +345,7 @@ Implementation:
 - Lambda reads the last N events from `TaskEventsTable` + current `TaskRecord`.
 - Renders from a fixed template. Never calls an LLM. Never hallucinates.
 - Fast (<200 ms P95), free, safe to call repeatedly.
+- `Turn` is the number of answers of the model so far against `max_turns`, which limits that count: the `turn` of the newest `agent_turn` event while the task runs, the record's `turns_completed` once it has finished (the event's `turn` if the record holds no count). The record's `turns_attempted` is the Claude Code CLI's own counter, which grows with every tool result (as of the pinned CLI 2.1.319) and can exceed `max_turns`; it is not shown against the limit.
 
 ### 5.3 `bgagent watch`
 
@@ -373,7 +374,7 @@ Flow:
 4. Hook returns `{"decision": "block", "reason": <formatted_nudge_text>}`. The SDK treats this as the start of the next user turn; the agent incorporates the nudge on its response.
 5. Nudge row is marked consumed via conditional update (`consumed_at` set only if currently null).
 
-**Cost model — honest:** the nudge burns one turn from the task's `max_turns` budget. The acknowledgment rides in the same turn (the combined-turn ack pattern). This is the only mechanism the Claude Agent SDK exposes for injecting user-visible text mid-run; there is no "append to system prompt mid-conversation" API (see Appendix A).
+**Cost model — honest:** the nudge burns one turn from the task's `max_turns` budget. The acknowledgment rides in the same turn (the combined-turn ack pattern). This is the mechanism a nudge uses to inject its text mid-run; there is no "append to system prompt mid-conversation" API (see Appendix A; A.2 describes the one other way, text that a hook attaches to a tool result).
 
 ### 5.5 `bgagent ask` (Phase 2)
 
@@ -384,7 +385,7 @@ Ask the agent a natural-language question that requires its own reasoning. Alway
 ```
 $ bgagent ask abc123 "why did you change the retry logic?"
 ⠋ queued as ask_01JX... — waiting for agent
-⠙ agent is running tool: Bash (turn 7/~12) — 42s elapsed
+⠙ agent is running tool: Bash (turn 7/12) — 42s elapsed
 ✓ agent responded (1m 14s)
 
 The existing retry used exponential backoff with no jitter, causing thundering
@@ -521,7 +522,7 @@ Submitted with the task (optional) or resolved from repo defaults:
 ### 7.4 Event table privacy
 
 - Previews truncate to 200 chars → low risk of accidental secret capture in common cases.
-- Agent-side output scanners redact secrets before calling `ProgressWriter`.
+- The runner screens the text of its events before `ProgressWriter` cuts it to a preview: the model's thinking and text, tool input, tool output and the message of a session error. What the output scanner (`agent/src/output_scanner.py`) or the redaction of log lines takes for a credential is replaced by a marker such as `[REDACTED-AWS_KEY]`.
 - `--trace` flag opts into larger previews + S3 trajectory dumps; S3 objects are written to a user-scoped prefix with short TTL.
 
 ---
@@ -556,7 +557,7 @@ The `AWAITING_APPROVAL` state holds the user's concurrency slot (paused but aliv
 
 - Every transition is a conditional DDB write: `#status = :fromStatus`.
 - Illegal transitions are rejected at the storage layer (not enforced in code).
-- The valid-transition table lives in `cdk/src/handlers/shared/task-status.ts`.
+- The valid-transition table lives in `cdk/src/constructs/task-status.ts`.
 
 ---
 
@@ -590,7 +591,7 @@ CloudWatch dashboard shows, per task:
 
 ### 9.5 Alarms
 
-Currently deferred — no operational notification channel exists for this project beyond Slack/email user-facing notifications. When an ops channel is added (SNS/PagerDuty), the alarm plumbing is a small follow-up; the metric data is already flowing.
+The alarms the stack deploys notify the `OperationalAlerts` topic. For this design that is the DLQ-depth alarm of the fan-out consumer, the signal that the fail-open notification dispatcher of section 9.1 is losing events. The topic has no subscriber until an operator adds one: see [Alarm notifications](./OBSERVABILITY.md#alarm-notifications).
 
 ---
 
@@ -656,7 +657,7 @@ FanOutConsumer routes events per-channel with sensible defaults shipping in v1.
 
 The between-turns hook emits a `nudge_acknowledged` milestone to `ProgressWriter` **before** returning `decision: "block"` with the nudge text. One turn burned (same as today); acknowledgment visible immediately.
 
-*Why:* The Claude Agent SDK does not expose a mechanism to append to system context mid-conversation. The `HookEvent` enum is fixed; `ClaudeAgentOptions.system_prompt` is construction-time only; `hookSpecificOutput.additionalContext` is user-visible-only (confirmed `not-planned` by Anthropic). One-turn-per-nudge is an architectural constraint of the SDK; we surface it honestly rather than pretending it's free.
+*Why:* The Claude Agent SDK does not expose a mechanism to append to system context mid-conversation. The `HookEvent` enum is fixed; `ClaudeAgentOptions.system_prompt` is construction-time only. `hookSpecificOutput.additionalContext` was recorded here as user-visible-only; with the pinned SDK a `PostToolUse` or `PostToolUseFailure` hook can hand text to the model through it, attached to the tool result (Appendix A.2). The stuck guard uses that; a nudge still arrives through the Stop hook. One-turn-per-nudge is the cost of that path; we surface it honestly rather than pretending it's free.
 
 ### AD-6. `bgagent status` is deterministic; `bgagent ask` is the agent
 
@@ -766,12 +767,12 @@ Opt-in per task: 4 KB previews + full trajectory to S3 with TTL.
 
 ## Appendix A — Claude Agent SDK reference
 
-Pinned version: `claude-agent-sdk==0.2.168` (Python; see `agent/pyproject.toml`).
+Pinned version: `claude-agent-sdk==0.2.179` (Python; see `agent/pyproject.toml`).
 
 > **Caution — re-verify against 0.2.x.** The hook-surface details in this
 > appendix (the `HookEvent` enum members, `PostToolUseFailure`, the Stop-hook
 > return-value contract, etc.) were originally written against
-> `claude-agent-sdk==0.1.53`. The pin has since advanced to `0.2.168`, and the
+> `claude-agent-sdk==0.1.53`. The pin has since advanced to `0.2.179`, and the
 > SDK's hook API may have changed across that range. Before relying on any
 > specific enum member or hook signature below, verify it against the installed
 > 0.2.x SDK and the actual usage in `agent/src/hooks.py`.
@@ -781,9 +782,10 @@ Pinned version: `claude-agent-sdk==0.2.168` (Python; see `agent/pyproject.toml`)
 `HookEvent` enum: `PreToolUse | PostToolUse | PostToolUseFailure | UserPromptSubmit | Stop | SubagentStart | SubagentStop | PreCompact | PermissionRequest | Notification`.
 
 Our usage:
-- `PreToolUse` → Cedar policy evaluation (Phase 3), `can_use_tool`-style allow/deny.
-- `PostToolUse` → output scanner (secret/PII redaction).
-- `Stop` (between-turns) → `_cancel_between_turns_hook`, `_nudge_between_turns_hook`, Phase 2 ask hook, Phase 3 approval poll.
+- `PreToolUse` → Cedar policy evaluation (Phase 3), `can_use_tool`-style allow/deny. A call that needs an approval waits here for the decision.
+- `PostToolUse` → output scanner (secret/PII redaction); the egress-denial detector and the stuck guard see every tool call that completed.
+- `PostToolUseFailure` → egress-denial detector and stuck guard for a tool call that failed. The CLI fires this event, and no `PostToolUse`, for such a call (for Bash: a command that exits non-zero, unless the CLI reads that status as an answer, such as 1 from `grep` without a match).
+- `Stop` (between-turns) → `_cancel_between_turns_hook`, `_nudge_between_turns_hook`, `_denial_between_turns_hook` (deny-with-steering), in this order.
 
 ### A.2 Between-turns injection mechanism
 
@@ -791,10 +793,11 @@ Stop hook return values:
 - `{}` → no-op, SDK proceeds to stop or loop.
 - `{"decision": "block", "reason": "<text>"}` → SDK emits `reason` as a synthetic user turn; agent responds on its next iteration.
 
-This is the **only** SDK-supported mechanism to inject agent-visible text mid-conversation. Implications:
+This is the mechanism that nudges and deny-with-steering use to inject agent-visible text mid-conversation. Implications:
 - Every nudge, ask, and deny-with-steering burns one turn from `max_turns`.
 - No "append to system prompt mid-run" primitive exists. `ClaudeAgentOptions.system_prompt` is set at construction.
-- `hookSpecificOutput.additionalContext` on PostToolUse appears in docs but does not reach the model's context; Anthropic has confirmed this as `not-planned` (GitHub issues `claude-code#18427`, `claude-code#19643`).
+
+A hook that runs after a tool call can hand text to the model as well. With the pinned SDK (0.2.179, CLI 2.1.319), `hookSpecificOutput.additionalContext` returned by a `PostToolUse` or `PostToolUseFailure` hook reaches the model: the CLI sends it with the tool result, in the same request, as a system reminder, so it burns no turn. The stuck guard's advisory about a failing command that the agent keeps repeating is delivered this way (`_observe_tool_result` in `agent/src/hooks.py`), because an agent that keeps calling tools never reaches the Stop hook. This appendix used to say that such text does not reach the model's context (GitHub issues `claude-code#18427`, `claude-code#19643`); that does not hold for the pinned version.
 
 ### A.3 Mid-run cancellation
 

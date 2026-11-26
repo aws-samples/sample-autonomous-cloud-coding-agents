@@ -19,7 +19,7 @@
 
 import { describe, expect, it } from 'vitest';
 import type { TaskEvent } from '../../../src/core/api/types';
-import { activityFeed, describeEvent, displayPath, previewField, stepArea } from '../../../src/core/util/activity';
+import { activityFeed, describeEvent, displayPath, previewField, pullRequestEnd, stepArea } from '../../../src/core/util/activity';
 
 function ev(event_type: string, metadata: Record<string, unknown> = {}, timestamp = '2026-10-27T17:22:00Z'): TaskEvent {
   return { event_id: `e-${event_type}-${timestamp}`, event_type, timestamp, metadata };
@@ -72,9 +72,41 @@ describe('describeEvent', () => {
     }
   });
 
+  it('words the start of the last step by what that step does', () => {
+    const start = (step: string) => describeEvent(ev('agent_milestone', { milestone: `step:${step}:start` }))?.text;
+    expect(start('open_pr')).toBe('Opening a pull request');
+    // An iteration, a review and a restack end on a pull request that exists already.
+    expect(start('resolve_pr')).toBe('Finishing up on the pull request');
+    // A task without a repository has no pull request: it delivers its result.
+    expect(start('deliver')).toBe('Delivering the result');
+  });
+
   it('shows the message the agent read', () => {
     expect(describeEvent(ev('agent_milestone', { milestone: 'nudge_acknowledged', details: '1 nudge(s) acknowledged (ids=…abcd1234): add a test' })))
       .toMatchObject({ kind: 'message', text: 'Read your message: "add a test"' });
+  });
+
+  it('shows an approval request as the agent writes it: a milestone that carries the reason', () => {
+    const asked = (metadata: Record<string, unknown>) => describeEvent(ev('agent_milestone', { milestone: 'approval_requested', ...metadata }));
+    expect(asked({ request_id: 'req-1', tool_name: 'Bash', reason: 'Soft-deny: force_push_main' }))
+      .toMatchObject({ kind: 'problem', text: 'Asked for approval: Soft-deny: force_push_main' });
+    // The metadata of an event is not typed: a request without a reason is still shown as a request.
+    expect(asked({ request_id: 'req-1' })).toMatchObject({ kind: 'problem', text: 'Asked for approval: an action needs approval' });
+  });
+
+  it('says what became of the pull request after the task, from the event ABCA writes when it reads the end on GitHub', () => {
+    const recorded = (pr_state: string) => describeEvent(ev('pr_outcome_recorded', { pr_state, pr_closed_at: '2026-10-29T08:14:00Z', pr_changes_requested: 0 }));
+    // At GitHub's time for the merge or the close, not at the later time of the read that the event carries.
+    expect(recorded('merged')).toMatchObject({ kind: 'step', at: '2026-10-29T08:14:00Z', text: 'Pull request merged on GitHub' });
+    expect(recorded('closed')).toMatchObject({ kind: 'step', at: '2026-10-29T08:14:00Z', text: 'Pull request closed on GitHub without merging' });
+    // Any other state is not called closed: the line is left out.
+    expect(recorded('open')).toBeNull();
+    // The metadata of an event is not typed: without a time from GitHub, or with text that is none, the line keeps the event's.
+    for (const pr_closed_at of [undefined, 'not a time']) {
+      expect(describeEvent(ev('pr_outcome_recorded', { pr_state: 'merged', pr_closed_at }))).toMatchObject({ at: '2026-10-27T17:22:00Z' });
+    }
+    // Only that event says how the pull request ended, whatever the metadata of another one holds.
+    expect(pullRequestEnd(ev('task_completed', { pr_state: 'merged' }))).toBeNull();
   });
 });
 

@@ -1,14 +1,12 @@
 ---
-title: Slack setup guide
+title: "Slack integration setup guide"
 ---
-
-# Slack integration setup guide
 
 This guide walks through setting up the ABCA Slack integration. Once configured, your team can submit tasks by mentioning `@Shoof` in any channel and receive real-time notifications as tasks progress.
 
 ## Prerequisites
 
-- ABCA CDK stack deployed (see [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction))
+- ABCA CDK stack deployed (see [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction)) with the `slack` feature enabled in its [deployment profile](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide#deployment-profiles) (`bgagent setup --features slack,…`)
 - A Cognito user account configured (see [User guide](/sample-autonomous-cloud-coding-agents/using/overview))
 - A Slack workspace where you are authorized to install apps (if your workspace requires admin approval for app installs, request it through your Slack administrator)
 - AWS CLI configured with credentials for your ABCA account
@@ -115,7 +113,10 @@ Mention Shoof with a repo and description:
 ```
 @Shoof fix the login bug in org/repo#42
 @Shoof update the README in org/repo
+@Shoof fix https://github.com/org/repo/issues/42
 ```
+
+A pasted GitHub link to a repo, an issue or a pull request names the repo like `org/repo` or `org/repo#42` does. The link that names the repo is taken out of the task description, together with any words you turned into the link: the agent gets the repo, the issue or pull request number and the rest of your message, so say in words what a linked comment asks for.
 
 For private submissions, DM Shoof directly:
 ```
@@ -155,6 +156,12 @@ Run `/bgagent link` in Slack, then `bgagent slack link <code>` in your terminal.
 
 The repo must be registered with a Blueprint before submitting tasks. See the [User guide](/sample-autonomous-cloud-coding-agents/using/overview).
 
+In a channel that has a default repo (`bgagent slack onboard-channel`) you get this answer only for a repo that is given as a GitHub link, that is written with an issue number (`org/repo#42`), or that has the same owner as the repo the task would otherwise run on: the channel's default, or an onboarded repo named in the same message. Any other `word/word`, a repo of another owner included, is read as part of the description.
+
+A GitHub link to a repo, an issue or a pull request names its repo wherever it stands in the message, also in pasted output, so a link to an issue of a repo that is not onboarded gets this answer too. To refer to such an issue in a task for another repo, write the onboarded repo the task is for before the link. A link to anything else (another site, or a file, a branch or a workflow run on GitHub) names no repo and stays in the description.
+
+The "Task submitted" message names the repo the task runs on; if that is not what you meant, click **Cancel Task** on the "Agent started working" message.
+
 ### OAuth install fails (bad_client_secret)
 
 The credentials stored don't match your app. Delete the app and re-run `bgagent slack setup`, making sure to paste the correct values.
@@ -171,4 +178,4 @@ The integration supports multiple Slack workspaces. Each workspace admin opens t
 
 To uninstall from a workspace: **Slack → Settings → Manage Apps → Shoof → Remove App**. The bot token is automatically scheduled for deletion.
 
-To remove the Slack integration from your ABCA deployment entirely, delete the Slack App and redeploy without it.
+To remove the Slack integration from your ABCA deployment entirely, delete the Slack App, then run `bgagent setup` and disable Slack. This deletes the installation, user and channel mapping tables (see [What disabling a feature removes](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide#what-disabling-a-feature-removes)).

@@ -64,7 +64,9 @@ export interface McpRuntimePayload {
   readonly command?: string;
   readonly args?: readonly string[];
   readonly headers?: Readonly<Record<string, string>>;
-  /** Tools surface under this prefix (e.g. `mcp__example__`). */
+  /** Not applied. Publish accepts it and resolve echoes it, nothing else reads it:
+   *  the agent writes the server under the key `<namespace>__<name>`, so the tools
+   *  of `acme/pdf-tools` surface as `mcp__acme__pdf-tools__*` whatever this says. */
   readonly tool_prefix?: string;
 }
 
@@ -94,7 +96,8 @@ export interface RegistryRecord {
   readonly storageMode: StorageMode;
   /** Discovery descriptor (server.json / SKILL.md / arbitrary) — validated body. */
   readonly discovery: Readonly<Record<string, unknown>>;
-  /** ABCA runtime payload (from `_meta` or the CUSTOM body). */
+  /** ABCA runtime payload (from the MCP `_meta` block, the SKILL.md frontmatter, or
+   *  the CUSTOM body). */
   readonly runtime: RuntimePayload;
   readonly publisher?: string;
   readonly createdAt?: string;
@@ -127,12 +130,6 @@ export interface ResolvedAsset {
   readonly runtime: RuntimePayload;
   /** Non-fatal advisories, e.g. `["DEPRECATED"]`. */
   readonly warnings: readonly string[];
-}
-
-/** The bundle threaded into the agent invocation payload after resolving all of a
- *  Blueprint's `registry://` refs. */
-export interface ResolvedAssetBundle {
-  readonly assets: readonly ResolvedAsset[];
 }
 
 export type ResolutionFailureReason =
@@ -185,7 +182,7 @@ export class RegistryRecordMalformedError extends Error {
   constructor(
     readonly reason: MalformedReason,
     message: string,
-    readonly cause?: unknown,
+    override readonly cause?: unknown,
   ) {
     super(message);
     this.name = 'RegistryRecordMalformedError';
@@ -204,7 +201,7 @@ export class RegistryPublishIncompleteError extends Error {
   constructor(
     readonly recordId: string,
     message: string,
-    readonly cause?: unknown,
+    override readonly cause?: unknown,
   ) {
     super(message);
     this.name = 'RegistryPublishIncompleteError';
@@ -225,11 +222,14 @@ export interface PublishInput {
   readonly publisher?: string;
   /** Force CUSTOM storage (verbatim) instead of a native descriptor. */
   readonly custom?: boolean;
-  /** Dev convenience: drive create → submit → approve so the record resolves. */
+  /** Dev convenience: also approve the record, so it resolves at once. Create and
+   *  submit happen either way; this gates only the final transition to APPROVED. */
   readonly autoApprove?: boolean;
 }
 
 export interface ListFilter {
   readonly kind?: string;
   readonly namespace?: string;
+  /** Asset name: with it, only the records of that asset are fetched. */
+  readonly name?: string;
 }

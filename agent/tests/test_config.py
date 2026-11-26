@@ -2,7 +2,7 @@
 
 import os
 from datetime import UTC
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -14,6 +14,12 @@ from config import (
     resolve_linear_api_token,
 )
 from models import TaskConfig
+
+# Stamps that both `_is_expiring` helpers must treat as malformed. The two with a "Z"
+# that is not the zone suffix pin the explicit `.replace("Z", "+00:00")`: parsed raw
+# (ruff FURB162's unsafe fix) the first raises TypeError out of the resolver and the
+# second is trusted until 2099.
+_MALFORMED_EXPIRES_AT = ["this is not a date", "2099-01-01Z00:00:00", "2099-01-01Z00:00:00+00:00"]
 
 
 class TestAgentWorkspaceConstant:
@@ -200,8 +206,8 @@ class TestResolveLinearApiToken:
 
     The orchestrator stamps `linear_oauth_secret_arn` into the task's
     channel_metadata at creation time. resolve_linear_api_token reads
-    the secret JSON via boto3, refreshes it if expiring, and caches the
-    access_token in `LINEAR_API_TOKEN` for the Linear MCP placeholder.
+    the secret JSON via boto3 and caches the access_token in
+    `LINEAR_API_TOKEN` for linear_reactions.
     """
 
     def test_returns_cached_value_without_calling_secrets_manager(self, monkeypatch):
@@ -307,6 +313,42 @@ class TestResolveLinearApiToken:
             assert resolve_linear_api_token() == "lin_oauth_envpath"
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
 
+    def test_force_replaces_the_cached_token_with_the_stored_one(self, monkeypatch):
+        """The token cached when the task started may have expired by the time it ends.
+
+        ``force`` reads the secret again, so the final reaction is sent with the
+        token a Lambda has stored in the meantime.
+        """
+        import json
+        from datetime import datetime, timedelta
+
+        monkeypatch.setenv("LINEAR_API_TOKEN", "lin_old")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        future = (datetime.now(UTC) + timedelta(hours=12)).isoformat().replace("+00:00", "Z")
+        mock_sm = MagicMock()
+        mock_sm.get_secret_value.return_value = {
+            "SecretString": json.dumps(
+                {"access_token": "lin_new", "refresh_token": "rt", "expires_at": future}
+            ),
+        }
+        with patch("boto3.client", return_value=mock_sm):
+            resolved = resolve_linear_api_token({"linear_oauth_secret_arn": "arn:t"}, force=True)
+
+        assert resolved == "lin_new"
+        assert os.environ.get("LINEAR_API_TOKEN") == "lin_new"
+        # The agent only reads the secret: what it holds was written by a Lambda.
+        assert mock_sm.method_calls == [call.get_secret_value(SecretId="arn:t")]
+
+    def test_force_keeps_the_cached_token_when_there_is_nothing_to_resolve(self, monkeypatch):
+        """A local run with a preset token and no secret: the preset stays in place."""
+        monkeypatch.setenv("LINEAR_API_TOKEN", "lin_preset")
+        monkeypatch.delenv("LINEAR_OAUTH_SECRET_ARN", raising=False)
+        with patch("boto3.client") as mock_boto:
+            assert resolve_linear_api_token(force=True) == ""
+            mock_boto.assert_not_called()
+
+        assert os.environ.get("LINEAR_API_TOKEN") == "lin_preset"
+
 
 class TestResolveLinearApiTokenVaultPath:
     """RFC #249 Phase 1: token minted via the AgentCore Identity Token Vault.
@@ -393,6 +435,20 @@ class TestResolveLinearApiTokenVaultPath:
         mock_client.get_secret_value.assert_not_called()
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
 
+    def test_force_asks_the_vault_again_instead_of_returning_the_cached_token(self, monkeypatch):
+        """At the end of a task the vault hands out the token that is valid then."""
+        self._enable_vault(monkeypatch)
+        monkeypatch.setenv("LINEAR_API_TOKEN", "lin_oauth_vault_at_start")
+        mock_client = MagicMock()
+        mock_client.get_workload_access_token_for_user_id.return_value = {
+            "workloadAccessToken": "wat-xyz",
+        }
+        mock_client.get_resource_oauth2_token.return_value = {"accessToken": "lin_oauth_vault"}
+        with patch("boto3.client", return_value=mock_client):
+            assert resolve_linear_api_token(self._meta(), force=True) == "lin_oauth_vault"
+
+        assert os.environ.get("LINEAR_API_TOKEN") == "lin_oauth_vault"
+
     def test_consent_required_falls_back_to_secrets_manager(self, monkeypatch):
         """authorizationUrl (no accessToken) → fall through to the SM token."""
         from datetime import datetime, timedelta
@@ -464,6 +520,49 @@ class TestResolveLinearApiTokenVaultPath:
         assert resolved == "lin_oauth_sm_after_error"
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
 
+    def test_vault_error_with_a_secret_that_carries_no_grant_yields_no_token(self, monkeypatch):
+        """A workspace onboarded straight onto the vault stores no token in its secret.
+
+        When the vault call fails, the Secrets Manager fallback has nothing to
+        use: ``bgagent linear setup`` writes the four grant fields as empty
+        strings. The agent used to post the empty refresh_token to Linear
+        before it gave up.
+        """
+        from botocore.exceptions import ClientError
+
+        self._enable_vault(monkeypatch)
+        mock_client = MagicMock()
+        mock_client.get_workload_access_token_for_user_id.side_effect = ClientError(
+            {"Error": {"Code": "ThrottlingException", "Message": "slow down"}},
+            "GetWorkloadAccessTokenForUserId",
+        )
+        mock_client.get_secret_value.return_value = {
+            "SecretString": __import__("json").dumps(
+                {
+                    "access_token": "",
+                    "refresh_token": "",
+                    "expires_at": "",
+                    "scope": "",
+                    "client_id": "c",
+                    "client_secret": "s",
+                    "workspace_id": "w",
+                    "workspace_slug": "s",
+                    "installed_at": "x",
+                    "updated_at": "x",
+                    "installed_by_platform_user_id": "u",
+                }
+            ),
+        }
+        with (
+            patch("boto3.client", return_value=mock_client),
+            patch(
+                "urllib.request.urlopen",
+                side_effect=AssertionError("the agent asked Linear for a new token"),
+            ) as urlopen_mock,
+        ):
+            assert resolve_linear_api_token(self._meta()) == ""
+            urlopen_mock.assert_not_called()
+
     def test_skips_vault_when_no_provider_name(self, monkeypatch):
         """SM-only install (no linear_provider_name) → vault never called."""
         from datetime import datetime, timedelta
@@ -527,22 +626,26 @@ class TestResolveLinearApiTokenVaultPath:
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
 
 
-class TestResolveLinearApiTokenRefreshPaths:
-    """Tests for the refresh sub-flow inside resolve_linear_api_token.
+class TestResolveLinearApiTokenNoRefresh:
+    """The agent NEVER refreshes the Linear OAuth token.
 
-    The agent's `_refresh` is a non-trivial state machine: try
-    /oauth/token, on `invalid_grant` re-read SM (concurrent caller may
-    have rotated), retry once with the freshly-read refresh_token. Each
-    branch needs explicit coverage because they're hot-path during the
-    24h Linear access-token TTL window.
+    Linear rotates the refresh_token on every use, and the agent role has
+    `secretsmanager:GetSecretValue` only (no Put). If the agent refreshed it
+    would keep the rotated replacement only in memory for this one task and
+    leave Secrets Manager holding the spent refresh_token. Linear accepts a
+    spent one again for 30 minutes; on a workspace where no Lambda asks for a
+    token in that time the next refresh is rejected and the workspace needs
+    re-onboarding. So the resolver uses a still-valid stored token verbatim and
+    fails CLOSED (empty string, reactions no-op) when the stored token is
+    expiring. The trusted Lambda path (linear-oauth-resolver.ts, which has
+    PutSecretValue) owns all refreshes.
     """
 
     @staticmethod
     def _stored(**overrides):
         from datetime import datetime, timedelta
 
-        # Default: token expires in 30s so _is_expiring returns True
-        # and the refresh path runs.
+        # Default: token expires in 30s so _is_expiring returns True.
         soon = (datetime.now(UTC) + timedelta(seconds=30)).isoformat().replace("+00:00", "Z")
         base = {
             "access_token": "lin_old",
@@ -560,8 +663,12 @@ class TestResolveLinearApiTokenRefreshPaths:
         base.update(overrides)
         return base
 
-    def test_expiring_token_triggers_refresh_and_returns_new_access_token(self, monkeypatch):
-        """Happy refresh: expiring stored token → POST /oauth/token → new access_token."""
+    def test_expiring_token_fails_closed_without_network_call(self, monkeypatch, capfd):
+        """Expiring stored token → empty string, and NO /oauth/token POST.
+
+        This is the regression guard for the rotating-refresh-token bug: the
+        agent must not consume the stored refresh_token.
+        """
         import json
         from unittest.mock import patch as upatch
 
@@ -571,161 +678,72 @@ class TestResolveLinearApiTokenRefreshPaths:
         mock_sm = MagicMock()
         mock_sm.get_secret_value.return_value = {"SecretString": json.dumps(self._stored())}
 
-        # urlopen returns access_token=lin_new, expires_in=86400.
-        fake_resp = MagicMock()
-        fake_resp.read.return_value = json.dumps(
-            {
-                "access_token": "lin_new",
-                "refresh_token": "rt-new",
-                "expires_in": 86400,
-                "scope": "read write",
-            }
-        ).encode("utf-8")
-        fake_resp.__enter__ = MagicMock(return_value=fake_resp)
-        fake_resp.__exit__ = MagicMock(return_value=False)
-
         with (
             patch("boto3.client", return_value=mock_sm),
-            upatch("urllib.request.urlopen", return_value=fake_resp),
+            upatch(
+                "urllib.request.urlopen",
+                side_effect=AssertionError("the agent asked Linear for a new token"),
+            ) as urlopen_mock,
         ):
-            assert resolve_linear_api_token({"linear_oauth_secret_arn": "arn:t"}) == "lin_new"
+            assert resolve_linear_api_token({"linear_oauth_secret_arn": "arn:t"}) == ""
+            urlopen_mock.assert_not_called()
+        # The secret is read and never written: the Lambdas are its only writers.
+        assert mock_sm.method_calls == [call.get_secret_value(SecretId="arn:t")]
+        # Nothing cached on the fail-closed path: linear_reactions then skips its calls.
+        assert os.environ.get("LINEAR_API_TOKEN") in (None, "")
+        # ``shell.log`` writes to fd 1 directly, hence capfd.
+        assert "stored token is expiring and the agent does not refresh" in capfd.readouterr().out
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
 
-    def test_invalid_grant_with_concurrent_refresh_uses_freshly_read_token(self, monkeypatch):
-        """Race-recovery: refresh returns invalid_grant; re-read SM finds rotated token; use it."""
-        import io
+    def test_expiring_token_at_task_end_leaves_the_cached_one_in_place(self, monkeypatch):
+        """``force`` at the end of a task, and no Lambda has stored a new token yet.
+
+        Nothing is asked of Linear, and the final reaction is tried with the
+        token the task started with.
+        """
         import json
-        import urllib.error
-        from datetime import datetime, timedelta
-        from email.message import Message
         from unittest.mock import patch as upatch
 
-        monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
+        monkeypatch.setenv("LINEAR_API_TOKEN", "lin_at_start")
         monkeypatch.setenv("AWS_REGION", "us-east-1")
 
-        future = (datetime.now(UTC) + timedelta(hours=12)).isoformat().replace("+00:00", "Z")
-        old = self._stored(refresh_token="rt-old")
-        rotated = self._stored(
-            access_token="lin_concurrent",
-            refresh_token="rt-rotated",
-            expires_at=future,
-        )
         mock_sm = MagicMock()
-        mock_sm.get_secret_value.side_effect = [
-            {"SecretString": json.dumps(old)},  # initial read
-            {"SecretString": json.dumps(rotated)},  # re-read after invalid_grant
-        ]
-
-        # First /oauth/token POST returns 400 invalid_grant.
-        http_err = urllib.error.HTTPError(
-            "https://api.linear.app/oauth/token",
-            400,
-            "Bad Request",
-            Message(),
-            io.BytesIO(json.dumps({"error": "invalid_grant"}).encode("utf-8")),
-        )
+        mock_sm.get_secret_value.return_value = {"SecretString": json.dumps(self._stored())}
 
         with (
             patch("boto3.client", return_value=mock_sm),
-            upatch("urllib.request.urlopen", side_effect=http_err),
+            upatch(
+                "urllib.request.urlopen",
+                side_effect=AssertionError("the agent asked Linear for a new token"),
+            ) as urlopen_mock,
         ):
-            # Should return the access_token from the freshly-read
-            # rotated secret WITHOUT a second /oauth/token POST.
-            assert (
-                resolve_linear_api_token({"linear_oauth_secret_arn": "arn:t"}) == "lin_concurrent"
-            )
-        monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
+            resolved = resolve_linear_api_token({"linear_oauth_secret_arn": "arn:t"}, force=True)
+            urlopen_mock.assert_not_called()
 
-    def test_invalid_grant_with_no_concurrent_refresh_returns_empty(self, monkeypatch):
-        """No race: invalid_grant + re-read finds same refresh_token → permanent failure."""
-        import io
-        import json
-        import urllib.error
-        from email.message import Message
-        from unittest.mock import patch as upatch
+        assert resolved == ""
+        assert mock_sm.method_calls == [call.get_secret_value(SecretId="arn:t")]
+        assert os.environ.get("LINEAR_API_TOKEN") == "lin_at_start"
 
-        monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
-        monkeypatch.setenv("AWS_REGION", "us-east-1")
-
-        same = self._stored(refresh_token="rt-shared")
-        mock_sm = MagicMock()
-        # Both reads return the same secret (no concurrent rotation).
-        mock_sm.get_secret_value.return_value = {"SecretString": json.dumps(same)}
-
-        http_err = urllib.error.HTTPError(
-            "https://api.linear.app/oauth/token",
-            400,
-            "Bad Request",
-            Message(),
-            io.BytesIO(json.dumps({"error": "invalid_grant"}).encode("utf-8")),
-        )
-
-        with (
-            patch("boto3.client", return_value=mock_sm),
-            upatch("urllib.request.urlopen", side_effect=http_err),
-        ):
-            # Permanent rejection; agent falls through to using the
-            # original (stale) token. The function still returns the
-            # in-memory access_token so callers don't crash, but the
-            # token is the expiring one — Linear MCP will fail closed
-            # on the next call.
-            result = resolve_linear_api_token({"linear_oauth_secret_arn": "arn:t"})
-            # We don't assert empty here because the resolver returns
-            # the stale token rather than empty when refresh fails;
-            # the important thing is it didn't crash.
-            assert isinstance(result, str)
-        monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
-
-    def test_malformed_expires_at_treated_as_expiring_with_warn_log(self, monkeypatch, caplog):
-        """Bad expires_at format triggers the refresh path AND logs a WARN."""
+    @pytest.mark.parametrize("bad_stamp", _MALFORMED_EXPIRES_AT)
+    def test_malformed_expires_at_fails_closed_with_warn_log(self, monkeypatch, capfd, bad_stamp):
+        """Unparseable expires_at is treated as expiring → fail closed, no network call."""
         import json
         from unittest.mock import patch as upatch
 
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
         monkeypatch.setenv("AWS_REGION", "us-east-1")
 
-        bad = self._stored(expires_at="this is not a date")
+        bad = self._stored(expires_at=bad_stamp)
         mock_sm = MagicMock()
         mock_sm.get_secret_value.return_value = {"SecretString": json.dumps(bad)}
 
-        # urlopen returns success — we just want to verify the refresh
-        # path got triggered by the malformed expires_at.
-        fake_resp = MagicMock()
-        fake_resp.read.return_value = json.dumps(
-            {"access_token": "lin_refreshed", "expires_in": 3600}
-        ).encode("utf-8")
-        fake_resp.__enter__ = MagicMock(return_value=fake_resp)
-        fake_resp.__exit__ = MagicMock(return_value=False)
-
         with (
             patch("boto3.client", return_value=mock_sm),
-            upatch("urllib.request.urlopen", return_value=fake_resp) as urlopen_mock,
+            upatch("urllib.request.urlopen") as urlopen_mock,
         ):
-            assert resolve_linear_api_token({"linear_oauth_secret_arn": "arn:t"}) == "lin_refreshed"
-            # Refresh path was actually invoked (the assertion above
-            # only succeeds if urlopen ran).
-            assert urlopen_mock.called
-        monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
-
-    def test_network_failure_during_refresh_returns_stale_token(self, monkeypatch):
-        """URLError during refresh: surface stale token instead of crashing."""
-        import json
-        import urllib.error
-        from unittest.mock import patch as upatch
-
-        monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
-        monkeypatch.setenv("AWS_REGION", "us-east-1")
-
-        mock_sm = MagicMock()
-        mock_sm.get_secret_value.return_value = {"SecretString": json.dumps(self._stored())}
-
-        with (
-            patch("boto3.client", return_value=mock_sm),
-            upatch("urllib.request.urlopen", side_effect=urllib.error.URLError("DNS down")),
-        ):
-            # Doesn't crash; returns the stale (expiring) access_token.
-            result = resolve_linear_api_token({"linear_oauth_secret_arn": "arn:t"})
-            assert result == "lin_old"
+            assert resolve_linear_api_token({"linear_oauth_secret_arn": "arn:t"}) == ""
+            urlopen_mock.assert_not_called()
+        assert f"malformed expires_at '{bad_stamp}'" in capfd.readouterr().out
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
 
     def test_corrupted_secret_json_returns_empty_with_error_log(self, monkeypatch):
@@ -1115,7 +1133,8 @@ class TestResolveJiraOauthTokenNoRefresh:
             urlopen_mock.assert_not_called()
         monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
 
-    def test_malformed_expires_at_fails_closed(self, monkeypatch):
+    @pytest.mark.parametrize("bad_stamp", _MALFORMED_EXPIRES_AT)
+    def test_malformed_expires_at_fails_closed(self, monkeypatch, bad_stamp):
         """Unparseable expires_at is treated as expiring → fail closed, no network call."""
         import json
         from unittest.mock import patch as upatch
@@ -1123,7 +1142,7 @@ class TestResolveJiraOauthTokenNoRefresh:
         monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
         monkeypatch.setenv("AWS_REGION", "us-east-1")
 
-        bad = self._stored(expires_at="this is not a date")
+        bad = self._stored(expires_at=bad_stamp)
         mock_sm = MagicMock()
         mock_sm.get_secret_value.return_value = {"SecretString": json.dumps(bad)}
 

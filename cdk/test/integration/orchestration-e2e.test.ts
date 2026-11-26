@@ -143,6 +143,15 @@ jest.mock('../../src/handlers/shared/logger', () => ({
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
 }));
 
+// The reconciler's scoreboard step claims each finished task with a conditional
+// update of its record. The fake above implements the expressions of the
+// orchestration path only: it would store the time of that claim as the task's
+// `updated_at`.
+const publishTaskMetricsMock = jest.fn();
+jest.mock('../../src/handlers/scoreboard-metrics', () => ({
+  publishTaskMetrics: (...args: unknown[]) => publishTaskMetricsMock(...args),
+}));
+
 // Env: no guardrail, no repo table (lookupRepo → onboarded:true), no
 // orchestrator invoke. Keeps createTaskCore on its pure validate+persist
 // path so the integration stays hermetic.
@@ -203,6 +212,7 @@ async function statuses(orchestrationId: string): Promise<Record<string, string>
 beforeEach(() => {
   for (const k of Object.keys(tables)) delete tables[k];
   fakeSend.mockClear();
+  publishTaskMetricsMock.mockReset().mockResolvedValue(false);
 });
 
 describe('orchestration integration — real createTaskCore', () => {

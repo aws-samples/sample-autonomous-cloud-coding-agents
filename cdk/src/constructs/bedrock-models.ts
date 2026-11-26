@@ -43,9 +43,9 @@ import {
 export {
   BEDROCK_GEO_REGIONS,
   DEFAULT_BEDROCK_MODEL_IDS,
-  DEFAULT_HAIKU_MODEL_ID,
   PLATFORM_DEFAULT_AUX_MODEL_ID,
   PLATFORM_DEFAULT_MODEL_ID,
+  geoPrefixOf,
   inferenceProfileId,
 } from '../handlers/shared/bedrock-model-constants';
 

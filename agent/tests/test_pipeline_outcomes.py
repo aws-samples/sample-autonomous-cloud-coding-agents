@@ -3,7 +3,7 @@
 import pytest
 
 from config import NEEDS_INPUT_MARKER
-from hooks import _record_blocker_reason, _reset_blocker_reason_for_tests
+from hooks import _record_blocker_reason
 from models import AgentResult
 from pipeline import (
     _apply_delivery_gate,
@@ -43,21 +43,55 @@ class TestNeedsInputMarker:
         assert _strip_needs_input_marker("  plain question?  ") == "plain question?"
 
 
-@pytest.fixture(autouse=True)
-def _reset_blocker_latch():
-    """#251 carry-path latch is module-level; reset around every test so a
-    detected blocker never leaks into an unrelated outcome-resolution case."""
-    _reset_blocker_reason_for_tests()
-    yield
-    _reset_blocker_reason_for_tests()
-
-
 class TestResolveOverallTaskStatus:
-    def test_success_end_turn_with_build_ok(self):
-        ar = AgentResult(status="success", error=None)
-        overall, err = _resolve_overall_task_status(ar, build_ok=True, pr_url="https://pr")
-        assert overall == "success"
+    def test_success_with_build_ok(self):
+        ar = AgentResult(status="success")
+        status, err = _resolve_overall_task_status(ar, build_ok=True, pr_url="https://pr")
+        assert status == "success"
         assert err is None
+
+    def test_end_turn_with_build_ok(self):
+        ar = AgentResult(status="end_turn")
+        status, err = _resolve_overall_task_status(ar, build_ok=True, pr_url=None)
+        assert status == "success"
+        assert err is None
+
+    def test_success_preserves_existing_error(self):
+        """If agent reports success with a non-fatal error, it's preserved on success."""
+        ar = AgentResult(status="success", error="non-fatal warning")
+        status, err = _resolve_overall_task_status(ar, build_ok=True, pr_url=None)
+        assert status == "success"
+        assert err == "non-fatal warning"
+
+    def test_success_with_build_failed(self):
+        ar = AgentResult(status="success")
+        status, err = _resolve_overall_task_status(ar, build_ok=False, pr_url="https://pr")
+        assert status == "error"
+        assert err is not None
+        assert "agent_status='success'" in err
+        assert "build_ok=False" in err
+
+    def test_success_with_build_TIMED_OUT_marks_timeout_distinctly(self):
+        # A build that exceeded the time limit must read as a
+        # TIMEOUT, not a generic build failure. The error_message carries
+        # ``build_ok=timeout`` so the platform's failure copy says "timed out".
+        ar = AgentResult(status="success")
+        status, err = _resolve_overall_task_status(
+            ar, build_ok=False, pr_url="https://pr", build_timed_out=True
+        )
+        assert status == "error"
+        assert err is not None
+        assert "build_ok=timeout" in err
+        assert "build_ok=False" not in err  # not the generic-failure marker
+
+    def test_build_failed_but_not_timeout_keeps_false_marker(self):
+        ar = AgentResult(status="success")
+        _, err = _resolve_overall_task_status(
+            ar, build_ok=False, pr_url="https://pr", build_timed_out=False
+        )
+        assert err is not None
+        assert "build_ok=False" in err
+        assert "timeout" not in err
 
     def test_infra_failed_build_forces_error_even_when_gate_would_pass(self):
         # The build was killed by ENOSPC/OOM (build_infra_failed).
@@ -98,20 +132,28 @@ class TestResolveOverallTaskStatus:
         assert "ResultMessage" in (err or "")
         assert "unknown" in (err or "").lower()
 
-    def test_unknown_merges_existing_agent_error(self):
+    @pytest.mark.parametrize("build_ok", [True, False])
+    def test_unknown_merges_existing_agent_error(self, build_ok):
         ar = AgentResult(status="unknown", error="receive_response() failed: boom")
-        overall, err = _resolve_overall_task_status(ar, build_ok=True, pr_url=None)
+        overall, err = _resolve_overall_task_status(ar, build_ok=build_ok, pr_url=None)
         assert overall == "error"
         assert err is not None
         assert "receive_response() failed: boom" in err
         assert "ResultMessage" in err
 
-    def test_error_status_without_message_gets_default(self):
+    @pytest.mark.parametrize("build_ok", [True, False])
+    def test_error_status_without_message_gets_default(self, build_ok):
         ar = AgentResult(status="error", error=None)
-        overall, err = _resolve_overall_task_status(ar, build_ok=True, pr_url=None)
+        overall, err = _resolve_overall_task_status(ar, build_ok=build_ok, pr_url=None)
         assert overall == "error"
         assert err is not None
         assert "agent_status='error'" in err
+
+    def test_error_status_preserves_agent_error(self):
+        ar = AgentResult(status="error", error="OOM killed")
+        status, err = _resolve_overall_task_status(ar, build_ok=False, pr_url=None)
+        assert status == "error"
+        assert err == "OOM killed"
 
     def test_error_promotes_latched_blocker_reason(self):
         # #251 carry-path: a hook-detected blocker with no SDK error message is
@@ -252,66 +294,75 @@ class TestDeliveryGate:
         assert "agent_status=success" in err
         assert "deliverable=lost" in err
 
+    def test_lost_reason_names_both_lost_work_and_a_run_that_changed_nothing(self):
+        # The gate cannot tell the two apart (#751). Slack and the CLI print this reason as it is.
+        _, err = self._gate()
+        assert err is not None
+        assert "the agent made no change" in err
+        assert "its changes did not land" in err
+
 
 class TestChainPriorAgentError:
-    def test_no_agent_result(self):
-        msg = _chain_prior_agent_error(None, ValueError("post-hook failed"))
-        assert "ValueError" in msg
-        assert "post-hook failed" in msg
+    def test_none_agent_result_returns_exception_only(self):
+        exc = RuntimeError("post-hook crash")
+        assert _chain_prior_agent_error(None, exc) == "RuntimeError: post-hook crash"
 
-    def test_chains_agent_error_string(self):
-        ar = AgentResult(status="error", error="agent blew up")
-        msg = _chain_prior_agent_error(ar, RuntimeError("ensure_pr failed"))
-        assert "agent blew up" in msg
-        assert "ensure_pr failed" in msg
-        assert "subsequent failure" in msg
+    def test_agent_with_error_chains_both(self):
+        ar = AgentResult(status="error", error="SDK timeout")
+        exc = ValueError("PR creation failed")
+        result = _chain_prior_agent_error(ar, exc)
+        assert result == "SDK timeout; subsequent failure: ValueError: PR creation failed"
 
-    def test_chains_status_error_without_message(self):
-        ar = AgentResult(status="error", error=None)
-        msg = _chain_prior_agent_error(ar, OSError("network"))
-        assert "Agent reported status=error" in msg
-        assert "network" in msg
+    def test_agent_error_status_without_error_message(self):
+        ar = AgentResult(status="error")
+        exc = OSError("disk full")
+        result = _chain_prior_agent_error(ar, exc)
+        assert result == "Agent reported status=error; subsequent failure: OSError: disk full"
+
+    def test_agent_success_returns_exception_only(self):
+        ar = AgentResult(status="success")
+        exc = RuntimeError("unexpected")
+        assert _chain_prior_agent_error(ar, exc) == "RuntimeError: unexpected"
+
+    def test_agent_unknown_no_error_returns_exception_only(self):
+        ar = AgentResult(status="unknown")
+        exc = TypeError("bad arg")
+        assert _chain_prior_agent_error(ar, exc) == "TypeError: bad arg"
 
 
 class TestComputeTurnsCompleted:
-    """Rev-5 DATA-1: ``turns_completed`` must clamp to ``max_turns`` only on
-    ``error_max_turns``; all other statuses pass ``turns_attempted`` through."""
+    """Rev-5 DATA-1: ``turns_completed`` never exceeds ``max_turns``; a count at or
+    below the cap passes through. The agent status plays no part: the runner
+    reports a max-turns stop as ``error``, so a clamp that waited for
+    ``error_max_turns`` never fired."""
 
-    def test_success_passes_turns_through_unchanged(self):
-        # Agent finished cleanly in 5 SDK turns; max allowed 10. No clamp.
-        assert _compute_turns_completed("success", 5, max_turns=10) == 5
+    @pytest.mark.parametrize("turns", [3, 5, 6, 7])
+    def test_turns_below_the_cap_pass_through_unchanged(self, turns):
+        # The agent stopped before the cap, cleanly or on an error. No clamp,
+        # and no invented turns.
+        assert _compute_turns_completed(turns, max_turns=10) == turns
 
-    def test_end_turn_passes_turns_through_unchanged(self):
-        assert _compute_turns_completed("end_turn", 3, max_turns=10) == 3
+    def test_count_above_the_cap_is_clamped(self):
+        assert _compute_turns_completed(11, max_turns=10) == 10
 
-    def test_error_status_without_max_turns_does_not_clamp(self):
-        # Generic error — e.g. tool failure — should NOT clamp.
-        assert _compute_turns_completed("error", 7, max_turns=10) == 7
+    def test_exact_max_passes_through(self):
+        assert _compute_turns_completed(10, max_turns=10) == 10
 
-    def test_error_max_turns_clamps_when_sdk_overreports(self):
-        # SDK reports max_turns + 1 on error_max_turns; clamp to the declared
-        # ceiling so ``turns_completed`` reflects what actually executed.
-        assert _compute_turns_completed("error_max_turns", 11, max_turns=10) == 10
+    def test_limit_of_zero_is_no_cap(self):
+        # The SDK hands --max-turns to the CLI only for a truthy value, so a run
+        # with max_turns 0 (MAX_TURNS=0 in batch mode, a Blueprint with
+        # agent.maxTurns 0 on ECS) has no turn limit. Its turns are not zero.
+        assert _compute_turns_completed(37, max_turns=0) == 37
 
-    def test_error_max_turns_does_not_increase_below_the_clamp(self):
-        # Defensive: if the SDK reported fewer turns than max (shouldn't
-        # happen, but we don't want to invent turns).
-        assert _compute_turns_completed("error_max_turns", 6, max_turns=10) == 6
-
-    def test_error_max_turns_with_exact_max_passes_through(self):
-        # Edge case: attempted == max_turns; min() is a no-op.
-        assert _compute_turns_completed("error_max_turns", 10, max_turns=10) == 10
-
-    def test_none_turns_attempted_round_trips(self):
-        # Missing SDK count must round-trip as None so writers can detect
+    def test_missing_count_round_trips(self):
+        # A missing count must round-trip as None so writers can detect
         # "no turn counter available" vs "zero turns".
-        assert _compute_turns_completed("success", None, max_turns=10) is None
-        assert _compute_turns_completed("error_max_turns", None, max_turns=10) is None
+        assert _compute_turns_completed(None, max_turns=10) is None
 
-    def test_zero_turns_attempted_round_trips(self):
+    def test_zero_count_round_trips(self):
         # Zero is treated the same as None (falsy) so we don't clamp it to a
         # negative / nonsensical value.
-        assert _compute_turns_completed("error_max_turns", 0, max_turns=10) == 0
+        assert _compute_turns_completed(0, max_turns=10) == 0
 
 
 class TestMaxTurnsStuckEnrichment:

@@ -18,9 +18,13 @@
  */
 
 import * as fs from 'fs';
+import { createHash } from 'node:crypto';
 import * as path from 'path';
-import { App, AspectPriority, Aspects } from 'aws-cdk-lib';
+import * as bedrock from '@aws-cdk/aws-bedrock-alpha';
+import { App, AspectPriority, Aspects, NestedStack, Stack } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
+import { CfnGuardrail } from 'aws-cdk-lib/aws-bedrock';
+import * as sqs from 'aws-cdk-lib/aws-sqs';
 import {
   BEDROCK_GEO_REGION_CONTEXT_KEY,
   DEFAULT_BEDROCK_GEO_REGION,
@@ -28,10 +32,13 @@ import {
 } from '../../src/constructs/bedrock-models';
 import * as lambdaMicrovmCompute from '../../src/constructs/lambda-microvm-compute';
 import { buildAppId, SolutionUaAspect } from '../../src/constructs/solution-ua-aspect';
-import { AgentStack } from '../../src/stacks/agent';
+import { AgentStack, publishGuardrailVersion } from '../../src/stacks/agent';
 
 describe('AgentStack', () => {
   let template: Template;
+  let concurrencyMaintenance: Template;
+  /** The nested stacks, each with the values the root template passes for its parameters (none below a nested stack). */
+  let nestedStacks: { path: string; template: Template; parameters: Record<string, unknown> }[];
 
   beforeAll(() => {
     const app = new App();
@@ -39,10 +46,73 @@ describe('AgentStack', () => {
       env: { account: '123456789012', region: 'us-east-1' },
     });
     template = Template.fromStack(stack);
+    concurrencyMaintenance = Template.fromStack(stack.node.findChild('ConcurrencyMaintenance') as NestedStack);
+    nestedStacks = stack.node.findAll().filter((child): child is NestedStack => NestedStack.isNestedStack(child)).map(child => ({
+      path: child.node.path,
+      template: Template.fromStack(child),
+      parameters: template.toJSON().Resources[stack.resolve(child.nestedStackResource!.logicalId)]?.Properties.Parameters ?? {},
+    }));
   });
 
   test('synthesizes without errors', () => {
     expect(template).toBeDefined();
+  });
+
+  test('nests scheduled maintenance while retaining its data in the parent', () => {
+    const parentFunctions = Object.keys(template.findResources('AWS::Lambda::Function'));
+    for (const prefix of ['ConcurrencyReconciler', 'AdmissionQueuePickup', 'StrandedTaskReconciler', 'PendingUploadCleanup', 'PrOutcomeSweep']) {
+      expect(parentFunctions.some(id => id.startsWith(prefix))).toBe(false);
+      expect(Object.keys(concurrencyMaintenance.findResources('AWS::Lambda::Function'))
+        .filter(id => id.startsWith(prefix))).toHaveLength(1);
+    }
+    concurrencyMaintenance.resourceCountIs('AWS::Lambda::Function', 5);
+    concurrencyMaintenance.resourceCountIs('AWS::Events::Rule', 5);
+    concurrencyMaintenance.resourceCountIs('AWS::S3::Bucket', 0);
+    concurrencyMaintenance.resourceCountIs('AWS::DynamoDB::Table', 0);
+    concurrencyMaintenance.resourceCountIs('AWS::SecretsManager::Secret', 0);
+    concurrencyMaintenance.hasResourceProperties('AWS::Events::Rule', {
+      ScheduleExpression: 'rate(15 minutes)',
+    });
+    const fn = Object.entries(concurrencyMaintenance.findResources('AWS::Lambda::Function'))
+      .find(([id]) => id.startsWith('ConcurrencyReconciler'))![1];
+    const variables = fn.Properties.Environment.Variables;
+    const nested = Object.entries(template.findResources('AWS::CloudFormation::Stack'))
+      .find(([id]) => id.startsWith('ConcurrencyMaintenanceNestedStack'))![1];
+    expect(nested.Properties.Parameters[variables.TASK_TABLE_NAME.Ref])
+      .toEqual({ Ref: expect.stringMatching(/^TaskTable/) });
+    expect(nested.Properties.Parameters[variables.USER_CONCURRENCY_TABLE_NAME.Ref])
+      .toEqual({ Ref: expect.stringMatching(/^UserConcurrencyTable/) });
+  });
+
+  test('the pull-request sweep works on the stack\'s own tables, reads GitHub with its token secret, and is granted that secret only', () => {
+    const sweep = Object.entries(concurrencyMaintenance.findResources('AWS::Lambda::Function'))
+      .find(([id]) => id.startsWith('PrOutcomeSweep'))![1];
+    const variables = sweep.Properties.Environment.Variables;
+    const nested = Object.entries(template.findResources('AWS::CloudFormation::Stack'))
+      .find(([id]) => id.startsWith('ConcurrencyMaintenanceNestedStack'))![1];
+    expect(nested.Properties.Parameters[variables.GITHUB_TOKEN_SECRET_ARN.Ref])
+      .toEqual({ Ref: expect.stringMatching(/^GitHubTokenSecret/) });
+    expect(nested.Properties.Parameters[variables.TASK_TABLE_NAME.Ref])
+      .toEqual({ Ref: expect.stringMatching(/^TaskTable/) });
+    expect(nested.Properties.Parameters[variables.TASK_EVENTS_TABLE_NAME.Ref])
+      .toEqual({ Ref: expect.stringMatching(/^TaskEventsTable/) });
+
+    // The secret its role may read is the one its environment names.
+    const secretStatements = Object.entries(concurrencyMaintenance.findResources('AWS::IAM::Policy'))
+      .filter(([id]) => id.startsWith('PrOutcomeSweep'))
+      .flatMap(([, policy]) => policy.Properties.PolicyDocument.Statement as { Action: unknown; Resource: unknown }[])
+      .filter((statement) => JSON.stringify(statement.Action).includes('secretsmanager:'));
+    expect(secretStatements).toEqual([{
+      Action: ['secretsmanager:GetSecretValue', 'secretsmanager:DescribeSecret'],
+      Effect: 'Allow',
+      Resource: variables.GITHUB_TOKEN_SECRET_ARN,
+    }]);
+
+    const sweepAlarms = Object.entries(concurrencyMaintenance.findResources('AWS::CloudWatch::Alarm'))
+      .filter(([id]) => id.startsWith('PrOutcomeSweep'))
+      .map(([, alarm]) => alarm);
+    expect(sweepAlarms).toHaveLength(1);
+    expect(JSON.stringify((sweepAlarms[0] as { Properties: unknown }).Properties)).toContain('OperationalAlerts');
   });
 
   test('creates exactly 22 DynamoDB tables', () => {
@@ -194,7 +264,7 @@ describe('AgentStack', () => {
   test('creates the Cedar-wasm Lambda layer', () => {
     template.resourceCountIs('AWS::Lambda::LayerVersion', 1);
     template.hasResourceProperties('AWS::Lambda::LayerVersion', {
-      CompatibleRuntimes: ['nodejs20.x', 'nodejs22.x', 'nodejs24.x'],
+      CompatibleRuntimes: ['nodejs22.x', 'nodejs24.x'],
     });
   });
 
@@ -490,8 +560,9 @@ describe('AgentStack', () => {
    *
    * (The full 25k-line template was also diffed pre/post out-of-band and is
    * identical modulo CDK's own local synth non-determinism — asset hashes,
-   * custom-resource timestamps, the InputGuardrail version logical id — which
-   * differ between two synths of the SAME tree and so cannot be asserted here.
+   * custom-resource timestamps and, at the time, the InputGuardrail version
+   * logical id (stable since #1079) — which differ between two synths of the
+   * SAME tree and so cannot be asserted here.
    * The Bedrock resources are the change's entire blast radius.)
    */
   test('default-context Bedrock grants are the exact expected set, nothing wider', () => {
@@ -870,6 +941,31 @@ describe('AgentStack', () => {
     expect(objectStatements).toEqual([]);
   });
 
+  test('only the per-task SessionRole can write the trace bucket, and its access-logging exception says so', () => {
+    // The AwsSolutions-S1 exception on this bucket argues from who can write it. cdk-nag copies the reason into the
+    // template and the NagReport, where a reviewer reads it as evidence. It has to name the role that holds the grant.
+    const [, bucket] = Object.entries(template.findResources('AWS::S3::Bucket'))
+      .find(([id]) => id.startsWith('TraceArtifactsBucket'))!;
+    // In the root template a statement names the bucket by its logical id, in a
+    // nested one by the parameter that passes it in. Both contain the construct id.
+    const reaches = (resource: unknown) => resource === '*' || JSON.stringify(resource).includes('TraceArtifactsBucket');
+    // Nested stacks have roles of their own, and CDK moves the statements of a large role into a managed policy.
+    // The bucket policy admits one more principal, CDK's auto-delete provider (see trace-artifacts-bucket.ts).
+    const writers = ['AWS::IAM::Policy', 'AWS::IAM::ManagedPolicy']
+      .flatMap(type => [template, ...nestedStacks.map(nested => nested.template)].flatMap(t => Object.entries(t.findResources(type))))
+      .filter(([, policy]) => (policy.Properties.PolicyDocument.Statement as Array<{ Effect: string; Action: string | string[]; Resource: unknown }>)
+        .some(stmt => stmt.Effect === 'Allow' && /"s3:(Put|Delete|\*)/.test(JSON.stringify(stmt.Action)) && reaches(stmt.Resource)))
+      .map(([policyId]) => policyId);
+    expect(writers).toEqual([expect.stringMatching(/^AgentSessionRole/)]);
+
+    const s1 = (bucket.Metadata.cdk_nag.rules_to_suppress as Array<{ id: string; reason: string; is_reason_encoded?: boolean }>)
+      .find(rule => rule.id === 'AwsSolutions-S1')!;
+    // cdk-nag stores a reason base64-encoded when it holds a character above
+    // U+00FF (here the em dash).
+    const reason = s1.is_reason_encoded ? Buffer.from(s1.reason, 'base64').toString('utf8') : s1.reason;
+    expect(reason).toContain('SessionRole');
+  });
+
   test('no hard-coded log-delivery logical ids or names anywhere in the stack', () => {
     // The template must not carry values recorded from one account's live stack.
     //
@@ -972,6 +1068,33 @@ describe('AgentStack', () => {
     const vars = (sweep![1] as { Properties?: { Environment?: { Variables?: Record<string, unknown> } } })
       .Properties?.Environment?.Variables ?? {};
     expect(vars.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME).toBeDefined();
+  });
+
+  test('every function that reads the per-user concurrency cap gets the one the orchestrator admits against', () => {
+    // The stack declares the cap once. A construct it does not pass the cap to falls
+    // back to a default of its own, and that shows only on the day the stack's value
+    // changes: the orchestrator then admits against one number while the admission-queue
+    // pickup and the task API count against another.
+    // The scheduled jobs, the pickup among them, are in a nested stack with a template of its own.
+    const functions = {
+      ...template.findResources('AWS::Lambda::Function'),
+      ...concurrencyMaintenance.findResources('AWS::Lambda::Function'),
+    };
+    const caps = Object.entries(functions)
+      .map(([id, fn]) => [id, fn.Properties.Environment?.Variables?.MAX_CONCURRENT_TASKS_PER_USER] as const)
+      .filter(([, cap]) => cap !== undefined);
+    const admissionCap = caps.find(([id]) => id.startsWith('TaskOrchestratorOrchestratorFn'))?.[1];
+
+    expect(admissionCap).toBeDefined();
+    expect(caps.filter(([, cap]) => cap !== admissionCap)).toEqual([]);
+    // The functions this is here for. One that stops carrying the variable, or that
+    // moves into another nested stack (whose template then has to be read here as
+    // well), would otherwise drop out of the comparison above without being noticed.
+    expect(caps.map(([id]) => id)).toEqual(expect.arrayContaining([
+      expect.stringMatching(/^TaskApiGetTaskFn/),
+      expect.stringMatching(/^TaskApiConfirmUploadsFn/),
+      expect.stringMatching(/^AdmissionQueuePickupPickupFn/),
+    ]));
   });
 
   test('creates a log group for model invocation logs', () => {
@@ -1089,10 +1212,276 @@ describe('AgentStack', () => {
     }
   });
 
+  test('alarms on the first failed webhook screening call and notifies the alerts topic (#794)', () => {
+    const screeningFailed = { Namespace: 'ABCA/Webhooks', MetricName: 'WebhookScreeningFailed' };
+    // In the maintenance stack, not the root stack: the widest inline deployment
+    // has no root-stack resource to spare under the 490-resource budget.
+    template.resourcePropertiesCountIs('AWS::CloudWatch::Alarm', screeningFailed, 0);
+    concurrencyMaintenance.resourcePropertiesCountIs('AWS::CloudWatch::Alarm', screeningFailed, 1);
+    concurrencyMaintenance.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      ...screeningFailed,
+      // The total is the metric without dimensions; with one, the alarm would read a per-source metric.
+      Dimensions: Match.absent(),
+      Statistic: 'Sum',
+      Period: 300,
+      Threshold: 1,
+      EvaluationPeriods: 1,
+      ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+      TreatMissingData: 'notBreaching',
+    });
+    const [alarm] = Object.values(concurrencyMaintenance.findResources('AWS::CloudWatch::Alarm', { Properties: screeningFailed }));
+    expect(alarm.Properties.AlarmActions).toHaveLength(1);
+    const nested = Object.entries(template.findResources('AWS::CloudFormation::Stack'))
+      .find(([id]) => id.startsWith('ConcurrencyMaintenanceNestedStack'))![1];
+    expect(nested.Properties.Parameters[alarm.Properties.AlarmActions[0].Ref])
+      .toEqual(template.toJSON().Outputs.OperationalAlertsTopicArn.Value);
+  });
+
+  test('notifies the alerts topic from every CloudWatch alarm of the root stack and of each nested stack (#686)', () => {
+    const topicRef = template.toJSON().Outputs.OperationalAlertsTopicArn.Value;
+    const alarms = (t: Template, toRootValue = (action: { Ref: string }): unknown => action) =>
+      Object.entries(t.findResources('AWS::CloudWatch::Alarm'))
+        .map(([id, alarm]) => ({ id, actions: (alarm.Properties.AlarmActions ?? []).map(toRootValue) }));
+    const notifiesTopic = expect.objectContaining({ actions: expect.arrayContaining([topicRef]) });
+    expect({
+      root: alarms(template),
+      // A nested template refers to the topic by a stack parameter, so its actions are read as the values the root passes.
+      ...Object.fromEntries(nestedStacks.map(nested =>
+        [nested.path, alarms(nested.template, action => nested.parameters[action.Ref])])),
+    }).toEqual({
+      'root': Array(9).fill(notifiesTopic),
+      'TestAgentStack/AgentRegistryStack': [],
+      'TestAgentStack/RegistryApi': [],
+      'TestAgentStack/ConcurrencyMaintenance': Array(2).fill(notifiesTopic),
+    });
+  });
+
   test('does NOT subscribe an email when no alertEmail context is set (#629)', () => {
     // The default deploy ships the topic with no confirmed target;
     // operators subscribe Slack / PagerDuty / email themselves.
     template.resourceCountIs('AWS::SNS::Subscription', 0);
+  });
+
+  test('every GUARDRAIL_VERSION is the one published version of the input guardrail, which is retained (#1079)', () => {
+    const versions = template.findResources('AWS::Bedrock::GuardrailVersion');
+    expect(Object.values(versions)).toEqual([expect.objectContaining({ DeletionPolicy: 'Retain', UpdateReplacePolicy: 'Retain' })]);
+    const published = { 'Fn::GetAtt': [Object.keys(versions)[0], 'Version'] };
+    // A nested template would name the version by a stack parameter: read the value the root passes.
+    const pinned = [{ template, parameters: {} as Record<string, unknown> }, ...nestedStacks].flatMap(stack =>
+      Object.values(stack.template.findResources('AWS::Lambda::Function'))
+        .map(fn => fn.Properties.Environment?.Variables?.GUARDRAIL_VERSION)
+        .filter(value => value !== undefined)
+        .map(value => stack.parameters[value.Ref] ?? value));
+    expect(pinned.length).toBeGreaterThan(0);
+    // The guardrail's own Version attribute is DRAFT, which follows every edit instead of pinning one.
+    expect(pinned).toEqual(pinned.map(() => published));
+
+    // The version is named after the guardrail as CloudFormation receives it. The tests of
+    // publishGuardrailVersion() cover a guardrail that is changed after its version was
+    // published; this pins the name itself.
+    const [guardrail] = Object.values(template.findResources('AWS::Bedrock::Guardrail'));
+    const { Tags: _tags, ...properties } = guardrail.Properties;
+    const [[versionId, version]] = Object.entries(versions);
+    const hash = createHash('sha256').update(JSON.stringify([properties, version.Properties.Description])).digest('hex');
+    // The whole id: the guardrail's construct id, the hash, and the eight characters the CDK appends.
+    expect(versionId).toMatch(new RegExp(`^InputGuardrailVersion${hash.slice(0, 16)}[0-9A-F]{8}$`));
+  });
+});
+
+describe('publishGuardrailVersion (#1079)', () => {
+  interface Change { inFront?: boolean; tag?: boolean; inputStrength?: bedrock.ContentFilterStrength; description?: string }
+
+  // TEST-CONVENTION EXEMPTION (cdk/AGENTS.md "synth once in beforeAll"): each case
+  // compares two syntheses, and the stack holds one guardrail.
+  /** Logical id of the version published for a guardrail in a new stack. */
+  function versionId(change: Change = {}): string {
+    const stack = new Stack(new App(), 'Stack');
+    if (change.inFront) new sqs.Queue(stack, 'InFront');
+    const guardrail = new bedrock.Guardrail(stack, 'InputGuardrail', {
+      guardrailName: 'input',
+      contentFilters: [{
+        type: bedrock.ContentFilterType.PROMPT_ATTACK,
+        inputStrength: change.inputStrength ?? bedrock.ContentFilterStrength.MEDIUM,
+        outputStrength: bedrock.ContentFilterStrength.NONE,
+      }],
+    });
+    // Tags.of() would set the tag at synthesis, after the version got its name: set it on the resource now.
+    if (change.tag) guardrail.node.children.find(child => child instanceof CfnGuardrail)!.cdkTagManager.setTag('github:sha', 'abc');
+    publishGuardrailVersion(guardrail, change.description ?? 'Initial version');
+    const ids = Object.keys(Template.fromStack(stack).findResources('AWS::Bedrock::GuardrailVersion'));
+    expect(ids).toHaveLength(1);
+    return ids[0];
+  }
+
+  // Two syntheses in one process differ in their token numbers, as two deploys do.
+  test.each<[string, Change]>([
+    ['in a second synthesis of the same tree', {}],
+    ['with a construct in front of the guardrail', { inFront: true }],
+    ['with a tag on the guardrail', { tag: true }],
+  ])('names the version the same %s', (_case, change) => {
+    expect(versionId(change)).toBe(versionId());
+  });
+
+  test.each<[string, Change]>([
+    ['the configuration of the guardrail', { inputStrength: bedrock.ContentFilterStrength.HIGH }],
+    ['the description of the version', { description: 'Second version' }],
+  ])('names the version anew when %s changes', (_case, change) => {
+    expect(versionId(change)).not.toBe(versionId());
+  });
+
+  test('fails the synthesis when the guardrail changes after its version was published', () => {
+    const stack = new Stack(new App(), 'Stack');
+    const guardrail = new bedrock.Guardrail(stack, 'InputGuardrail', { guardrailName: 'input' });
+    publishGuardrailVersion(guardrail, 'Initial version');
+    guardrail.addContentFilter({
+      type: bedrock.ContentFilterType.PROMPT_ATTACK,
+      inputStrength: bedrock.ContentFilterStrength.MEDIUM,
+      outputStrength: bedrock.ContentFilterStrength.NONE,
+    });
+    expect(() => Template.fromStack(stack)).toThrow('it was changed after publishGuardrailVersion()');
+  });
+
+  const contentFilter = (type: bedrock.ContentFilterType): bedrock.ContentFilter => ({
+    type,
+    inputStrength: bedrock.ContentFilterStrength.MEDIUM,
+    outputStrength: bedrock.ContentFilterStrength.NONE,
+  });
+  const topic = (name: string) => bedrock.Topic.custom({ name, definition: `Advice on ${name}.`, examples: [`What should I do about ${name}?`] });
+  const piiFilter = (type: bedrock.PIIType): bedrock.PIIFilter => ({ type, action: bedrock.GuardrailAction.BLOCK });
+  const regexFilter = (name: string): bedrock.RegexFilter => ({ name, pattern: `${name}-[0-9]+`, action: bedrock.GuardrailAction.BLOCK });
+  const groundingFilter = (type: bedrock.ContextualGroundingFilterType): bedrock.ContextualGroundingFilter => ({ type, threshold: 0.5 });
+  const guardrailProfile = (geography: string) => `arn:aws:bedrock:us-east-1:123456789012:guardrail-profile/${geography}.guardrail.v1:0`;
+
+  // The alpha construct keeps its first rendering of a policy that is not empty, and the
+  // function renders the guardrail at the call. Of the changes below, only the first two
+  // still show in the rendered properties after that: the function finds the others in the
+  // members that the construct renders those properties from.
+  test.each<[string, Omit<bedrock.GuardrailProps, 'guardrailName'>, (guardrail: bedrock.Guardrail) => unknown]>([
+    [
+      'has a property of its resource overridden',
+      {},
+      guardrail => guardrail.node.children.find(child => child instanceof CfnGuardrail)!.addPropertyOverride('BlockedInputMessaging', 'No.'),
+    ],
+    [
+      'gets a second content filter',
+      { contentFilters: [contentFilter(bedrock.ContentFilterType.PROMPT_ATTACK)] },
+      guardrail => guardrail.addContentFilter(contentFilter(bedrock.ContentFilterType.HATE)),
+    ],
+    [
+      'gets a second denied topic',
+      { deniedTopics: [topic('investments')] },
+      guardrail => guardrail.addDeniedTopicFilter(topic('medication')),
+    ],
+    [
+      'gets a second PII filter',
+      { piiFilters: [piiFilter(bedrock.GeneralPIIType.ADDRESS)] },
+      guardrail => guardrail.addPIIFilter(piiFilter(bedrock.GeneralPIIType.EMAIL)),
+    ],
+    [
+      'gets a second regex filter',
+      { regexFilters: [regexFilter('ticket')] },
+      guardrail => guardrail.addRegexFilter(regexFilter('invoice')),
+    ],
+    [
+      'gets a second word filter',
+      { wordFilters: [{ text: 'first' }] },
+      guardrail => guardrail.addWordFilter({ text: 'second' }),
+    ],
+    [
+      // The library has one managed word list, and accepts it twice.
+      'gets a second managed word list',
+      { managedWordListFilters: [{ type: bedrock.ManagedWordFilterType.PROFANITY }] },
+      guardrail => guardrail.addManagedWordListFilter({ type: bedrock.ManagedWordFilterType.PROFANITY }),
+    ],
+    [
+      'gets a second contextual grounding filter',
+      { contextualGroundingFilters: [groundingFilter(bedrock.ContextualGroundingFilterType.GROUNDING)] },
+      guardrail => guardrail.addContextualGroundingFilter(groundingFilter(bedrock.ContextualGroundingFilterType.RELEVANCE)),
+    ],
+    // Words and managed word lists share a policy, as regex and PII filters do. Once the
+    // policy is rendered, the empty list of the pair is kept as well.
+    [
+      'gets its first word filter beside a managed word list',
+      { managedWordListFilters: [{ type: bedrock.ManagedWordFilterType.PROFANITY }] },
+      guardrail => guardrail.addWordFilter({ text: 'first' }),
+    ],
+    [
+      'gets its first managed word list beside a word filter',
+      { wordFilters: [{ text: 'first' }] },
+      guardrail => guardrail.addManagedWordListFilter({ type: bedrock.ManagedWordFilterType.PROFANITY }),
+    ],
+    [
+      'gets its first regex filter beside a PII filter',
+      { piiFilters: [piiFilter(bedrock.GeneralPIIType.ADDRESS)] },
+      guardrail => guardrail.addRegexFilter(regexFilter('ticket')),
+    ],
+    [
+      'gets its first PII filter beside a regex filter',
+      { regexFilters: [regexFilter('ticket')] },
+      guardrail => guardrail.addPIIFilter(piiFilter(bedrock.GeneralPIIType.ADDRESS)),
+    ],
+    // No method of the construct makes the changes below: they are written to the object
+    // that the caller passed in, or to a member that TypeScript declares readonly.
+    [
+      'has one of its filters changed in place',
+      { wordFilters: [{ text: 'first' }] },
+      guardrail => Object.assign(guardrail.wordFilters[0], { text: 'other' }),
+    ],
+    [
+      'has the type of its PII filter changed in place',
+      { piiFilters: [piiFilter(bedrock.GeneralPIIType.ADDRESS)] },
+      guardrail => Object.assign(guardrail.piiFilters[0], { type: bedrock.GeneralPIIType.EMAIL }),
+    ],
+    [
+      'has its cross-Region profile changed in place',
+      { crossRegionConfig: { guardrailProfileArn: guardrailProfile('us') } },
+      guardrail => Object.assign(guardrail.crossRegionConfig!, { guardrailProfileArn: guardrailProfile('eu') }),
+    ],
+    [
+      'has its list of content filters replaced',
+      { contentFilters: [contentFilter(bedrock.ContentFilterType.PROMPT_ATTACK)] },
+      guardrail => Object.assign(guardrail, { contentFilters: [contentFilter(bedrock.ContentFilterType.HATE)] }),
+    ],
+    [
+      'has the tier of its content filters changed',
+      { contentFilters: [contentFilter(bedrock.ContentFilterType.PROMPT_ATTACK)] },
+      guardrail => Object.assign(guardrail, { contentFiltersTierConfig: bedrock.TierConfig.STANDARD }),
+    ],
+    [
+      'has the tier of its denied topics changed',
+      { deniedTopics: [topic('investments')] },
+      guardrail => Object.assign(guardrail, { topicsTierConfig: bedrock.TierConfig.STANDARD }),
+    ],
+  ])('fails the synthesis when the guardrail %s after its version was published', (_case, configured, change) => {
+    const stack = new Stack(new App(), 'Stack');
+    const guardrail = new bedrock.Guardrail(stack, 'InputGuardrail', { guardrailName: 'input', ...configured });
+    publishGuardrailVersion(guardrail, 'Initial version');
+    change(guardrail);
+    expect(() => Template.fromStack(stack)).toThrow('it was changed after publishGuardrailVersion()');
+  });
+
+  // The function compares the ten members that the alpha library renders the guardrail's
+  // properties from. A later version of the library that renders from one more can keep its
+  // first rendering of that one as well, and no test above would fail. This one fails when
+  // the new member is a list, or is read by a `generateCfn...` method as these ten are: name
+  // it in `sources` of the function, give it a row in the table above, and add it here.
+  test('knows the members that the alpha construct renders the properties from', () => {
+    const guardrail = new bedrock.Guardrail(new Stack(new App(), 'Stack'), 'InputGuardrail', { guardrailName: 'input' });
+    const members = new Set<string>();
+    // What its `generateCfn...` methods read. The exported class is the one that its decorator
+    // returns, so the methods are further up. In their text, `this.generateCfn...` is a call
+    // of another of them, and no member.
+    for (let proto = Object.getPrototypeOf(guardrail); proto !== Object.prototype; proto = Object.getPrototypeOf(proto)) {
+      for (const method of Object.getOwnPropertyNames(proto).filter(name => name.startsWith('generateCfn'))) {
+        for (const [, member] of String(proto[method]).matchAll(/\bthis\.(?!generateCfn)(\w+)/g)) members.add(member);
+      }
+    }
+    // And every list that the construct holds, whichever way a later version renders it.
+    for (const [member, value] of Object.entries(guardrail)) if (Array.isArray(value)) members.add(member);
+    expect([...members].sort()).toEqual([
+      'contentFilters', 'contentFiltersTierConfig', 'contextualGroundingFilters', 'crossRegionConfig', 'deniedTopics',
+      'managedWordListFilters', 'piiFilters', 'regexFilters', 'topicsTierConfig', 'wordFilters',
+    ]);
   });
 });
 
@@ -1160,7 +1549,7 @@ describe('AgentStack with the ECS substrate gate (--context compute_type=ecs)', 
 
   test('provisions an ECS cluster + both Fargate task definitions (build + planning)', () => {
     template.resourceCountIs('AWS::ECS::Cluster', 1);
-    // Two task defs — the 64 GB build def and the 8 GB read-only planning def
+    // Two task defs — the 16 GB build def and the 8 GB read-only planning def
     // (a read-only workflow runs on the smaller one). See
     // docs/design/ECS_RIGHTSIZED_PLANNING.md.
     template.resourceCountIs('AWS::ECS::TaskDefinition', 2);
@@ -1168,6 +1557,21 @@ describe('AgentStack with the ECS substrate gate (--context compute_type=ecs)', 
 
   test('outputs ComputeSubstrate=ecs so the CLI allows compute_type=ecs onboarding', () => {
     template.hasOutput('ComputeSubstrate', { Value: 'ecs' });
+  });
+
+  test('both ECS task definitions receive the same approval table as AgentCore', () => {
+    const approvalId = Object.keys(template.findResources('AWS::DynamoDB::Table'))
+      .find(id => id.startsWith('TaskApprovalsTable'));
+    expect(approvalId).toBeDefined();
+    const approvalTable = { Ref: approvalId };
+    const definitions = Object.values(template.findResources('AWS::ECS::TaskDefinition'));
+    expect(definitions).toHaveLength(2);
+    for (const definition of definitions) {
+      expect(definition.Properties.ContainerDefinitions[0].Environment).toContainEqual({
+        Name: 'TASK_APPROVALS_TABLE_NAME',
+        Value: approvalTable,
+      });
+    }
   });
 
   test('the orchestrator gets the PLANNING task-def ARN, not just the build one', () => {
@@ -1223,12 +1627,57 @@ describe('AgentStack with the ECS substrate gate (--context compute_type=ecs)', 
       Memory: '16384',
     });
   });
+
+  test('both ECS task definitions name the nudges table, so a nudge reaches an ECS agent', () => {
+    // Without NUDGES_TABLE_NAME the agent's nudge reader switches itself off:
+    // `bgagent nudge` answers 202, the row is written, and nothing reads it.
+    const nudgesTable = Object.keys(template.findResources('AWS::DynamoDB::Table'))
+      .find(id => id.startsWith('TaskNudgesTable'));
+    expect(nudgesTable).toBeDefined();
+    const definitions = Object.values(template.findResources('AWS::ECS::TaskDefinition'));
+    expect(definitions).toHaveLength(2);
+    for (const definition of definitions) {
+      expect(definition.Properties.ContainerDefinitions[0].Environment).toContainEqual({
+        Name: 'NUDGES_TABLE_NAME',
+        Value: { Ref: nudgesTable },
+      });
+    }
+    // The agent reads the table with the per-task SessionRole, as it does the
+    // other task tables: the task role itself gets no statement on it.
+    const rolesGrantedTheTable = Object.entries(template.findResources('AWS::IAM::Policy'))
+      .filter(([, policy]) => JSON.stringify(policy).includes(nudgesTable!))
+      .map(([id]) => id.replace(/DefaultPolicy.*$/, ''));
+    expect(rolesGrantedTheTable).toContain('AgentSessionRole');
+    expect(rolesGrantedTheTable).not.toContain('EcsAgentClusterTaskRole');
+  });
 });
 
 describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_type=lambda-microvm)', () => {
   const BASE_IMAGE_ARN = 'arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1';
 
   let template: Template;
+  let childTemplate: Template;
+
+  function expectChildReference(value: unknown, resourceType: string, attribute: string, prefix = ''): void {
+    const [stackId, outputPath] = (value as { 'Fn::GetAtt': [string, string] })['Fn::GetAtt'];
+    expect(stackId).toMatch(/^MicrovmNestedStack/);
+    expect(outputPath).toMatch(/^Outputs\./);
+    const childOutput = childTemplate.toJSON().Outputs[outputPath.slice('Outputs.'.length)];
+    const ids = Object.keys(childTemplate.findResources(resourceType)).filter(id => id.startsWith(prefix));
+    expect(ids.length).toBeGreaterThan(0);
+    expect(childOutput.Value).toEqual({ 'Fn::GetAtt': [expect.stringMatching(new RegExp(`^(${ids.join('|')})$`)), attribute] });
+  }
+
+  function orchestratorEnvironment(): Record<string, unknown> {
+    return Object.entries(template.findResources('AWS::Lambda::Function'))
+      .find(([id]) => id.includes('TaskOrchestratorOrchestratorFn'))![1]
+      .Properties.Environment.Variables;
+  }
+
+  function imageResources(): unknown[] {
+    const arn = orchestratorEnvironment().MICROVM_IMAGE_IDENTIFIER;
+    return [arn, { 'Fn::Join': ['', [arn, ':*']] }];
+  }
 
   beforeAll(() => {
     // Gate ON *and* an image configured — the steady state. The intermediate
@@ -1238,21 +1687,32 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     const app = new App({
       context: {
         compute_types: 'lambda-microvm',
+        microvm_nested_stack: true,
         microvm_base_image_arn: BASE_IMAGE_ARN,
         microvm_base_image_version: '1',
+        microvm_artifact_sha256: 'a'.repeat(64),
+        microvm_managed_image_version: '7.0',
       },
     });
     const stack = new AgentStack(app, 'TestAgentStackMicrovm', {
       env: { account: '123456789012', region: 'us-east-1' },
     });
     template = Template.fromStack(stack);
+    childTemplate = Template.fromStack(stack.node.findChild('Microvm') as lambdaMicrovmCompute.LambdaMicrovmStack);
   });
 
-  test('provisions the MicroVM image + BOTH egress network connectors', () => {
-    template.resourceCountIs('AWS::Lambda::MicrovmImage', 1);
+  test('defaults to a child stack for the MicroVM image and both egress network connectors', () => {
+    template.resourceCountIs('AWS::Lambda::MicrovmImage', 0);
+    template.resourceCountIs('AWS::Lambda::NetworkConnector', 0);
+    childTemplate.resourceCountIs('AWS::Lambda::MicrovmImage', 1);
     // Runtime (443) + build-time (443 + 80, for apt-get) — see ADR-021's
     // build-time-egress security-table row.
-    template.resourceCountIs('AWS::Lambda::NetworkConnector', 2);
+    childTemplate.resourceCountIs('AWS::Lambda::NetworkConnector', 2);
+  });
+
+  test('creates no CloudWatch alarm in the child stack, which the test of the alerts topic does not read (#686)', () => {
+    // An alarm added there has to be passed to operationalAlerts.addAlarmActions in stacks/agent.ts, and its action checked here.
+    childTemplate.resourceCountIs('AWS::CloudWatch::Alarm', 0);
   });
 
   test('does NOT provision the ECS substrate (the gates are mutually exclusive)', () => {
@@ -1268,6 +1728,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     for (const output of [
       'MicrovmArtifactBucketName',
       'MicrovmArtifactObjectKey',
+      'MicrovmArtifactBaseObjectKey',
       'MicrovmBuildRoleArn',
       'MicrovmExecutionRoleArn',
       'MicrovmEgressConnectorArns',
@@ -1278,6 +1739,14 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     ]) {
       template.hasOutput(output, {});
     }
+  });
+
+  test('forwards the uploaded artifact digest into the image URI and outputs', () => {
+    const key = `microvm-images/agent-artifact-${'a'.repeat(64)}.zip`;
+    template.hasOutput('MicrovmArtifactObjectKey', { Value: key });
+    template.hasOutput('MicrovmArtifactBaseObjectKey', { Value: 'microvm-images/agent-artifact.zip' });
+    const image = Object.values(childTemplate.findResources('AWS::Lambda::MicrovmImage'))[0]!;
+    expect(JSON.stringify(image.Properties.CodeArtifact.Uri)).toContain(key);
   });
 
   test('the build and runtime egress connector outputs are DIFFERENT connectors', () => {
@@ -1293,14 +1762,18 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     const env = orchestrator.Properties.Environment.Variables as Record<string, unknown>;
 
     expect(Object.keys(env).filter(k => k.startsWith('MICROVM_')).sort()).toEqual([
+      'MICROVM_APPROVAL_SUSPEND_ENABLED',
+      'MICROVM_APPROVAL_SUSPEND_PARAMETER_NAME',
       'MICROVM_EGRESS_CONNECTOR_ARNS',
       'MICROVM_EXECUTION_ROLE_ARN',
       'MICROVM_IMAGE_IDENTIFIER',
+      'MICROVM_IMAGE_VERSION',
       'MICROVM_INGRESS_CONNECTOR_ARNS',
       'MICROVM_PAYLOAD_BUCKET',
     ]);
-    // Image version is deliberately unpinned.
-    expect(env.MICROVM_IMAGE_VERSION).toBeUndefined();
+    // A runtime pin leaves the child-owned managed image in place.
+    expect(env.MICROVM_IMAGE_VERSION).toBe('7.0');
+    expect(env.MICROVM_APPROVAL_SUSPEND_ENABLED).toBe('false');
     // Ingress is NOT empty and NOT omitted: RunMicrovm attaches a PUBLIC
     // HTTP_INGRESS connector (with a public endpoint) when the field is absent,
     // so "no inbound" is an explicit control on every launch.
@@ -1316,11 +1789,10 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     const [, orchestrator] = Object.entries(fns)
       .find(([id]) => id.includes('TaskOrchestratorOrchestratorFn'))!;
     const env = orchestrator.Properties.Environment.Variables as Record<string, unknown>;
-    expect(JSON.stringify(env.MICROVM_IMAGE_IDENTIFIER))
-      .toMatch(/"Fn::GetAtt":\["LambdaMicrovmComputeImage[^"]*","ImageArn"\]/);
+    expectChildReference(env.MICROVM_IMAGE_IDENTIFIER, 'AWS::Lambda::MicrovmImage', 'ImageArn');
   });
 
-  test('grants the orchestrator exactly the P1 lifecycle actions, image-scoped', () => {
+  test('grants the orchestrator its launch, state, cleanup and image-capability actions, image-scoped', () => {
     const policies = Object.entries(template.findResources('AWS::IAM::Policy'))
       .filter(([id]) => id.includes('TaskOrchestrator'));
     const statements = policies.flatMap(([, p]) => p.Properties.PolicyDocument.Statement as Array<{
@@ -1333,34 +1805,35 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     expect(lifecycle.Action).toEqual([
       'lambda:RunMicrovm',
       'lambda:GetMicrovm',
+      'lambda:GetMicrovmImageVersion',
       'lambda:TerminateMicrovm',
+      'lambda:SuspendMicrovm',
+      'lambda:ResumeMicrovm',
     ]);
     // Every MicroVM lifecycle action authorizes against the *image* resource,
     // which is why "scoped to platform-created images" is achievable at all.
-    expect(JSON.stringify(lifecycle.Resource)).toMatch(
-      /"Fn::GetAtt":\["LambdaMicrovmComputeImage[^"]*","ImageArn"\]/,
-    );
+    expect(lifecycle.Resource).toEqual(imageResources());
 
     // PassNetworkConnector supports no resource-level permissions.
     const pass = statements.find(s => s.Sid === 'MicrovmPassNetworkConnector')!;
     expect(pass.Action).toBe('lambda:PassNetworkConnector');
     expect(pass.Resource).toBe('*');
 
-    // iam:PassRole for the execution role hand-off, service-conditioned.
+    // iam:PassRole for the execution role hand-off is scoped to the exact role.
     const passRole = statements.find(s => s.Sid === 'MicrovmPassExecutionRole')!;
     expect(passRole.Action).toBe('iam:PassRole');
   });
 
-  test('does NOT grant suspend/resume (P3) or auth-token minting (never)', () => {
+  test('grants supervisor sleep/wake without auth-token minting or shell access', () => {
     const rendered = JSON.stringify(template.toJSON());
-    expect(rendered).not.toContain('lambda:SuspendMicrovm');
-    expect(rendered).not.toContain('lambda:ResumeMicrovm');
+    expect(rendered).toContain('lambda:SuspendMicrovm');
+    expect(rendered).toContain('lambda:ResumeMicrovm');
     expect(rendered).not.toContain('lambda:CreateMicrovmAuthToken');
     expect(rendered).not.toContain('lambda:CreateMicrovmShellAuthToken');
     expect(rendered).not.toContain('lambda:ConnectMicrovm');
   });
 
-  test('orchestrator may WRITE the payload bucket; nothing grants it delete', () => {
+  test('orchestrator may upload payloads and delete them at finalize, never read them', () => {
     const policies = Object.entries(template.findResources('AWS::IAM::Policy'))
       .filter(([id]) => id.includes('TaskOrchestrator'));
     const statements = policies.flatMap(([, p]) => p.Properties.PolicyDocument.Statement as Array<{
@@ -1368,13 +1841,11 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
       Resource: unknown;
     }>);
     const payloadStatements = statements.filter(s =>
-      JSON.stringify(s.Resource).includes('LambdaMicrovmComputePayloadBucket'));
-
+      JSON.stringify(s.Resource).includes('ComputePayloadBucket'));
     const actions = payloadStatements.flatMap(s => Array.isArray(s.Action) ? s.Action : [s.Action]);
     expect(actions).toContain('s3:PutObject');
-    // The bucket's lifecycle rule is the reaper on this backend — unlike the ECS
-    // path the orchestrator never deletes, so the grant must not exist.
-    expect(actions).not.toContain('s3:DeleteObject');
+    expect(actions.some(action => action.startsWith('s3:DeleteObject'))).toBe(true);
+    expect(actions.some(action => action.startsWith('s3:GetObject'))).toBe(false);
   });
 
   test('cancel Lambda may terminate a MicroVM (and only terminate), image-scoped', () => {
@@ -1393,7 +1864,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     // (TaskApi is built before the MicroVM construct), so the grant names ONE
     // image instead of an account/Region-wide `microvm-image:*`.
     const rendered = JSON.stringify(microvmStatements[0]!.Resource);
-    expect(rendered).toMatch(/LambdaMicrovmComputeImage[^"]*","ImageArn"/);
+    expect(microvmStatements[0]!.Resource).toEqual(imageResources());
     expect(rendered).not.toContain('microvm-image:*');
   });
 
@@ -1431,7 +1902,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
         .filter(([id]) => id.includes('LambdaMicrovmComputeExecutionRole')),
     );
     expect(policies).toContain('logs:CreateLogStream');
-    expect(policies).toContain('LambdaMicrovmComputeMicrovmLogGroup');
+    expect(policies).toMatch(/MicrovmComputeMicrovmLogGroup/);
 
     // ...and the orchestrator delivers that group's NAME as LOG_GROUP_NAME.
     const orchestrator = Object.entries(template.findResources('AWS::Lambda::Function'))
@@ -1439,14 +1910,14 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     const logGroupEnv = JSON.stringify(
       orchestrator[1].Properties.Environment.Variables.LOG_GROUP_NAME,
     );
-    expect(logGroupEnv).toContain('LambdaMicrovmComputeMicrovmLogGroup');
+    expect(logGroupEnv).toMatch(/MicrovmComputeMicrovmLogGroup/);
   });
 
   test('MicroVM resources carry the backend cost-allocation tag', () => {
-    template.hasResourceProperties('AWS::Lambda::MicrovmImage', {
+    childTemplate.hasResourceProperties('AWS::Lambda::MicrovmImage', {
       Tags: Match.arrayWith([{ Key: 'abca:compute-backend', Value: 'lambda-microvm' }]),
     });
-    template.hasResourceProperties('AWS::Lambda::NetworkConnector', {
+    childTemplate.hasResourceProperties('AWS::Lambda::NetworkConnector', {
       Tags: Match.arrayWith([{ Key: 'abca:compute-backend', Value: 'lambda-microvm' }]),
     });
   });
@@ -1463,18 +1934,25 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
       const app = new App({
         context: {
           compute_types: 'lambda-microvm',
+          microvm_nested_stack: true,
           microvm_region_override: true,
+          // eu-central-1 has no AWS Agent Registry; the deployment-profile
+          // check would otherwise reject the legacy default first (ADR-024).
+          enableAgentRegistry: false,
           microvm_base_image_arn: BASE_IMAGE_ARN,
           microvm_base_image_version: '1',
+          microvm_artifact_sha256: 'a'.repeat(64),
         },
       });
-      overriddenTemplate = Template.fromStack(new AgentStack(app, 'TestAgentStackMicrovmOverride', {
+      const stack = new AgentStack(app, 'TestAgentStackMicrovmOverride', {
         env: { account: '123456789012', region: 'eu-central-1' },
-      }));
+      });
+      Template.fromStack(stack);
+      overriddenTemplate = Template.fromStack(stack.node.findChild('Microvm') as lambdaMicrovmCompute.LambdaMicrovmStack);
     });
 
     test('fails synth when the stack Region has no Lambda MicroVMs', () => {
-      const app = new App({ context: { compute_types: 'lambda-microvm' } });
+      const app = new App({ context: { compute_types: 'lambda-microvm', microvm_nested_stack: true, enableAgentRegistry: false } });
       expect(() => new AgentStack(app, 'TestAgentStackMicrovmBadRegion', {
         env: { account: '123456789012', region: 'eu-central-1' },
       })).toThrow(/AWS Lambda MicroVMs are not available in eu-central-1/);
@@ -1522,21 +2000,25 @@ describe('AgentStack default (agentcore) deploy — MicroVM substrate absent', (
 
 describe('AgentStack with the MicroVM gate on but no image configured (first deploy)', () => {
   let template: Template;
+  let childTemplate: Template;
 
   beforeAll(() => {
     // The bootstrap state: substrate provisioned so the artifact bucket exists,
     // but no image yet. Exercises the false branch of the shared
     // `isLambdaMicrovmImageConfigured` predicate that gates BOTH the
     // orchestrator's MICROVM_* wiring and the cancel Lambda's grant.
-    const app = new App({ context: { compute_types: 'lambda-microvm' } });
+    const app = new App({ context: { compute_types: 'lambda-microvm', microvm_nested_stack: true } });
     const stack = new AgentStack(app, 'TestAgentStackMicrovmNoImage', {
       env: { account: '123456789012', region: 'us-east-1' },
     });
     template = Template.fromStack(stack);
+    childTemplate = Template.fromStack(stack.node.findChild('Microvm') as lambdaMicrovmCompute.LambdaMicrovmStack);
   });
 
   test('provisions the substrate (buckets, roles, both connectors) but no image', () => {
-    template.resourceCountIs('AWS::Lambda::NetworkConnector', 2);
+    template.resourceCountIs('AWS::Lambda::NetworkConnector', 0);
+    childTemplate.resourceCountIs('AWS::Lambda::NetworkConnector', 2);
+    childTemplate.resourceCountIs('AWS::Lambda::MicrovmImage', 0);
     template.resourceCountIs('AWS::Lambda::MicrovmImage', 0);
     template.hasOutput('MicrovmArtifactBucketName', {});
     // The build-time connector output is what the packaging script reads next, so
@@ -1562,6 +2044,38 @@ describe('AgentStack with the MicroVM gate on but no image configured (first dep
   });
 });
 
+describe.each([false, 'false'])('AgentStack MicroVM flat-layout escape hatch (%s)', microvmNested => {
+  let template: Template;
+
+  beforeAll(() => {
+    const app = new App({
+      context: {
+        compute_type: 'lambda-microvm',
+        microvm_nested_stack: microvmNested,
+        microvm_base_image_arn: 'arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1',
+        microvm_base_image_version: '1',
+        microvm_artifact_sha256: 'a'.repeat(64),
+      },
+    });
+    template = Template.fromStack(new AgentStack(app, 'FlatMicrovmStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    }));
+  });
+
+  test('preserves flat resource identities when nesting is explicitly disabled', () => {
+    template.resourceCountIs('AWS::Lambda::MicrovmImage', 1);
+    template.resourceCountIs('AWS::Lambda::NetworkConnector', 2);
+    expect(Object.keys(template.findResources('AWS::Lambda::MicrovmImage'))[0])
+      .toMatch(/^LambdaMicrovmComputeImage/);
+    expect(Object.keys(template.findResources('AWS::CloudFormation::Stack')))
+      .not.toEqual(expect.arrayContaining([expect.stringMatching(/^MicrovmNestedStack/)]));
+    const roles = Object.entries(template.findResources('AWS::IAM::Role'))
+      .filter(([id]) => id.startsWith('LambdaMicrovmCompute'));
+    expect(roles).toHaveLength(3);
+    for (const [, role] of roles) expect(role.Properties.RoleName).toBeUndefined();
+  });
+});
+
 describe('AgentStack MicroVM image ARN invariant', () => {
   let synthError: unknown;
 
@@ -1572,7 +2086,7 @@ describe('AgentStack MicroVM image ARN invariant', () => {
     const configuredSpy = jest.spyOn(lambdaMicrovmCompute, 'isLambdaMicrovmImageConfigured')
       .mockReturnValue(true);
     try {
-      const app = new App({ context: { compute_types: 'lambda-microvm' } });
+      const app = new App({ context: { compute_types: 'lambda-microvm', microvm_nested_stack: true } });
       const stack = new AgentStack(app, 'TestAgentStackMicrovmInvariant', {
         env: { account: '123456789012', region: 'us-east-1' },
       });
@@ -1594,7 +2108,7 @@ describe('AgentStack MicroVM image ARN invariant', () => {
 });
 
 describe('AgentStack solution attribution (#319): AWS_SDK_UA_APP_ID via stack-level aspect', () => {
-  let template: Template;
+  let templates: Template[];
 
   beforeAll(() => {
     const app = new App();
@@ -1608,7 +2122,11 @@ describe('AgentStack solution attribution (#319): AWS_SDK_UA_APP_ID via stack-le
     Aspects.of(stack).add(new SolutionUaAspect(buildAppId('UaAgentStack')), {
       priority: AspectPriority.MUTATING,
     });
-    template = Template.fromStack(stack);
+    templates = [
+      Template.fromStack(stack),
+      ...stack.node.findAll().filter((child): child is NestedStack => NestedStack.isNestedStack(child))
+        .map(child => Template.fromStack(child)),
+    ];
   });
 
   // CDK synthesizes its own framework-owned Lambdas that are NOT part of the
@@ -1618,22 +2136,24 @@ describe('AgentStack solution attribution (#319): AWS_SDK_UA_APP_ID via stack-le
   // `AWS679f53fac002430cb0da5b7982bd2287…` `cr.AwsCustomResource` singleton
   // (which CDK happens to give the env var today, but whose attribution we do
   // not want to depend on across CDK upgrades). Every framework-owned id is
-  // enumerated explicitly so the coverage assertion below cannot silently
+  // enumerated explicitly, including the registry Provider's framework handlers,
+  // so the coverage assertion below cannot silently
   // stop covering an ABCA Lambda by relabelling it as "framework".
   const FRAMEWORK_LAMBDA_ID =
-    /^(CustomResourceProviderHandler|CustomS3AutoDeleteObjects|CustomVpcRestrictDefaultSG|AWS679f53fac002430cb0da5b7982bd2287)/;
+    /^(CustomResourceProviderHandler|CustomS3AutoDeleteObjects|CustomVpcRestrictDefaultSG|AWS679f53fac002430cb0da5b7982bd2287|AgentRegistryProviderframework)/;
 
   test('every solution Lambda carries AWS_SDK_UA_APP_ID (traverses nested scope)', () => {
-    const functions = template.findResources('AWS::Lambda::Function');
-    const abcaLambdas = Object.entries(functions).filter(
+    const functions = templates.flatMap(template => Object.entries(template.findResources('AWS::Lambda::Function')));
+    const abcaLambdas = functions.filter(
       ([id]) => !FRAMEWORK_LAMBDA_ID.test(id),
     );
     // exact count — update when adding/removing a Lambda construct (#319).
     // A loose `toBeGreaterThan` let a whole integration construct disappear
     // unnoticed; the exact count fails if a Lambda is dropped OR if a new one
     // is added without being attributed below.
-    // 47 = 46 on main + RemoveWorkspaceFn (DELETE /v1/linear/workspaces/{slug}).
-    expect(abcaLambdas.length).toBe(47);
+    // 48 existing handlers (5 scheduled maintenance jobs nested) + 2 registry
+    // provisioning handlers + 4 registry API handlers in nested stacks.
+    expect(abcaLambdas.length).toBe(54);
     // Every ABCA-authored Lambda must carry the canonical `#` app-id. Collect
     // any offenders so a failure names the exact logical id(s) that are naked.
     const unattributed = abcaLambdas
@@ -1650,8 +2170,8 @@ describe('AgentStack solution attribution (#319): AWS_SDK_UA_APP_ID via stack-le
     // The trap: these functions live inside integration constructs several
     // scopes below the stack. The env-var still resolves the canonical `#`
     // form (not the mangled `-` variant).
-    const functions = template.findResources('AWS::Lambda::Function');
-    const nested = Object.entries(functions).filter(([id]) =>
+    const functions = templates.flatMap(template => Object.entries(template.findResources('AWS::Lambda::Function')));
+    const nested = functions.filter(([id]) =>
       /Jira|Slack|Linear/.test(id),
     );
     expect(nested.length).toBeGreaterThan(0);
@@ -1781,11 +2301,10 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
 
   test('flag on: agent runtime role gets the token data-plane grant + the agent env is set', () => {
     const app = new App({ context: { enableLinearIdentityVault: true } });
-    const template = Template.fromStack(
-      new AgentStack(app, 'LinearVaultOnStack', {
-        env: { account: '123456789012', region: 'us-east-1' },
-      }),
-    );
+    const stack = new AgentStack(app, 'LinearVaultOnStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    const template = Template.fromStack(stack);
     // The workload identity is provisioned.
     template.resourceCountIs('Custom::LinearWorkloadIdentity', 1);
     // Some role is granted the two token data-plane actions. Asserted on the
@@ -1818,6 +2337,9 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
     // single AWS::CloudFormation::Stack for it.
     expect(rendered).not.toContain('Custom::CDKBucketDeployment');
     expect(rendered).toContain('LinearVaultConsentPageStack');
+    // The test of the alerts topic (#686) does not read this nested stack. An alarm added there has to be passed to
+    // operationalAlerts.addAlarmActions in stacks/agent.ts, and its action checked here.
+    Template.fromStack(stack.node.findChild('LinearVaultConsentPageStack') as NestedStack).resourceCountIs('AWS::CloudWatch::Alarm', 0);
   });
 
   test('the workload identity name is STACK-scoped, so two stacks cannot share one', () => {
@@ -1908,7 +2430,7 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
   });
 
   test('MicroVM + vault fits with only the MicroVM compute backend deployed', () => {
-    const app = new App({ context: { enableLinearIdentityVault: true, compute_types: 'lambda-microvm' } });
+    const app = new App({ context: { enableLinearIdentityVault: true, compute_types: 'lambda-microvm', microvm_nested_stack: true } });
     const template = Template.fromStack(new AgentStack(app, 'LinearVaultMicrovmStack', {
       env: { account: '123456789012', region: 'us-east-1' },
     }));
@@ -2031,5 +2553,50 @@ describe('AgentStack Agent Registry gate', () => {
     expect(() => new AgentStack(app, 'InvalidAgentRegistryContext', {
       env: { account: '123456789012', region: 'us-east-1' },
     })).toThrow("enableAgentRegistry must be true or false, got 'fasle'");
+  });
+});
+
+describe('AgentStack — Linear agent sessions gate (ADR-018 Phase 2, #990)', () => {
+  const envVarsWith = (template: Template, marker: string): Array<Record<string, unknown>> =>
+    Object.values(template.findResources('AWS::Lambda::Function'))
+      .map((fn) => (fn.Properties as { Environment?: { Variables?: Record<string, unknown> } }).Environment?.Variables ?? {})
+      .filter((vars) => vars.LINEAR_AGENT_SESSIONS_ENABLED === marker);
+
+  test('flag on: receiver, processor and fan-out consumer carry the gate; the processor can forward nudges', () => {
+    const template = Template.fromStack(new AgentStack(new App({ context: { enableLinearAgentSessions: 'true' } }), 'LinearSessionsOn', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    }));
+    const gated = envVarsWith(template, 'true');
+    expect(gated).toHaveLength(3);
+    expect(gated.some((vars) => 'NUDGES_TABLE_NAME' in vars && 'LINEAR_PROJECT_MAPPING_TABLE_NAME' in vars)).toBe(true);
+  });
+
+  test('flag on: the processor can stop the default backend\'s compute on a session stop', () => {
+    const template = Template.fromStack(new AgentStack(new App({ context: { enableLinearAgentSessions: 'true' } }), 'LinearSessionsStop', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    }));
+    const processor = envVarsWith(template, 'true').find((vars) => 'LINEAR_PROJECT_MAPPING_TABLE_NAME' in vars)!;
+    // AgentCore is the default compute: its runtime ARN is the stop fallback.
+    expect(processor.RUNTIME_ARN).toBeDefined();
+  });
+
+  test('flag on: the nudge API and the session path are given the same rate limit', () => {
+    const template = Template.fromStack(new AgentStack(new App({ context: { enableLinearAgentSessions: 'true' } }), 'LinearSessionsRate', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    }));
+    const limits = Object.values(template.findResources('AWS::Lambda::Function'))
+      .map((fn) => (fn.Properties as { Environment?: { Variables?: Record<string, unknown> } }).Environment?.Variables ?? {})
+      .filter((vars) => 'NUDGE_RATE_LIMIT_PER_MINUTE' in vars)
+      .map((vars) => vars.NUDGE_RATE_LIMIT_PER_MINUTE);
+    // The nudge Lambda and the Linear processor spend one counter row.
+    expect(limits).toHaveLength(2);
+    expect(new Set(limits).size).toBe(1);
+  });
+
+  test('flag off (default): no Lambda carries the gate', () => {
+    const template = Template.fromStack(new AgentStack(new App(), 'LinearSessionsOff', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    }));
+    expect(envVarsWith(template, 'true')).toHaveLength(0);
   });
 });

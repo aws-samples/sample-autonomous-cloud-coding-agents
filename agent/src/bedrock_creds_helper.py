@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Credential helper for Claude Code's Bedrock calls (#215, cost attribution).
 
 Claude Code (``CLAUDE_CODE_USE_BEDROCK=1``) makes every ``InvokeModel`` call —
@@ -7,7 +6,14 @@ not the agent's boto3 — so the per-task tenant-data SessionRole in
 ``awsCredentialExport`` setting (in the image's managed-settings layer) runs
 this script, captures its JSON stdout, and signs Bedrock requests with the
 returned credentials. With a real ``Expiration`` it re-runs ~5 min before
-expiry, so an 8 h task survives the 1 h role-chaining cap.
+expiry during active use. The CLI (probed on 2.1.191 and 2.1.301 with
+``scripts/verify_microvm_credentials.py``) returns its previous cached value
+while that refresh runs in the background: this is NOT an acknowledged
+refresh barrier after MicroVM sleep. MicroVM workers instead leave this export
+empty and use the scoped container-credential provider installed by the parent.
+That provider renews synchronously before signing an expired-key request.
+The pin then moved to 2.1.319, which was not probed: its code for this cache
+and for the container-credential path reads the same as 2.1.301's.
 
 Goal: assume the per-task SessionRole with ``{user_id, repo, task_id}`` STS
 session tags so Bedrock spend is attributable per user/repo in AWS Cost
@@ -15,7 +21,7 @@ Explorer / CUR 2.0 (``iamPrincipal/*`` dimensions, after the operator activates
 the cost-allocation tags). The same role already carries the tenant-data grants;
 Track-1 only adds ``bedrock:InvokeModel*`` to it (see ``agent-session-role.ts``).
 
-**Fails OPEN.** Bedrock attribution is a billing/observability control, not a
+**Other backends fail OPEN.** Bedrock attribution is a billing/observability control, not a
 tenant-isolation one (contrast ``aws_session.py``, which fails closed). If the
 attribution config is absent or the assume-role fails, this helper emits the
 **ambient** compute-role credentials so Bedrock keeps working untagged — losing
@@ -39,6 +45,9 @@ import json
 import os
 import sys
 from typing import Any
+
+#: Set to "1" by the MicroVM credential broker for its Claude child process.
+MICROVM_CREDENTIAL_BROKER_ENV = "ABCA_MICROVM_CREDENTIAL_BROKER"
 
 # Fixed path the agent writes (0600) and this helper reads. A fixed path is
 # required because the managed-settings ``awsCredentialExport`` command is
@@ -105,9 +114,11 @@ def _frozen_to_creds(frozen: Any, expiry_iso: str | None) -> dict[str, str]:
 
 def _ambient_credentials() -> dict[str, str]:
     """Frozen ambient (compute-role) credentials — the fail-open fallback."""
-    import botocore.session
+    # TID251: only the ambient credentials are read, to hand them on; no client is
+    # built, and this fallback must not depend on aws_session importing cleanly.
+    import botocore.session  # noqa: TID251
 
-    creds = botocore.session.get_session().get_credentials()
+    creds = botocore.session.get_session().get_credentials()  # noqa: TID251
     if creds is None:
         # No resolvable credentials at all — the deepest degradation. Emit an
         # empty object; Claude Code then falls back to its own default-chain
@@ -122,7 +133,13 @@ def _ambient_credentials() -> dict[str, str]:
 
 
 def resolve_credentials() -> dict[str, str]:
-    """Return tagged assumed-role creds, or ambient creds on any failure."""
+    """Use the MicroVM default provider, otherwise retain attribution fallback."""
+    # The parent supplies a single scoped loopback provider and removes other
+    # credential sources from the MicroVM Claude child. Exporting even those
+    # scoped credentials here would reintroduce Claude's stale export cache.
+    # Do not read the attribution file or initialize boto3 in this branch.
+    if os.environ.get(MICROVM_CREDENTIAL_BROKER_ENV) == "1":
+        return {}
     path = attribution_file_path()
     try:
         with open(path) as fh:

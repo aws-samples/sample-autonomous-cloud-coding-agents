@@ -340,8 +340,8 @@ function bgagentMarker(taskId: string): string {
  * accumulates the full history anyway.
  *
  * The numeric fields accept ``string`` alongside ``number | null`` to
- * honestly model the DynamoDB Document-client boundary: ``Number``
- * attributes deserialize as JS ``string`` in some code paths (see
+ * honestly model what is stored: the agent writes ``duration_s`` and
+ * ``cost_usd`` as DynamoDB String attributes (see
  * ``shared/numeric.ts``). ``renderCommentBody`` coerces defensively so
  * a future caller that forgets to run the shared coercion helper at
  * its own boundary does not crash the way the fanout dispatcher did in

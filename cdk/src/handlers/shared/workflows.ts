@@ -175,6 +175,9 @@ export const DEFAULT_WORKFLOW_ID = 'default/agent-v1';
  */
 export const CODING_WORKFLOW_ID = 'coding/new-task-v1';
 
+/** The workflow that iterates on an existing pull request. */
+export const PR_ITERATION_WORKFLOW_ID = 'coding/pr-iteration-v1';
+
 // Fail at MODULE LOAD (deploy/import time), not at request time, if either
 // well-known id ever drifts out of DESCRIPTORS — e.g. a descriptor rename.
 // Without this a rename surfaces as an obscure runtime
@@ -204,7 +207,7 @@ export function isValidWorkflowRef(value: unknown): boolean {
 }
 
 /** Split a ``workflow_ref`` into its id and optional ``@constraint`` suffix. */
-export function parseWorkflowRef(ref: string): { id: string; constraint?: string } {
+function parseWorkflowRef(ref: string): { id: string; constraint?: string } {
   const at = ref.indexOf('@');
   if (at === -1) return { id: ref };
   return { id: ref.slice(0, at), constraint: ref.slice(at + 1) };

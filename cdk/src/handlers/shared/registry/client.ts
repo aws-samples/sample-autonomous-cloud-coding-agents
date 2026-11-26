@@ -34,7 +34,7 @@ import type {
 export interface RegistryClient {
   /**
    * Publish a record. On the Agent Registry substrate this is a multi-step operation
-   * (create → poll READY-ish → submit → approve when `autoApprove`); the port
+   * (create → poll past CREATING → submit → approve when `autoApprove`); the port
    * hides that so callers see a single verb. Returns the created record.
    * Throws on an immutability collision (same kind/namespace/name/version).
    */
@@ -48,7 +48,7 @@ export interface RegistryClient {
     version: string,
   ): Promise<RegistryRecord | null>;
 
-  /** List records (optionally filtered by kind/namespace). */
+  /** List records (optionally filtered by kind/namespace/name). */
   listRecords(filter?: ListFilter): Promise<readonly RegistryRecord[]>;
 
   /**

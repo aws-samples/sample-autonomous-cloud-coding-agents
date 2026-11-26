@@ -5,9 +5,6 @@ on:
       - main
     paths:
       - docs/**
-      - docs/guides/**
-      - docs/design/**
-      - docs/scripts/**
       - .github/workflows/docs.yml
       - CONTRIBUTING.md
   workflow_dispatch: {}
@@ -20,15 +17,13 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pages: write
-      id-token: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install, build, and upload site
-        uses: withastro/action@e84f40bd8d2caa9e768ec82ad30dd81f0b280853 # v6.1.2
+        uses: withastro/action@a8b97df764791eb61fbf3338ef713b0e61ae05c5 # v6.1.4
         with:
           path: docs
           node-version: "22"

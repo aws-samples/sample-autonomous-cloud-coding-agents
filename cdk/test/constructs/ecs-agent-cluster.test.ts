@@ -18,14 +18,15 @@
  */
 
 import * as path from 'path';
-import { App, Stack } from 'aws-cdk-lib';
-import { Template, Match } from 'aws-cdk-lib/assertions';
+import { App, Aspects, Stack } from 'aws-cdk-lib';
+import { Annotations, Template, Match } from 'aws-cdk-lib/assertions';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import { AwsSolutionsChecks } from 'cdk-nag';
 import { AgentMemory } from '../../src/constructs/agent-memory';
 import { AgentSessionRole } from '../../src/constructs/agent-session-role';
 import { DEFAULT_BEDROCK_MODEL_IDS } from '../../src/constructs/bedrock-models';
@@ -37,7 +38,10 @@ function createStack(overrides?: {
   bedrockModels?: string[];
   bedrockGeoRegion?: string;
   withMemory?: boolean;
+  withNudgesTable?: boolean;
   withLinearVault?: boolean;
+  withApprovals?: boolean;
+  withNagChecks?: boolean;
   taskSizing?: {
     buildTaskCpu?: number;
     buildTaskMemoryMiB?: number;
@@ -54,6 +58,7 @@ function createStack(overrides?: {
     },
   });
   const stack = new Stack(app, 'TestStack');
+  if (overrides?.withNagChecks) Aspects.of(stack).add(new AwsSolutionsChecks());
 
   const vpc = new ec2.Vpc(stack, 'Vpc', { maxAzs: 2 });
 
@@ -73,10 +78,23 @@ function createStack(overrides?: {
   const userConcurrencyTable = new dynamodb.Table(stack, 'UserConcurrencyTable', {
     partitionKey: { name: 'user_id', type: dynamodb.AttributeType.STRING },
   });
+  const taskApprovalsTable = overrides?.withApprovals
+    ? new dynamodb.Table(stack, 'TaskApprovalsTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'request_id', type: dynamodb.AttributeType.STRING },
+    })
+    : undefined;
 
   const githubTokenSecret = new secretsmanager.Secret(stack, 'GitHubTokenSecret');
 
   const agentMemory = overrides?.withMemory ? new AgentMemory(stack, 'AgentMemory') : undefined;
+
+  const taskNudgesTable = overrides?.withNudgesTable
+    ? new dynamodb.Table(stack, 'TaskNudgesTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'nudge_id', type: dynamodb.AttributeType.STRING },
+    })
+    : undefined;
 
   const linearIdentityVault = overrides?.withLinearVault
     ? new LinearIdentityVault(stack, 'LinearIdentityVault', {
@@ -90,10 +108,12 @@ function createStack(overrides?: {
     agentImageAsset,
     taskTable,
     taskEventsTable,
+    taskApprovalsTable,
     userConcurrencyTable,
     githubTokenSecret,
     memoryId: overrides?.memoryId,
     agentMemory,
+    taskNudgesTable,
     ...(linearIdentityVault && { linearIdentityVault }),
     ...(overrides?.taskSizing && { taskSizing: overrides.taskSizing }),
   });
@@ -595,6 +615,26 @@ describe('EcsAgentCluster construct', () => {
     expect(bedrockStatement!.Resource).not.toEqual('*');
   });
 
+  test('the task role\'s IAM5 exception follows the policies CDK splits off for a large model list', () => {
+    // Forty ids put the Bedrock statement alone above the inline-policy limit, so CDK moves it into a managed
+    // policy during synthesis. That policy does not exist yet when the construct declares the role's exception.
+    const { stack, template } = createStack({
+      withNagChecks: true,
+      bedrockModels: Array.from({ length: 40 }, (_, index) => `anthropic.claude-audit-${index}-v1:0`),
+    });
+    const policiesOf = (type: string, role: string) => Object.entries(template.findResources(type))
+      .filter(([id]) => id.includes(role)).map(([, policy]) => policy);
+    const overflow = policiesOf('AWS::IAM::ManagedPolicy', 'TaskRoleOverflowPolicy');
+    expect(overflow.length).toBeGreaterThan(0);
+    expect(Annotations.fromStack(stack).findError('*', Match.stringLikeRegexp('AwsSolutions-IAM5'))
+      .filter(finding => finding.id.includes('/TaskRole/'))
+      .map(finding => String(finding.entry.data))).toEqual([]);
+    const iam5 = (policy: Record<string, any>) => policy.Metadata.cdk_nag.rules_to_suppress
+      .filter((rule: { id: string }) => rule.id === 'AwsSolutions-IAM5');
+    const [defaultPolicy] = policiesOf('AWS::IAM::Policy', 'TaskRoleDefaultPolicy');
+    for (const policy of overflow) expect(policy.Metadata.cdk_nag.rules_to_suppress).toEqual(iam5(defaultPolicy));
+  });
+
   test('container has required environment variables', () => {
     baseTemplate.hasResourceProperties('AWS::ECS::TaskDefinition', {
       ContainerDefinitions: Match.arrayWith([
@@ -729,6 +769,7 @@ describe('EcsAgentCluster construct', () => {
         });
       const taskTable = mk('TaskTable');
       const taskEventsTable = mk('TaskEventsTable');
+      const taskApprovalsTable = mk('TaskApprovalsTable');
       const userConcurrencyTable = new dynamodb.Table(stack, 'UserConcurrencyTable', {
         partitionKey: { name: 'user_id', type: dynamodb.AttributeType.STRING },
       });
@@ -739,7 +780,7 @@ describe('EcsAgentCluster construct', () => {
             assumedBy: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com'),
           }),
         ],
-        taskScopedTables: [taskTable, taskEventsTable],
+        taskScopedTables: [taskTable, taskEventsTable, taskApprovalsTable],
         traceArtifactsBucket: new s3.Bucket(stack, 'TraceBucket'),
         attachmentsBucket: new s3.Bucket(stack, 'AttachmentsBucket'),
       });
@@ -749,6 +790,7 @@ describe('EcsAgentCluster construct', () => {
         agentImageAsset,
         taskTable,
         taskEventsTable,
+        taskApprovalsTable,
         userConcurrencyTable,
         githubTokenSecret,
         agentSessionRole: sessionRole,
@@ -822,8 +864,49 @@ describe('EcsAgentCluster construct', () => {
           }
         }
       }
-      expect(conditioned).toBe(2);
+      expect(conditioned).toBe(3);
     });
+
+    test('both task definitions point at the approval table authorized by the SessionRole', () => {
+      const sessionTemplate = createWithSessionRole();
+      const tables = sessionTemplate.findResources('AWS::DynamoDB::Table');
+      const approvalId = Object.keys(tables).find(id => id.startsWith('TaskApprovalsTable'));
+      expect(approvalId).toBeDefined();
+      const definitions = Object.values(sessionTemplate.findResources('AWS::ECS::TaskDefinition'));
+      expect(definitions).toHaveLength(2);
+      for (const definition of definitions) {
+        expect(definition.Properties.ContainerDefinitions[0].Environment).toContainEqual({
+          Name: 'TASK_APPROVALS_TABLE_NAME',
+          Value: { Ref: approvalId },
+        });
+      }
+    });
+  });
+});
+
+describe('EcsAgentCluster approval wiring without a SessionRole', () => {
+  let template: Template;
+  beforeAll(() => { template = createStack({ withApprovals: true }).template; });
+
+  test('grants only the approval item operations used by the agent', () => {
+    const approvalId = Object.keys(template.findResources('AWS::DynamoDB::Table'))
+      .find(id => id.startsWith('TaskApprovalsTable'));
+    const statements = Object.values(template.findResources('AWS::IAM::Policy'))
+      .flatMap(policy => policy.Properties.PolicyDocument.Statement);
+    const grants = statements.filter(statement =>
+      JSON.stringify(statement.Resource).includes(approvalId!),
+    );
+    expect(grants).toEqual([expect.objectContaining({
+      Effect: 'Allow',
+      Action: ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem'],
+    })]);
+  });
+
+  test('rejects a build setting that would erase approval-table wiring', () => {
+    const node = new Stack(new App({
+      context: { ecsExtraBuildEnv: { TASK_APPROVALS_TABLE_NAME: '' } },
+    }), 'S').node;
+    expect(() => resolveEcsTaskSizing(node)).toThrow('TASK_APPROVALS_TABLE_NAME');
   });
 });
 
@@ -976,6 +1059,52 @@ describe('EcsAgentCluster artifacts bucket (#299 ECS-parity)', () => {
     for (const def of Object.values(taskDefs)) {
       const env = def.Properties.ContainerDefinitions[0].Environment ?? [];
       expect(env.some((e: { Name: string }) => e.Name === 'ARTIFACTS_BUCKET_NAME')).toBe(false);
+    }
+  });
+});
+
+// Without NUDGES_TABLE_NAME the agent's nudge reader is off: the API accepts a
+// nudge for a running ECS task (202) and nothing ever delivers it.
+describe('EcsAgentCluster nudges table', () => {
+  let template: Template;
+  let nudgesTable: string;
+  beforeAll(() => {
+    template = createStack({ withNudgesTable: true }).template;
+    nudgesTable = Object.keys(template.findResources('AWS::DynamoDB::Table'))
+      .find(id => id.startsWith('TaskNudgesTable'))!;
+  });
+
+  test('both task definitions name the table', () => {
+    const definitions = Object.values(template.findResources('AWS::ECS::TaskDefinition'));
+    expect(definitions).toHaveLength(2);
+    for (const definition of definitions) {
+      expect(definition.Properties.ContainerDefinitions[0].Environment).toContainEqual({
+        Name: 'NUDGES_TABLE_NAME',
+        Value: { Ref: nudgesTable },
+      });
+    }
+  });
+
+  test('without a SessionRole the task role gets the two calls the nudge reader makes', () => {
+    const statements = Object.values(template.findResources('AWS::IAM::Policy'))
+      .flatMap(policy => policy.Properties.PolicyDocument.Statement)
+      .filter(statement => JSON.stringify(statement.Resource).includes(nudgesTable));
+    expect(statements).toEqual([expect.objectContaining({
+      Effect: 'Allow',
+      Action: ['dynamodb:Query', 'dynamodb:UpdateItem'],
+    })]);
+  });
+
+  test('a build-tool override cannot unset the table name', () => {
+    const node = new Stack(new App({ context: { ecsExtraBuildEnv: { NUDGES_TABLE_NAME: '' } } }), 'S').node;
+    expect(() => resolveEcsTaskSizing(node)).toThrow(/cannot set 'NUDGES_TABLE_NAME'/);
+  });
+
+  test('omits NUDGES_TABLE_NAME when no table is passed', () => {
+    const definitions = Object.values(createStack().template.findResources('AWS::ECS::TaskDefinition'));
+    for (const definition of definitions) {
+      const env = definition.Properties.ContainerDefinitions[0].Environment ?? [];
+      expect(env.some((e: { Name: string }) => e.Name === 'NUDGES_TABLE_NAME')).toBe(false);
     }
   });
 });

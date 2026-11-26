@@ -77,7 +77,7 @@ export const APPROVAL_METRIC_MILESTONES = new Set<string>([
  * reason value can't silently inflate metric cardinality — an
  * observable ``unknown`` bucket forces the operator to notice.
  */
-export const CLIP_REASON_VALUES = new Set<string>([
+const CLIP_REASON_VALUES = new Set<string>([
   'rule_annotation',
   'maxLifetime_ceiling',
   'runtime_jwt_ceiling',
@@ -97,12 +97,26 @@ export const CLIP_REASON_VALUES = new Set<string>([
  * — ``approval_timed_out`` without any matching rule is a real case
  * (e.g. on a ``force_push_any`` match, the rule may have fired without
  * populating ``matching_rule_ids`` — historical shape pre-Chunk-8a).
+ *
+ * The list holds every soft-deny rule the platform ships
+ * (``agent/policies/soft_deny.cedar``): only a soft-deny rule asks for an
+ * approval, and theirs is a fixed set. A blueprint's own rule counts as
+ * ``other`` until the list is extended with it.
+ *
+ * The order of the list is the precedence: an event that several of its
+ * rules matched counts under the one that stands first here.
+ * ``force_push_main`` stands before ``force_push_any``, which matches
+ * every command it matches: behind it, it would never be a value where
+ * both rules are in force. Between two rules of which neither implies the
+ * other the order is a choice, and changing it moves the events both
+ * match from one series to the other.
  */
 export const RULE_ID_ALLOWLIST = new Set<string>([
+  'force_push_main',
   'force_push_any',
+  'push_to_protected_branch',
   'write_credentials',
-  'delete_branch',
-  'rewrite_history',
+  'write_env_files',
   // Extend this allowlist carefully — each entry is a permanent custom
   // metric dimension value with ongoing CloudWatch cost. Grow when
   // operators need per-rule visibility; collapse to ``other`` otherwise.
@@ -110,8 +124,9 @@ export const RULE_ID_ALLOWLIST = new Set<string>([
 
 export function normalizeRuleId(ruleIds: readonly string[] | undefined): string {
   if (!ruleIds || ruleIds.length === 0) return 'none';
-  for (const id of ruleIds) {
-    if (RULE_ID_ALLOWLIST.has(id)) return id;
+  // The engine lists the rules that matched in no fixed order: the list's own order decides.
+  for (const id of RULE_ID_ALLOWLIST) {
+    if (ruleIds.includes(id)) return id;
   }
   return 'other';
 }
@@ -175,7 +190,9 @@ export function buildEmfLine(spec: MetricSpec, timestampMs: number): string {
       CloudWatchMetrics: [
         {
           Namespace: METRIC_NAMESPACE,
-          Dimensions: dimensionNames.length > 0 ? [dimensionNames] : [],
+          // Always one DimensionSet, the empty one for a metric without
+          // dimensions: `[]` would declare no metric.
+          Dimensions: [dimensionNames],
           Metrics: [{ Name: spec.name, Unit: spec.unit }],
         },
       ],
@@ -355,6 +372,15 @@ export function classifyApprovalEvent(ev: ParsedApprovalEvent): ClassificationRe
           unit: 'Seconds',
           value: effective,
           dimensions: { rule_id: normalizeRuleId(asStringArray(md.matching_rule_ids)) },
+        });
+        // The same value without dimensions, for the dashboard's percentiles
+        // over all rules: CloudWatch does not aggregate a custom metric across
+        // dimensions, so the roll-up is a metric of its own (one more, fixed).
+        specs.push({
+          name: 'TimedOutEffectiveTimeout',
+          unit: 'Seconds',
+          value: effective,
+          dimensions: {},
         });
       }
       break;

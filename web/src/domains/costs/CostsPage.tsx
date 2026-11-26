@@ -32,10 +32,15 @@ import { useMemo } from 'react';
 import { useSearchParams } from 'react-router';
 import type { TaskSummary } from '../../core/api/types';
 import { otherColor, seriesColor, useDarkMode } from '../../core/components/chart-palette';
+import { Explain } from '../../core/components/Explain';
 import { QueryError } from '../../core/components/QueryError';
 import { RouterLink } from '../../core/components/RouterLink';
+import { Swatch } from '../../core/components/Swatch';
+import { Tile } from '../../core/components/Tile';
+import { choiceOptions, parseChoice } from '../../core/util/choices';
 import {
   breakdown,
+  COST_EXPLANATIONS,
   COST_GROUPINGS,
   COST_RANGES,
   dailySpend,
@@ -50,31 +55,8 @@ import {
   type CostGrouping,
   type CostRange,
 } from '../../core/util/costs';
-import { formatCost, repoHref, taskHref, taskTitle } from '../../core/util/format';
+import { formatCost, formatCount, repoHref, taskHref, taskTitle } from '../../core/util/format';
 import { useCostTasks, useMyBudget } from './hooks';
-
-function parse<T extends string>(value: string | null, options: Readonly<Record<T, string>>, fallback: T): T {
-  return value && value in options ? (value as T) : fallback;
-}
-
-function options<T extends string>(labels: Readonly<Record<T, string>>) {
-  return (Object.keys(labels) as T[]).map((id) => ({ id, text: labels[id] }));
-}
-
-/** Color swatch beside a label: the label carries identity, the swatch links it to the chart. */
-function Swatch({ color }: { color: string }) {
-  return <span aria-hidden="true" style={{ display: 'inline-block', width: 10, height: 10, borderRadius: 2, background: color, marginRight: 8 }} />;
-}
-
-function Tile({ label, value, children }: { label: string; value: string; children?: React.ReactNode }) {
-  return (
-    <div>
-      <Box variant="awsui-key-label">{label}</Box>
-      <Box variant="awsui-value-large">{value}</Box>
-      {children}
-    </div>
-  );
-}
 
 function BudgetMeter() {
   const budget = useMyBudget();
@@ -96,8 +78,8 @@ function BudgetMeter() {
 
 export function CostsPage() {
   const [params, setParams] = useSearchParams();
-  const range = parse<CostRange>(params.get('range'), COST_RANGES, 'this-month');
-  const grouping = parse<CostGrouping>(params.get('group'), COST_GROUPINGS, 'repo');
+  const range = parseChoice<CostRange>(params.get('range'), COST_RANGES, 'this-month');
+  const grouping = parseChoice<CostGrouping>(params.get('group'), COST_GROUPINGS, 'repo');
   const dark = useDarkMode();
   const { query, tasks, truncated } = useCostTasks();
 
@@ -141,7 +123,7 @@ export function CostsPage() {
             <SegmentedControl
               label="Time range"
               selectedId={range}
-              options={options(COST_RANGES)}
+              options={choiceOptions(COST_RANGES)}
               onChange={({ detail }) => set('range', detail.selectedId)}
             />
           }
@@ -156,12 +138,27 @@ export function CostsPage() {
         <SpaceBetween size="l">
           <Container>
             <ColumnLayout columns={4} variant="text-grid" minColumnWidth={170}>
-              <Tile label={`Spent ${rangeLabel}`} value={query.isPending ? '-' : formatCost(view.summary.spend)}>
+              <Tile
+                label={`Spent ${rangeLabel}`}
+                loading={query.isPending}
+                value={formatCost(view.summary.spend)}
+                explanation={COST_EXPLANATIONS.spend}
+              >
                 {range === 'this-month' && <BudgetMeter />}
               </Tile>
-              <Tile label="Tasks" value={query.isPending ? '-' : String(view.summary.tasks)} />
-              <Tile label="Average per task" value={query.isPending ? '-' : formatCost(view.summary.averagePerTask)} />
-              <Tile label="Spent on failed or stopped tasks" value={query.isPending ? '-' : formatCost(view.summary.unproductiveSpend)} />
+              <Tile label="Tasks" loading={query.isPending} value={formatCount(view.summary.tasks)} explanation={COST_EXPLANATIONS.tasks} />
+              <Tile
+                label="Average per task"
+                loading={query.isPending}
+                value={view.summary.averagePerTask === null ? null : formatCost(view.summary.averagePerTask)}
+                explanation={COST_EXPLANATIONS.averagePerTask}
+              />
+              <Tile
+                label="Spent on failed or stopped tasks"
+                loading={query.isPending}
+                value={formatCost(view.summary.unproductiveSpend)}
+                explanation={COST_EXPLANATIONS.unproductiveSpend}
+              />
             </ColumnLayout>
           </Container>
 
@@ -170,11 +167,13 @@ export function CostsPage() {
               <Header
                 variant="h2"
                 description={grouping === 'total' ? undefined : `Stacked by ${COST_GROUPINGS[grouping].toLowerCase()}. Hover a bar for the numbers.`}
+                // The bars show their numbers on hover, so the chart's explanation opens from the "i" alone.
+                info={<Explain as="span" title="Spend per day" explanation={COST_EXPLANATIONS.perDay}>{(icon) => icon}</Explain>}
                 actions={
                   <SegmentedControl
                     label="Group by"
                     selectedId={grouping}
-                    options={options(COST_GROUPINGS)}
+                    options={choiceOptions(COST_GROUPINGS)}
                     onChange={({ detail }) => set('group', detail.selectedId)}
                   />
                 }
@@ -193,7 +192,7 @@ export function CostsPage() {
               height={240}
               yTitle="USD"
               // Whole dollars on the axis ("$4"), cents in the hover tooltip.
-              yTickFormatter={(v) => `$${Number.isInteger(v) ? v : v.toFixed(1)}`}
+              yTickFormatter={(v) => `$${Number.isInteger(v) ? formatCount(v) : v.toFixed(1)}`}
               statusType={query.isPending ? 'loading' : 'finished'}
               loadingText="Loading costs"
               ariaLabel="Spend per day"
@@ -224,7 +223,7 @@ export function CostsPage() {
                 },
                 { id: 'spend', header: 'Spend', cell: (r) => formatCost(r.spend) },
                 { id: 'share', header: 'Share', cell: (r) => `${Math.round(r.share * 100)}%` },
-                { id: 'tasks', header: 'Tasks', cell: (r) => r.tasks },
+                { id: 'tasks', header: 'Tasks', cell: (r) => formatCount(r.tasks) },
               ]}
               empty={<Box textAlign="center" color="inherit">No spend {rangeLabel}.</Box>}
             />

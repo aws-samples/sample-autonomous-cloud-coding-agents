@@ -19,7 +19,7 @@
 
 import { makeRepoCommand } from '../../src/commands/repo';
 import { onboardRepo, offboardRepo } from '../../src/repo-onboard';
-import { getStackOutput } from '../../src/stack-outputs';
+import { getStackOutput, getStackOutputs } from '../../src/stack-outputs';
 
 jest.mock('../../src/repo-onboard');
 jest.mock('../../src/stack-outputs');
@@ -36,6 +36,11 @@ describe('repo onboard/offboard commands', () => {
       if (key === 'RuntimeArn') return 'arn:aws:bedrock-agentcore:us-east-1:123:runtime/platform';
       if (key === 'GitHubTokenSecretArn') return 'arn:aws:secretsmanager:us-east-1:123:secret:platform';
       return null;
+    });
+    (getStackOutputs as jest.Mock).mockImplementation(async (region: string, stack: string, keys: readonly string[]) => {
+      const outputs: Record<string, string | null> = {};
+      for (const key of keys) outputs[key] = await getStackOutput(region, stack, key);
+      return outputs;
     });
     (onboardRepo as jest.Mock).mockResolvedValue({
       repo: 'acme/a',
@@ -83,6 +88,21 @@ describe('repo onboard/offboard commands', () => {
 
     const output = consoleSpy.mock.calls.map((c) => c[0]).join('\n');
     expect(output).toContain('additionalRuntimeArns');
+  });
+
+  test('repo onboard does not warn when the stored runtime and token are the platform outputs', async () => {
+    (onboardRepo as jest.Mock).mockResolvedValue({
+      repo: 'acme/a',
+      status: 'active',
+      runtime_arn: 'arn:aws:bedrock-agentcore:us-east-1:123:runtime/platform',
+      github_token_secret_arn: 'arn:aws:secretsmanager:us-east-1:123:secret:platform',
+    });
+
+    const cmd = makeRepoCommand();
+    await cmd.parseAsync(['node', 'test', 'onboard', 'acme/a', '--region', 'us-east-1', '--output', 'json']);
+
+    const payload = JSON.parse(consoleSpy.mock.calls[0][0] as string);
+    expect((payload.notes as string[]).join('\n')).not.toContain('WARNING');
   });
 
   test('repo onboard JSON output includes notes', async () => {
@@ -149,6 +169,22 @@ describe('repo onboard/offboard commands', () => {
       'node', 'test', 'onboard', 'acme/a', '--region', 'us-east-1',
       '--model', 'us.anthropic.claude-opus-5',
     ])).rejects.toThrow(/grants 'global' profiles/);
+    expect(onboardRepo).not.toHaveBeenCalled();
+  });
+
+  test('rejects a --model outside the set the stack grants', async () => {
+    // Without the granted set the check is skipped, as on a stack that does not export the set.
+    (getStackOutput as jest.Mock).mockImplementation(async (_r: string, _s: string, key: string) => {
+      if (key === 'RepoTableName') return 'RepoTable';
+      if (key === 'BedrockGeoRegion') return 'global';
+      if (key === 'BedrockModelIds') return 'anthropic.claude-haiku-5-5';
+      return null;
+    });
+    const cmd = makeRepoCommand();
+    await expect(cmd.parseAsync([
+      'node', 'test', 'onboard', 'acme/a', '--region', 'us-east-1',
+      '--model', 'global.anthropic.claude-opus-5-5',
+    ])).rejects.toThrow(/is not granted by stack/);
     expect(onboardRepo).not.toHaveBeenCalled();
   });
 

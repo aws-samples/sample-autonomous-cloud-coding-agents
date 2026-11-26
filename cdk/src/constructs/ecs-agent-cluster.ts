@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { RemovalPolicy, Stack, ArnFormat } from 'aws-cdk-lib';
+import { AspectPriority, Aspects, RemovalPolicy, Stack, ArnFormat } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
@@ -27,7 +27,8 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
-import { Construct, type Node } from 'constructs';
+import { Construct, type IConstruct, type Node } from 'constructs';
+import { CHANNEL_OAUTH_SECRET_PATTERNS } from '../deployment/features';
 import { AgentMemory } from './agent-memory';
 import { AgentSessionRole } from './agent-session-role';
 import {
@@ -46,9 +47,21 @@ export interface EcsAgentClusterProps {
   readonly agentImageAsset: ecr_assets.DockerImageAsset;
   readonly taskTable: dynamodb.ITable;
   readonly taskEventsTable: dynamodb.ITable;
+  /** Approval storage. Required for human approval gates; optional in isolated tests. */
+  readonly taskApprovalsTable?: dynamodb.ITable;
   readonly userConcurrencyTable: dynamodb.ITable;
   readonly githubTokenSecret: secretsmanager.ISecret;
   readonly memoryId?: string;
+
+  /**
+   * Table of mid-task nudges (`bgagent nudge`). When provided, the container
+   * gets `NUDGES_TABLE_NAME`; without it the agent's nudge reader is off, so a
+   * nudge the API accepted for an ECS task is never delivered. The agent reads
+   * the table through the SessionRole, which must list it; without a SessionRole
+   * the task role is granted the two calls the reader makes. Omitted in isolated
+   * construct tests → no env, no grant.
+   */
+  readonly taskNudgesTable?: dynamodb.ITable;
 
   /**
    * Optional Fargate task sizing overrides. Any unset field uses the generous
@@ -132,6 +145,14 @@ export interface EcsAgentClusterProps {
    * grant, no env, and the agent stays on the Secrets-Manager path.
    */
   readonly linearIdentityVault?: LinearIdentityVault;
+
+  /**
+   * Secrets Manager name patterns of the channel OAuth bundles the agent may
+   * read (ADR-024): only those of deployed trackers, so an omitted Linear or
+   * Jira leaves no grant on CLI-created secrets that outlive the feature.
+   * @default both `bgagent-linear-oauth-*` and `bgagent-jira-oauth-*` (legacy topology)
+   */
+  readonly channelOauthSecretPatterns?: readonly string[];
 }
 
 /** HTTPS port — the only egress allowed from the agent task ENIs. */
@@ -247,7 +268,9 @@ export interface EcsTaskSizing {
 const RESERVED_BUILD_ENV_KEYS = new Set([
   'TASK_TABLE_NAME',
   'TASK_EVENTS_TABLE_NAME',
+  'TASK_APPROVALS_TABLE_NAME',
   'USER_CONCURRENCY_TABLE_NAME',
+  'NUDGES_TABLE_NAME',
   'LOG_GROUP_NAME',
   'GITHUB_TOKEN_SECRET_ARN',
   'MEMORY_ID',
@@ -333,7 +356,7 @@ export class EcsAgentCluster extends Construct {
     // ECS Cluster with Fargate capacity provider and container insights
     this.cluster = new ecs.Cluster(this, 'Cluster', {
       vpc: props.vpc,
-      containerInsights: true,
+      containerInsightsV2: ecs.ContainerInsights.ENABLED,
     });
 
     // Security group — egress TCP 443 only
@@ -404,7 +427,14 @@ export class EcsAgentCluster extends Construct {
         inferenceProfileId(bedrockGeoRegion, PLATFORM_DEFAULT_AUX_MODEL_ID),
       TASK_TABLE_NAME: props.taskTable.tableName,
       TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
+      ...(props.taskApprovalsTable && {
+        TASK_APPROVALS_TABLE_NAME: props.taskApprovalsTable.tableName,
+      }),
       USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,
+      // Mid-task nudges, parity with the AgentCore runtime env: without the
+      // table name the agent's nudge reader is off, and a nudge the API accepted
+      // for an ECS task is never delivered.
+      ...(props.taskNudgesTable && { NUDGES_TABLE_NAME: props.taskNudgesTable.tableName }),
       LOG_GROUP_NAME: logGroup.logGroupName,
       GITHUB_TOKEN_SECRET_ARN: props.githubTokenSecret.secretArn,
       ...(props.memoryId && { MEMORY_ID: props.memoryId }),
@@ -490,8 +520,8 @@ export class EcsAgentCluster extends Construct {
       // comfortably safe on the 120 GB box even alongside the other packages +
       // agent. Kept as an explicit env (not core-relative) so a future bigger box
       // can't silently over-spawn. The test script reads JEST_MAX_WORKERS (default
-      // 25%), so this only pins the shared ECS box — CI (2–4 cores) and dev
-      // machines keep 25%, unaffected.
+      // 25%), so this only pins the shared ECS box: CI sets its own count in
+      // .github/workflows/build.yml and developer machines keep the 25% default.
       JEST_MAX_WORKERS: '4',
       // Serialize the mise task graph so the build steps' peak memory doesn't sum
       // and OOM the task. `mise run build` fans out its `depends` (the per-package
@@ -547,7 +577,15 @@ export class EcsAgentCluster extends Construct {
       props.agentSessionRole.admitComputeRole(taskRole);
     } else {
       props.taskTable.grantReadWriteData(taskRole);
+      // The two calls of the agent's nudge reader: read pending, mark consumed.
+      props.taskNudgesTable?.grant(taskRole, 'dynamodb:Query', 'dynamodb:UpdateItem');
       props.taskEventsTable.grantReadWriteData(taskRole);
+      props.taskApprovalsTable?.grant(
+        taskRole,
+        'dynamodb:GetItem',
+        'dynamodb:PutItem',
+        'dynamodb:UpdateItem',
+      );
     }
     // UserConcurrencyTable is user-scoped (not task_id leading-key-able) and is
     // touched by the reconciler/orchestrator path; keep it on the task role.
@@ -614,23 +652,18 @@ export class EcsAgentCluster extends Construct {
     // but the channel effect (no 👀→✅, no MCP) is invisible to the user.
     // GetSecretValue only — the container reads the token; the orchestrator owns
     // refresh/PutSecretValue.
-    taskRole.addToPrincipalPolicy(new iam.PolicyStatement({
-      actions: ['secretsmanager:GetSecretValue'],
-      resources: [
-        Stack.of(this).formatArn({
+    const channelOauthSecretPatterns = props.channelOauthSecretPatterns ?? CHANNEL_OAUTH_SECRET_PATTERNS;
+    if (channelOauthSecretPatterns.length > 0) {
+      taskRole.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['secretsmanager:GetSecretValue'],
+        resources: channelOauthSecretPatterns.map(resourceName => Stack.of(this).formatArn({
           service: 'secretsmanager',
           resource: 'secret',
           arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-          resourceName: 'bgagent-linear-oauth-*',
-        }),
-        Stack.of(this).formatArn({
-          service: 'secretsmanager',
-          resource: 'secret',
-          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-          resourceName: 'bgagent-jira-oauth-*',
-        }),
-      ],
-    }));
+          resourceName,
+        })),
+      }));
+    }
 
     // Bedrock model invocation — scoped to explicit foundation-model and
     // cross-region inference-profile ARNs (parity with the AgentCore runtime
@@ -698,16 +731,26 @@ export class EcsAgentCluster extends Construct {
     // `applyToChildren` suppression no longer reaches them (they're siblings of
     // the task defs, not children). ECS2 (container env-vars-not-secrets) still
     // belongs on each task def.
-    NagSuppressions.addResourceSuppressions(taskRole, [
+    const taskRoleIam5 = [
       {
         id: 'AwsSolutions-IAM5',
         reason: 'DynamoDB index/* wildcards from CDK grantReadWriteData (UserConcurrencyTable, and task tables only when no SessionRole is wired); Secrets Manager wildcards from CDK grantRead (GitHub token) and the bgagent-linear-oauth-*/bgagent-jira-oauth-* prefix grant (ABCA-488 — per-workspace channel OAuth tokens are created by the CLI at setup, name unknown at synth, GetSecretValue only); CloudWatch Logs wildcards from CDK grantWrite; S3 object/* wildcard from CDK grantRead on the ECS payload bucket (read-only, scoped to that bucket — #502). Bedrock InvokeModel is scoped to explicit model/inference-profile ARNs (no wildcard resource). ec2:DescribeAvailabilityZones requires Resource:* (EC2 describe actions have no resource-level scoping) — read-only, no mutation/data access; needed so a CDK target repo\'s `cdk synth` build gate can resolve AZ context on a fresh clone (ECS-parity, no cdk.context.json cache in the container).',
       },
+    ];
+    NagSuppressions.addResourceSuppressions(taskRole, [
+      ...taskRoleIam5,
       {
         id: 'AwsSolutions-ECS2',
         reason: 'Environment variables contain table names and configuration, not secrets — GitHub token is fetched from Secrets Manager at runtime',
       },
     ], true);
+    // When the policy outgrows the inline limit, CDK moves statements into managed
+    // policies during synthesis. Default priority runs this after cdk-nag.
+    Aspects.of(taskRole).add({
+      visit(node: IConstruct): void {
+        if (node instanceof iam.CfnManagedPolicy) NagSuppressions.addResourceSuppressions(node, taskRoleIam5);
+      },
+    }, { priority: AspectPriority.MUTATING });
     NagSuppressions.addResourceSuppressions(executionRole, [
       {
         id: 'AwsSolutions-IAM4',
@@ -731,7 +774,7 @@ export class EcsAgentCluster extends Construct {
     NagSuppressions.addResourceSuppressions(this.cluster, [
       {
         id: 'AwsSolutions-ECS4',
-        reason: 'Container insights is enabled via the containerInsights prop',
+        reason: 'Container insights is enabled via the containerInsightsV2 prop',
       },
     ], true);
   }

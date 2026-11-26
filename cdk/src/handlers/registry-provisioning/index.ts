@@ -27,8 +27,10 @@ import {
   ConflictException,
   CreateRegistryCommand,
   DeleteRegistryCommand,
+  DeleteRegistryRecordCommand,
   GetRegistryCommand,
   InternalServerException,
+  ListRegistryRecordsCommand,
   ResourceNotFoundException,
   ThrottlingException,
   UpdateRegistryCommand,
@@ -69,7 +71,12 @@ const client = makeClient(AgentRegistryControlClient);
  *  is plenty of entropy for an idempotency token and stays within API limits. */
 const CLIENT_TOKEN_LENGTH = 64;
 
-type DeleteAttempt = 'started' | 'absent' | 'retryable';
+/** How long one invocation deletes records before it leaves the rest to the Provider's
+ *  next poll (ms). Both handlers are stopped after 60 seconds (constructs/registry.ts),
+ *  and a stopped handler fails the delete at once. */
+const RECORD_DELETION_BUDGET_MS = 30_000;
+
+type DeleteAttempt = 'absent' | 'pending';
 
 /** The registry id is the last ARN segment; we also accept a bare id. */
 function registryIdFromArn(arn: string): string {
@@ -118,17 +125,44 @@ function isRetryableDeleteError(err: unknown): boolean {
 }
 
 /**
- * Start or re-drive asynchronous deletion.
+ * Delete the records a registry holds: AWS refuses DeleteRegistry with a
+ * ConflictException while one exists.
+ *
+ * One pass over the record list, for a bounded time. A record answers
+ * ConflictException while it is being created or updated, and a listed record may be
+ * gone already: both are skipped. Whatever is left keeps DeleteRegistry refused, so the
+ * Provider's next poll comes back here.
+ */
+async function deleteRegistryRecords(registryId: string): Promise<void> {
+  const deadline = Date.now() + RECORD_DELETION_BUDGET_MS;
+  let nextToken: string | undefined;
+  do {
+    const page = await client.send(new ListRegistryRecordsCommand({ registryId, nextToken }));
+    for (const { recordId } of page.registryRecords ?? []) {
+      if (Date.now() > deadline) return;
+      try {
+        await client.send(new DeleteRegistryRecordCommand({ registryId, recordId }));
+      } catch (err) {
+        if (!(err instanceof ConflictException) && !(err instanceof ResourceNotFoundException)) throw err;
+      }
+    }
+    nextToken = page.nextToken;
+  } while (nextToken);
+}
+
+/**
+ * Start or re-drive asynchronous deletion: first the records, then the registry.
  *
  * A retryable service error is ambiguous: the request may have reached the
- * service even though the response did not reach us. Returning `retryable`
- * lets the Provider waiter observe the current state and re-issue the
- * idempotent delete when the registry is not already DELETING.
+ * service even though the response did not reach us. It is reported as `pending`,
+ * like an accepted delete: the Provider waiter observes the current state and
+ * re-issues the idempotent delete when the registry is not already DELETING.
  */
 async function requestRegistryDeletion(registryId: string): Promise<DeleteAttempt> {
   try {
+    await deleteRegistryRecords(registryId);
     await client.send(new DeleteRegistryCommand({ registryId }));
-    return 'started';
+    return 'pending';
   } catch (err) {
     if (err instanceof ResourceNotFoundException) return 'absent';
     // Defence in depth behind the shape guard, and deliberately Delete-only. The guard
@@ -149,7 +183,7 @@ async function requestRegistryDeletion(registryId: string): Promise<DeleteAttemp
         registryId,
         error: String(err),
       });
-      return 'retryable';
+      return 'pending';
     }
     throw err;
   }
@@ -299,8 +333,8 @@ export async function isComplete(event: IsCompleteRequest): Promise<IsCompleteRe
     }
     if (status === 'DELETING') return { IsComplete: false };
 
-    // The initial DeleteRegistry call may have been throttled or conflicted
-    // before deletion started. Re-drive it until the service reports DELETING.
+    // The initial DeleteRegistry call may have been throttled, or refused because
+    // records were left. Re-drive it until the service reports DELETING.
     const attempt = await requestRegistryDeletion(registryId);
     if (attempt === 'absent') return { IsComplete: true };
     return { IsComplete: false };

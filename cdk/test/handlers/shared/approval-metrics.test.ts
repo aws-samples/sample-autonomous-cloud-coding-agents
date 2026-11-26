@@ -20,12 +20,26 @@
 import {
   APPROVAL_METRIC_MILESTONES,
   METRIC_NAMESPACE,
+  RULE_ID_ALLOWLIST,
   buildEmfLine,
   classifyApprovalEvent,
   normalizeClipReason,
   normalizeRuleId,
   outcomeFromMilestone,
 } from '../../../src/handlers/shared/approval-metrics';
+import { BUILTIN_SOFT_DENY_POLICIES } from '../../../src/handlers/shared/builtin-policies';
+import { parseRules } from '../../../src/handlers/shared/cedar-policy';
+
+describe('approval-metrics: RULE_ID_ALLOWLIST', () => {
+  // Only a soft-deny rule asks for an approval. One the platform ships must keep its own
+  // name in the metric: listed nowhere, it would count as "other" and be logged as unknown.
+  test('holds every soft-deny rule the platform ships', () => {
+    const shipped = parseRules(BUILTIN_SOFT_DENY_POLICIES).filter((rule) => rule.tier === 'soft').map((rule) => rule.rule_id);
+
+    expect(shipped).toContain('force_push_any');
+    expect(shipped.filter((ruleId) => !RULE_ID_ALLOWLIST.has(ruleId))).toEqual([]);
+  });
+});
 
 describe('approval-metrics: normalizeRuleId', () => {
   test('returns allowlisted rule id verbatim', () => {
@@ -37,10 +51,15 @@ describe('approval-metrics: normalizeRuleId', () => {
     expect(normalizeRuleId(['user_custom_rule_42'])).toBe('other');
   });
 
-  test('takes the first allowlisted rule when multiple match', () => {
-    // Deterministic cardinality cap — the first match wins so a rule's
-    // dimension bucket doesn't flip based on Cedar evaluation order.
-    expect(normalizeRuleId(['write_credentials', 'force_push_any'])).toBe('write_credentials');
+  // The engine lists the rules that matched a command in no fixed order, and these pairs match
+  // one command: the list's order decides, so a rule's events do not split between two values.
+  test.each([
+    ['a force push to main', ['force_push_any', 'force_push_main'], 'force_push_main'],
+    ['a forced push to a protected branch', ['force_push_any', 'push_to_protected_branch'], 'force_push_any'],
+    ['a credentials file named .env', ['write_env_files', 'write_credentials'], 'write_credentials'],
+  ])('%s counts under one rule, in whichever order the engine lists the two', (_what, ids, expected) => {
+    expect(normalizeRuleId(ids)).toBe(expected);
+    expect(normalizeRuleId([...ids].reverse())).toBe(expected);
   });
 
   test('returns "other" when no entry is allowlisted', () => {
@@ -147,7 +166,7 @@ describe('approval-metrics: buildEmfLine', () => {
     expect(parsed.ClippedApprovalCount).toBe(1);
   });
 
-  test('emits empty dimensions list when no dimensions', () => {
+  test('declares one empty dimension set when the metric has no dimensions', () => {
     const line = buildEmfLine(
       {
         name: 'MetricsPublisherHeartbeat',
@@ -158,8 +177,10 @@ describe('approval-metrics: buildEmfLine', () => {
       1_700_000_000_000,
     );
 
+    // CloudWatch creates one metric per DimensionSet, and the format's JSON
+    // schema requires at least one: `[]` declares no metric at all.
     const parsed = JSON.parse(line);
-    expect(parsed._aws.CloudWatchMetrics[0].Dimensions).toEqual([]);
+    expect(parsed._aws.CloudWatchMetrics[0].Dimensions).toEqual([[]]);
   });
 });
 
@@ -276,13 +297,17 @@ describe('approval-metrics: classifyApprovalEvent', () => {
       },
     });
     expect(result.skipped).toEqual([]);
-    expect(result.specs).toHaveLength(2);
-    const byName = new Map(result.specs.map((s) => [s.name, s]));
-    expect(byName.get('ApprovalDecisionLatencyMs')?.value).toBe(5000);
-    expect(byName.get('ApprovalDecisionLatencyMs')?.dimensions).toEqual({ outcome: 'timed_out' });
-    expect(byName.get('TimedOutEffectiveTimeout')?.value).toBe(30);
-    expect(byName.get('TimedOutEffectiveTimeout')?.unit).toBe('Seconds');
-    expect(byName.get('TimedOutEffectiveTimeout')?.dimensions).toEqual({ rule_id: 'force_push_any' });
+    expect(result.specs).toHaveLength(3);
+    const latency = result.specs.find((s) => s.name === 'ApprovalDecisionLatencyMs');
+    expect(latency?.value).toBe(5000);
+    expect(latency?.dimensions).toEqual({ outcome: 'timed_out' });
+    // The breakdown twice: per rule, and without dimensions for the dashboard's
+    // p50/p90/p99 over all rules. CloudWatch does not aggregate a custom metric
+    // across dimensions, so the roll-up has to be published as its own metric.
+    const breakdown = result.specs.filter((s) => s.name === 'TimedOutEffectiveTimeout');
+    expect(breakdown.map((s) => s.dimensions)).toEqual([{ rule_id: 'force_push_any' }, {}]);
+    expect(breakdown.map((s) => s.value)).toEqual([30, 30]);
+    expect(breakdown.map((s) => s.unit)).toEqual(['Seconds', 'Seconds']);
   });
 
   test('approval_timed_out with unknown rule_id collapses to "other"', () => {
@@ -344,8 +369,7 @@ describe('approval-metrics: classifyApprovalEvent', () => {
         matching_rule_ids: ['force_push_any'],
       },
     });
-    expect(result.specs).toHaveLength(1);
-    expect(result.specs[0].name).toBe('TimedOutEffectiveTimeout');
+    expect(result.specs.map((s) => s.name)).toEqual(['TimedOutEffectiveTimeout', 'TimedOutEffectiveTimeout']);
     expect(result.skipped).toEqual([
       { metric: 'ApprovalDecisionLatencyMs', reason: 'missing_created_at' },
     ]);

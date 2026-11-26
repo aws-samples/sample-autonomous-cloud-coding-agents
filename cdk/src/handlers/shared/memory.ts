@@ -23,10 +23,10 @@ import {
   CreateEventCommand,
   RetrieveMemoryRecordsCommand,
 } from '@aws-sdk/client-bedrock-agentcore';
+import type { TaskStatusType } from '../../constructs/task-status';
 import { logger } from './logger';
 import { sanitizeExternalContent } from './sanitization';
 import { makeClient } from './ua';
-import type { TaskStatusType } from '../../constructs/task-status';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -36,7 +36,7 @@ import type { TaskStatusType } from '../../constructs/task-status';
  * Provenance tag indicating who wrote a memory record.
  * Must stay in sync with Python-side MEMORY_SOURCE_TYPES in agent/src/memory.py.
  */
-export type MemorySourceType =
+type MemorySourceType =
   | 'agent_episode'
   | 'agent_learning'
   | 'orchestrator_fallback';
@@ -56,7 +56,7 @@ export interface MemoryContext {
 // ---------------------------------------------------------------------------
 
 const MEMORY_READ_TIMEOUT_MS = 5_000;
-const MEMORY_TOKEN_BUDGET = 2_000;
+const DEFAULT_MEMORY_TOKEN_BUDGET = 2_000;
 
 /** Rough token estimate: ~4 chars per token. */
 const CHARS_PER_TOKEN_ESTIMATE = 4;
@@ -176,22 +176,25 @@ function getClient(): BedrockAgentCoreClient {
  *   - Semantic: `/{actorId}/knowledge/`  (actorId = repo)
  *   - Episodic: `/{actorId}/episodes/`   (covers all sessions and reflections)
  *
- * Both calls pass a `namespace` prefix for hierarchical retrieval — episodic
- * per-task records live at `/{actorId}/episodes/{sessionId}/`, below the read path.
+ * Both calls use `namespacePath` for hierarchical retrieval — episodic per-task
+ * records live at `/{actorId}/episodes/{sessionId}/`, which is below the read path.
+ * (`namespace` is an exact match: it would return none of them.)
  *
- * Results are trimmed to a 2000-token budget (knowledge is prioritized before episodes;
+ * Results are trimmed to `tokenBudget` (knowledge is prioritized before episodes;
  * entries beyond the budget are dropped).
  * Returns `undefined` on any error (fail-open).
  *
  * @param memoryId - the AgentCore Memory resource ID.
  * @param repo - the "owner/repo" string used as namespace key (maps to actorId).
  * @param taskDescription - optional task description for semantic search query.
+ * @param tokenBudget - token budget of the returned context (estimated at ~4 chars per token).
  * @returns memory context or undefined on failure.
  */
 export async function loadMemoryContext(
   memoryId: string,
   actorNamespace: string,
   taskDescription?: string,
+  tokenBudget: number = DEFAULT_MEMORY_TOKEN_BUDGET,
 ): Promise<MemoryContext | undefined> {
   try {
     const client = getClient();
@@ -211,7 +214,7 @@ export async function loadMemoryContext(
       taskDescription
         ? client.send(new RetrieveMemoryRecordsCommand({
           memoryId,
-          namespace: semanticNamespacePath,
+          namespacePath: semanticNamespacePath,
           searchCriteria: {
             searchQuery: taskDescription,
             topK: 5,
@@ -224,7 +227,7 @@ export async function loadMemoryContext(
       // Episodic search — recent task episodes (prefix matches all sessions)
       client.send(new RetrieveMemoryRecordsCommand({
         memoryId,
-        namespace: episodicNamespacePath,
+        namespacePath: episodicNamespacePath,
         searchCriteria: {
           searchQuery: 'recent task episodes',
           topK: 3,
@@ -257,14 +260,14 @@ export async function loadMemoryContext(
 
     for (const text of repoKnowledge) {
       const tokens = estimateTokens(text);
-      if (totalTokens + tokens > MEMORY_TOKEN_BUDGET) break;
+      if (totalTokens + tokens > tokenBudget) break;
       totalTokens += tokens;
       budgetedKnowledge.push(text);
     }
 
     for (const text of pastEpisodes) {
       const tokens = estimateTokens(text);
-      if (totalTokens + tokens > MEMORY_TOKEN_BUDGET) break;
+      if (totalTokens + tokens > tokenBudget) break;
       totalTokens += tokens;
       budgetedEpisodes.push(text);
     }

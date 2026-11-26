@@ -69,7 +69,7 @@ describe('loadMemoryContext', () => {
     expect(result!.repo_knowledge[0]).toContain('Jest');
   });
 
-  test('uses namespace prefix (hierarchical retrieval) for both queries', async () => {
+  test('uses namespacePath (hierarchical retrieval) for both queries', async () => {
     const { RetrieveMemoryRecordsCommand } = jest.requireMock('@aws-sdk/client-bedrock-agentcore');
     mockAgentCoreSend
       .mockResolvedValueOnce({ memoryRecordSummaries: [] })
@@ -80,7 +80,7 @@ describe('loadMemoryContext', () => {
     // Semantic search uses /{repo}/knowledge/ as a namespace prefix.
     expect(RetrieveMemoryRecordsCommand).toHaveBeenCalledWith(
       expect.objectContaining({
-        namespace: '/owner/repo/knowledge/',
+        namespacePath: '/owner/repo/knowledge/',
         searchCriteria: expect.objectContaining({
           searchQuery: 'Fix the build',
         }),
@@ -90,11 +90,16 @@ describe('loadMemoryContext', () => {
     // under all task sessions plus the cross-task reflection records.
     expect(RetrieveMemoryRecordsCommand).toHaveBeenCalledWith(
       expect.objectContaining({
-        namespace: '/owner/repo/episodes/',
+        namespacePath: '/owner/repo/episodes/',
         searchCriteria: expect.objectContaining({
           searchQuery: 'recent task episodes',
         }),
       }),
+    );
+    // `namespace` is an exact match in the AgentCore Memory API: it leaves out
+    // the per-task records at /{repo}/episodes/{sessionId}/ and logs nothing.
+    expect(RetrieveMemoryRecordsCommand).not.toHaveBeenCalledWith(
+      expect.objectContaining({ namespace: expect.anything() }),
     );
   });
 
@@ -154,6 +159,31 @@ describe('loadMemoryContext', () => {
     expect(result!.repo_knowledge).toHaveLength(2);
     // No room for episodes
     expect(result!.past_episodes).toHaveLength(0);
+  });
+
+  test.each([
+    { budget: 'a budget of 4000 tokens', tokenBudget: 4000, knowledge: 3, episodes: 1 },
+    { budget: 'a budget of 1000 tokens', tokenBudget: 1000, knowledge: 1, episodes: 0 },
+    { budget: 'the default budget when the caller passes undefined', tokenBudget: undefined, knowledge: 2, episodes: 0 },
+  ])('trims to $budget', async ({ tokenBudget, knowledge, episodes }) => {
+    const longText = 'x'.repeat(4000); // ~1000 tokens each
+    mockAgentCoreSend
+      .mockResolvedValueOnce({
+        memoryRecordSummaries: [
+          { content: { text: longText } },
+          { content: { text: longText } },
+          { content: { text: longText } },
+        ],
+      })
+      .mockResolvedValueOnce({
+        memoryRecordSummaries: [
+          { content: { text: 'Short episode' } },
+        ],
+      });
+
+    const result = await loadMemoryContext('mem-123', 'owner/repo', 'Task', tokenBudget);
+    expect(result!.repo_knowledge).toHaveLength(knowledge);
+    expect(result!.past_episodes).toHaveLength(episodes);
   });
 
   test('loads records without content_sha256 metadata (backward compat)', async () => {

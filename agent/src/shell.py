@@ -1,8 +1,11 @@
 """Shell utilities: logging, command execution, and text helpers."""
 
+import collections
 import contextlib
+import io
 import os
 import re
+import signal
 import subprocess
 import threading
 import time
@@ -102,7 +105,9 @@ def truncate(text: str, max_len: int = 200) -> str:
     """Truncate text for log display."""
     if not text:
         return ""
-    text = text.replace("\n", " ").strip()
+    # Redact before cutting: a credential cut in two no longer equals its value,
+    # so log() would let the part before the cut through.
+    text = redact_secrets(text).replace("\n", " ").strip()
     if len(text) > max_len:
         return text[:max_len] + "..."
     return text
@@ -119,20 +124,53 @@ def slugify(text: str, max_len: int = 40) -> str:
     return text or "task"
 
 
+# The credentials the agent puts into its own environment. Every repository
+# command inherits them (see ``_clean_env``), so a build that prints its
+# environment, or the agent running ``printenv``, writes them into the log. The
+# patterns below know GitHub token shapes only; these are redacted by value.
+_SECRET_ENV_VARS = (
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "LINEAR_API_TOKEN",
+    "JIRA_API_TOKEN",
+    "JIRA_APP_ACTOR_SHARED_SECRET",
+)
+
+# Only redact values at least this long: replacing a very short string would
+# mangle unrelated text that happens to contain it.
+_MIN_REDACTABLE_SECRET_LEN = 12
+
+
 def redact_secrets(text: str) -> str:
     """Redact tokens and secrets from log output."""
+    for name in _SECRET_ENV_VARS:
+        secret = os.environ.get(name, "")
+        if len(secret) >= _MIN_REDACTABLE_SECRET_LEN:
+            text = text.replace(secret, "***")
     # GitHub and generic token-like values.
     text = re.sub(r"(ghp_|github_pat_|gho_|ghs_|ghr_)[A-Za-z0-9_]+", r"\1***", text)
     text = re.sub(r"(x-access-token:)[^\s@]+", r"\1***", text)
-    text = re.sub(r"(authorization:\s*(?:bearer|token)\s+)[^\s]+", r"\1***", text, flags=re.I)
+    text = re.sub(
+        r"(authorization:\s*(?:bearer|token)\s+)[^\s]+", r"\1***", text, flags=re.IGNORECASE
+    )
     text = re.sub(
         r"([?&](?:token|access_token|api_key|apikey|password)=)[^&\s]+",
         r"\1***",
         text,
-        flags=re.I,
+        flags=re.IGNORECASE,
     )
-    text = re.sub(r"(gh[opusr]_[A-Za-z0-9_]+)", "***", text)
-    return text
+    # A GitHub App installation token is ghs_<app id>_<JWT> since 2026, about 520
+    # characters: "." joins the three parts of the JWT and "-" occurs inside
+    # them. So a token runs on through both: in the catch-all rule, and behind
+    # the marker that the first rule left of it (last line). The first rule
+    # keeps its narrow class on purpose: with "." and "-" in it, a keyword
+    # directly behind a token would become part of the token, and the keyword's
+    # own rule, which runs later, would then replace less than it did. In both
+    # lines a token runs on through "*" as well: a JWT that holds one of the
+    # prefixes by chance has a marker of the first rule inside it, with the
+    # rest of the token behind that marker.
+    text = re.sub(r"(gh[opusr]_[A-Za-z0-9_][A-Za-z0-9_.*-]*)", "***", text)
+    return re.sub(r"((?:gh[opusr]|github_pat)_\*{3})[.-][A-Za-z0-9_.*-]*", r"\1", text)
 
 
 def _clean_env() -> dict[str, str]:
@@ -187,14 +225,13 @@ _FAILURE_LINE_MARKERS = (
 )
 
 # Benign lines that CONTAIN a marker substring but are not failures — filtered so
-# the surfaced set stays signal. e.g. "0 errors", "--no-error-on-unmatched".
-_FAILURE_LINE_NOISE = (
-    "0 errors",
-    "0 failed",
-    "no error",
-    "--no-error",
-    "0 problems",
-    "may fail",  # advisory prose
+# the surfaced set stays signal. e.g. "0 errors", "--no-error-on-unmatched". The
+# counts are whole numbers: "10 failed" and "20 errors" are not "0 failed".
+_FAILURE_LINE_NOISE = re.compile(
+    r"(?<![0-9])0 (?:errors|failed|problems)"
+    r"|no error"
+    r"|--no-error"
+    r"|may fail"  # advisory prose
 )
 
 # Cap surfaced failure lines so a genuinely huge red run (hundreds of failing
@@ -215,13 +252,11 @@ def _surface_failure_lines(stdout: str) -> list[str]:
     matched: list[str] = []
     for ln in lines:
         low = ln.lower()
-        if any(m in low for m in _FAILURE_LINE_MARKERS) and not any(
-            n in low for n in _FAILURE_LINE_NOISE
-        ):
-            matched.append(ln.rstrip())
+        if any(m in low for m in _FAILURE_LINE_MARKERS) and not _FAILURE_LINE_NOISE.search(low):
             if len(matched) >= _MAX_SURFACED_FAILURE_LINES:
                 matched.append("… (more failure lines truncated)")
                 break
+            matched.append(ln.rstrip())
     tail = [ln.rstrip() for ln in lines[-_FAILURE_TAIL_LINES:]]
     # Order: failure-signature lines first (the WHY), then the tail (context),
     # dropping tail lines already surfaced as matches.
@@ -268,8 +303,20 @@ def _exit_status(returncode: int | None) -> int:
     return returncode
 
 
+# How many lines of each pipe the streaming path keeps for its caller: the END of
+# the output, where the failure summary and the callers' stderr checks look. Every
+# line is in the log whatever this is. Without a bound the copy grows with the
+# output, and a build that floods it (a test retrying in a loop) can run the
+# session out of memory before the build timeout ends it.
+_MAX_CAPTURED_LINES = 200_000
+
+# How long a streamed command that ran into its timeout gets to end after
+# SIGTERM, before it is killed.
+_TIMEOUT_GRACE_S = 10
+
+
 def _run_cmd_streaming(
-    cmd: list[str], label: str, cwd: str | None, timeout: int
+    cmd: list[str], cwd: str | None, timeout: int
 ) -> subprocess.CompletedProcess:
     """Run *cmd* streaming BOTH pipes live to the log while capturing them.
 
@@ -289,29 +336,45 @@ def _run_cmd_streaming(
     the classic single-thread PIPE deadlock and keep stdout/stderr SEPARATE so the
     returned ``CompletedProcess`` matches ``subprocess.run``'s contract exactly
     (callers still read ``.stdout`` / ``.stderr`` / ``.returncode`` unchanged).
+    Of an output longer than ``_MAX_CAPTURED_LINES`` lines, ``.stdout`` and
+    ``.stderr`` hold the end.
     """
     proc = subprocess.Popen(
         cmd,
         cwd=cwd,
+        # Pipes of bytes: the drain threads read them as text. Popen's own text
+        # mode would need its ``errors`` argument, which the SAST rule pack
+        # reports (python36-compatibility-Popen1).
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1,  # line-buffered so each line streams promptly
         env=_clean_env(),
+        # A process group of its own, so that the timeout below can signal the
+        # command together with what it started. Not a session of its own: mise
+        # stops managing the processes of its tasks when it is a session leader,
+        # and then leaves the other tasks of a parallel build running when one
+        # of them fails.
+        process_group=0,
     )
-    out_lines: list[str] = []
-    err_lines: list[str] = []
+    out_lines: collections.deque[str] = collections.deque(maxlen=_MAX_CAPTURED_LINES)
+    err_lines: collections.deque[str] = collections.deque(maxlen=_MAX_CAPTURED_LINES)
 
-    def _drain(pipe, buf: list[str]) -> None:
+    def _drain(pipe, buf: collections.deque[str]) -> None:
+        # The text layer that Popen's own text mode puts on a pipe, with the
+        # defaults that mode uses: the same encoding, and every line ending read
+        # as "\n". A byte that is not valid in that encoding becomes U+FFFD.
+        # Strict decoding raises in this thread, which then closes its pipe: the
+        # rest of the output is lost and the command dies of SIGPIPE on its next
+        # write. Each line is handed over as it arrives.
+        lines = io.TextIOWrapper(pipe, errors="replace")
         # log() redacts each line; the buffer keeps the raw text for the caller
         # (the failure classifier redacts again before it re-emits anything).
         try:
-            for line in pipe:
+            for line in lines:
                 line = line.rstrip("\n")
                 buf.append(line)
                 log("CMD", f"  {line}")
         finally:
-            pipe.close()
+            lines.close()  # closes the pipe as well
 
     t_out = threading.Thread(target=_drain, args=(proc.stdout, out_lines), daemon=True)
     t_err = threading.Thread(target=_drain, args=(proc.stderr, err_lines), daemon=True)
@@ -320,7 +383,18 @@ def _run_cmd_streaming(
     try:
         proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
-        proc.kill()
+        # Stop the whole group, not only the command: the processes a build
+        # started (compilers, test runners) would otherwise go on running in the
+        # checkout and hold the pipes open. SIGTERM first: a tool that keeps its
+        # children in process groups of their own (mise) stops them when it is
+        # asked to stop, and SIGKILL cannot be passed on. SIGKILL is for a command
+        # that is still there after the grace period.
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            if proc.poll() is None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(proc.pid, sig)
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    proc.wait(timeout=_TIMEOUT_GRACE_S)
         # Let the drain threads finish flushing the pipes the kill closes, so
         # nothing is lost, then re-raise for the caller's timeout handling.
         t_out.join(timeout=10)
@@ -352,13 +426,14 @@ def run_cmd(
     """
     log("CMD", redact_secrets(f"{label}: {' '.join(cmd)}"))
     if stream:
-        result = _run_cmd_streaming(cmd, label, cwd, timeout)
+        result = _run_cmd_streaming(cmd, cwd, timeout)
     else:
         result = subprocess.run(
             cmd,
             cwd=cwd,
             capture_output=True,
             text=True,
+            errors="replace",  # as on the streaming path: U+FFFD, not UnicodeDecodeError
             timeout=timeout,
             env=_clean_env(),
         )
@@ -412,6 +487,7 @@ _TRANSIENT_CMD_SIGNATURES: tuple[str, ...] = (
     "502 bad gateway",
     "504 gateway",
     "429 too many requests",
+    "the requested url returned error: 429",  # git's form of a rate limit
     "eai_again",
     "network is unreachable",
     "tls handshake timeout",
