@@ -138,7 +138,14 @@ describe('concurrency seats against the AWS Emulator', () => {
     const user = newUser();
     await running(user);
     // A seat with no live task behind it, as a finalize step that never ran leaves.
-    expect(await admissionControl({ user_id: user } as TaskRecord)).toBe(true);
+    // Admission ties every seat to a task record (#1003), so the leak is written
+    // to the counter directly.
+    await ddb.send(new UpdateCommand({
+      TableName: process.env.USER_CONCURRENCY_TABLE_NAME,
+      Key: { user_id: user },
+      UpdateExpression: 'ADD active_count :one',
+      ExpressionAttributeValues: { ':one': 1 },
+    }));
     expect(await seats(user)).toBe(2);
 
     await reconcileConcurrency();
@@ -146,13 +153,9 @@ describe('concurrency seats against the AWS Emulator', () => {
     expect(await seats(user)).toBe(1);
   });
 
-  // KNOWN FAILURES: executable witnesses for two seat defects on main, reproduced
-  // here with real conditional writes rather than mocked `send` calls. Kept as
-  // `test.failing` so the suite stays green and flags the day the fix lands (open
-  // PR #1009 addresses both). Each was run once as a plain `test` to confirm it
-  // fails on its last assertion and not on setup; the passing tests above cover
-  // the same setup.
-  test.failing('#1003: a replayed finalize step does not release a second seat', async () => {
+  // Two seat defects of earlier releases, reproduced with real conditional writes
+  // rather than mocked `send` calls. Both were `test.failing` until #1003's fix.
+  test('#1003: a replayed finalize step does not release a second seat', async () => {
     const user = newUser();
     const done = await running(user);
     await running(user);
@@ -168,7 +171,7 @@ describe('concurrency seats against the AWS Emulator', () => {
   // No issue reports this one: reconcile-concurrency counts four hard-coded
   // statuses, while the design and ACTIVE_STATUSES say a task awaiting approval
   // holds its seat.
-  test.failing('the concurrency reconciler keeps the seat of a task awaiting approval', async () => {
+  test('the concurrency reconciler keeps the seat of a task awaiting approval', async () => {
     const user = newUser();
     const paused = await running(user);
     // The Python agent is the only writer of this status; this writes the status
