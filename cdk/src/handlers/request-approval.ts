@@ -24,7 +24,6 @@ import { TaskStatus } from '../constructs/task-status';
 import { logger } from './shared/logger';
 import { errorResponse, successResponse } from './shared/response';
 import { makeDocClient } from './shared/ua';
-import { computeTtlEpoch } from './shared/validation';
 
 const ddb = makeDocClient();
 const TASKS = process.env.TASK_TABLE_NAME!;
@@ -33,7 +32,12 @@ const MAX_ID_LENGTH = 128;
 const MAX_TEXT_LENGTH = 8192;
 /** Matches the agent's CLEANUP_MARGIN_120S past an approval deadline. */
 const APPROVAL_CLEANUP_MARGIN_S = 120;
-const DEFAULT_RETENTION_DAYS = 90;
+/**
+ * How far the worker's created_at may be from this Lambda's clock. SigV4 already
+ * refuses a request signed more than 5 minutes off, and a create with its two
+ * repeats takes under 80 s, so the hook's own timestamp is always inside it.
+ */
+const MAX_CLOCK_SKEW_S = 300;
 const REQUEST_FIELDS = new Set([
   'task_id', 'request_id', 'tool_name', 'tool_input_preview', 'tool_input_sha256',
   'reason', 'severity', 'matching_rule_ids', 'status', 'created_at', 'timeout_s',
@@ -56,6 +60,18 @@ function validId(value: unknown): value is string {
   return validShortText(value) && /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(value);
 }
 
+/**
+ * Epoch seconds of a created_at in the hook's `YYYY-MM-DDTHH:MM:SSZ` form, read
+ * near this Lambda's clock, or NaN. The deadline and the retention follow from it.
+ */
+function createdEpoch(value: unknown): number {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(value)) return NaN;
+  const created = Date.parse(value) / 1000;
+  // Date.parse rolls 2026-02-30 over to 2 March: only a date that reads back the same is one.
+  if (!Number.isFinite(created) || new Date(created * 1000).toISOString() !== value.replace('Z', '.000Z')) return NaN;
+  return Math.abs(created - Date.now() / 1000) <= MAX_CLOCK_SKEW_S ? created : NaN;
+}
+
 /** Never copy decision, notification, retention or arbitrary caller fields. */
 function validateRequest(input: RequestInput, task: Record<string, any>): Record<string, unknown> {
   const row = input.approval;
@@ -69,26 +85,14 @@ function validateRequest(input: RequestInput, task: Record<string, any>): Record
     || !['low', 'medium', 'high'].includes(row.severity as string)
     || !Array.isArray(row.matching_rule_ids) || row.matching_rule_ids.length > 500
     || !row.matching_rule_ids.every(validShortText)
-    || typeof row.created_at !== 'string' || !Number.isFinite(Date.parse(row.created_at))
     || typeof row.timeout_s !== 'number' || !Number.isInteger(row.timeout_s)
-    || row.timeout_s < 0 || row.timeout_s > constants.approval_timeout_s.max
-    || (row.timeout_s === 0 ? row.deadline_epoch !== undefined
-      : row.deadline_epoch !== Math.floor(Date.parse(row.created_at) / 1000) + row.timeout_s)) {
+    || row.timeout_s < constants.approval_timeout_s.min || row.timeout_s > constants.approval_timeout_s.max
+    || row.deadline_epoch !== createdEpoch(row.created_at) + row.timeout_s) {
     throw new Error('APPROVAL_REQUEST_INVALID');
   }
-  return { ...row, ttl: approvalRowTtl(row.created_at as string, row.timeout_s as number) };
-}
-
-/**
- * Retention is set here, never by the worker: the gate deadline plus the agent's
- * cleanup margin (as the agent computed it before this writer existed), or the
- * task retention period for a request without an automatic deadline.
- */
-export function approvalRowTtl(createdAt: string, timeoutS: number): number {
-  const created = Math.floor(Date.parse(createdAt) / 1000);
-  return timeoutS > 0
-    ? created + timeoutS + APPROVAL_CLEANUP_MARGIN_S
-    : computeTtlEpoch(Number(process.env.TASK_RETENTION_DAYS ?? DEFAULT_RETENTION_DAYS));
+  // Retention is set here, never by the worker: the gate deadline plus the
+  // agent's cleanup margin, as the agent computed it before this writer existed.
+  return { ...row, ttl: (row.deadline_epoch as number) + APPROVAL_CLEANUP_MARGIN_S };
 }
 
 /**

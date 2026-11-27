@@ -22,11 +22,17 @@ import { row as approval } from '../../../contracts/approval-request-row.json';
 
 const send = jest.fn();
 jest.mock('../../src/handlers/shared/ua', () => ({ makeDocClient: () => ({ send }) }));
-import { approvalRowTtl, handler, recordWorkerRequest } from '../../src/handlers/request-approval';
+import { handler, recordWorkerRequest } from '../../src/handlers/request-approval';
 
 const input = { operation: 'create' as const, task_id: 'task', request_id: 'gate', approval };
 let task: Record<string, unknown>;
+const createdMs = Date.parse(approval.created_at);
+/** A request built `ageS` seconds before the writer's clock reads it. */
+const builtAgo = (ageS: number) => {
+  jest.spyOn(Date, 'now').mockReturnValue(createdMs + ageS * 1000);
+};
 beforeEach(() => {
+  builtAgo(2);
   task = { user_id: 'owner', repo: 'owner/repo', compute_type: 'ecs', status: 'RUNNING' };
   send.mockReset().mockImplementation(async command =>
     command.constructor.name === 'GetCommand' ? { Item: task } : {});
@@ -52,10 +58,40 @@ test.each([
   expect(send).toHaveBeenCalledTimes(1);
 });
 
+test.each([
+  ['far in the future', '2099-01-01T00:00:00Z'],
+  ['outside the JavaScript date range of get-pending', '+275760-09-13T00:00:00Z'],
+  ['with milliseconds', '2026-09-18T00:00:00.000Z'],
+  ['with an offset', '2026-09-18T02:00:00+02:00'],
+  ['without a zone', '2026-09-18T00:00:00'],
+])('rejects a created_at %s, from which the deadline and retention would follow', async (_name, createdAt) => {
+  const changes = { created_at: createdAt, deadline_epoch: Math.floor(Date.parse(createdAt) / 1000) + approval.timeout_s };
+  expect(await recordWorkerRequest({ ...input, approval: { ...approval, ...changes } }))
+    .toMatchObject({ ok: false, code: 'APPROVAL_REQUEST_INVALID' });
+});
+
+test.each([[-301], [301], [3600]])('rejects a request built %i s from the writer\'s clock', async ageS => {
+  builtAgo(ageS);
+  expect(await recordWorkerRequest(input)).toMatchObject({ ok: false, code: 'APPROVAL_REQUEST_INVALID' });
+});
+
+test.each([[-300], [0], [300]])('accepts a request built %i s from the writer\'s clock', async ageS => {
+  builtAgo(ageS);
+  expect(await recordWorkerRequest(input)).toEqual({ ok: true });
+});
+
+test('rejects a timeout below the minimum, which the hook never sends', async () => {
+  for (const timeoutS of [0, 29]) {
+    const changes = { timeout_s: timeoutS, deadline_epoch: createdMs / 1000 + timeoutS };
+    expect(await recordWorkerRequest({ ...input, approval: { ...approval, ...changes } }))
+      .toMatchObject({ ok: false, code: 'APPROVAL_REQUEST_INVALID' });
+  }
+});
+
 test('records only the pending request, guarded by current task ownership and status', async () => {
   expect(await recordWorkerRequest(input)).toEqual({ ok: true });
   const items = send.mock.calls[1][0].input.TransactItems;
-  expect(items[0].Put.Item).toEqual({ ...approval, ttl: approvalRowTtl(approval.created_at, approval.timeout_s) });
+  expect(items[0].Put.Item).toEqual({ ...approval, ttl: approval.deadline_epoch + 120 });
   expect(items[0].Put.ConditionExpression).toBe('attribute_not_exists(request_id)');
   expect(items[1].Update.ConditionExpression).toBe('#status = :running AND user_id = :user');
   expect(items[1].Update.ExpressionAttributeValues[':user']).toBe('owner');
@@ -73,12 +109,9 @@ test('every backend uses the same two-item transaction (no worker lease on this 
   }
 });
 
-test('retention is set by the writer from the validated deadline, never by the worker', () => {
-  const created = Date.parse('2026-09-18T00:00:00Z') / 1000;
-  expect(approvalRowTtl('2026-09-18T00:00:00Z', 300)).toBe(created + 300 + 120);
-  // No automatic deadline: the task retention period instead.
-  const noDeadline = approvalRowTtl('2026-09-18T00:00:00Z', 0);
-  expect(noDeadline).toBeGreaterThan(Math.floor(Date.now() / 1000) + 80 * 86400);
+test('retention is set by the writer from the validated deadline, never by the worker', async () => {
+  await recordWorkerRequest(input);
+  expect(send.mock.calls[1][0].input.TransactItems[0].Put.Item.ttl).toBe(approval.deadline_epoch + 120);
 });
 
 test('timeout cannot overwrite a human decision or resume the task', async () => {
