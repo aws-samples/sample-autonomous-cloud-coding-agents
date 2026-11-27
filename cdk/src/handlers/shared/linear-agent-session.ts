@@ -70,19 +70,20 @@ query AgentSessionIssue($id: String!) {
 /**
  * Emit one activity into a session. ``ephemeral`` (only valid for
  * ``thought``/``action``) shows it until the next activity replaces it — used
- * for keep-alive progress so it does not pile up in the thread.
+ * for keep-alive progress so it does not pile up in the thread. ``timeoutMs``
+ * shortens the request's timeout (progress, which must not hold up a batch).
  */
 export async function emitAgentActivity(
   accessToken: string,
   agentSessionId: string,
   content: AgentActivityContent,
-  options: { readonly ephemeral?: boolean; readonly id?: string } = {},
+  options: { readonly ephemeral?: boolean; readonly id?: string; readonly timeoutMs?: number } = {},
 ): Promise<LinearPostResult> {
   const ephemeral = options.ephemeral === true && (content.type === 'thought' || content.type === 'action');
   return graphqlRequest(accessToken, AGENT_ACTIVITY_CREATE_MUTATION, {
     // `id` (a version-4 UUID) makes a retried emit the same activity rather than a second one.
     input: { agentSessionId, content, ...(ephemeral && { ephemeral: true }), ...(options.id && { id: options.id }) },
-  });
+  }, options.timeoutMs);
 }
 
 /**
@@ -108,8 +109,9 @@ export async function setAgentSessionPlan(
   accessToken: string,
   agentSessionId: string,
   steps: readonly { readonly content: string; readonly status: string }[],
+  options: { readonly timeoutMs?: number } = {},
 ): Promise<LinearPostResult> {
-  return graphqlRequest(accessToken, AGENT_SESSION_UPDATE_MUTATION, { id: agentSessionId, input: { plan: steps } });
+  return graphqlRequest(accessToken, AGENT_SESSION_UPDATE_MUTATION, { id: agentSessionId, input: { plan: steps } }, options.timeoutMs);
 }
 
 export interface AgentSessionIssue {

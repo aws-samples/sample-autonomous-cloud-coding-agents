@@ -58,8 +58,10 @@ process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME = 'LinearWorkspaceRegistry';
 
 import {
   CHANNEL_DEFAULTS,
+  handler,
   resetLinearHeartbeatMemoForTests,
   routeEvent,
+  startLinearProgressBudget,
   supersededToolCallIds,
   type FanOutEvent,
   type TaskNotificationsConfig,
@@ -101,6 +103,7 @@ beforeEach(() => {
   mockSetPlan.mockReset().mockResolvedValue({ ok: true });
   mockTransitionIssueState.mockClear();
   resetLinearHeartbeatMemoForTests();
+  startLinearProgressBudget();
 });
 
 test('the flag subscribes the Linear channel to the progress events', () => {
@@ -115,7 +118,7 @@ test('a tool call is an ephemeral action with a deterministic id, and takes no p
   expect(outcome.infraRejections).toEqual([]);
   expect(mockEmitAgentActivity).toHaveBeenCalledWith('lin_tok', 'session-1',
     { type: 'action', action: 'Reading', parameter: '`src/app.ts`' },
-    { ephemeral: true, id: progressActivityId('e-agent_tool_call') });
+    { ephemeral: true, id: progressActivityId('e-agent_tool_call'), timeoutMs: 2000 });
   expect(updates()).toEqual([]);
 });
 
@@ -225,7 +228,7 @@ test('a step that moves the checklist forward records the stage, then replaces t
   mockTask(SESSION_TASK);
   await routeEvent(ev('agent_milestone', { milestone: 'repo_setup_complete' }), LINEAR_ONLY);
   expect(stageWrites()).toEqual([expect.objectContaining({ ExpressionAttributeValues: { ':s': 2 } })]);
-  expect(mockSetPlan).toHaveBeenCalledWith('lin_tok', 'session-1', expect.any(Array));
+  expect(mockSetPlan).toHaveBeenCalledWith('lin_tok', 'session-1', expect.any(Array), { timeoutMs: 2000 });
   expect(planStatuses()).toEqual(['completed', 'completed', 'inProgress', 'pending', 'pending']);
 });
 
@@ -310,4 +313,89 @@ test('a failed task that left a pull request stays where it is: only a completed
   await routeEvent(ev('task_failed'), LINEAR_ONLY);
   expect(mockEmitAgentActivity).toHaveBeenCalledWith('lin_tok', 'session-1', expect.objectContaining({ type: 'error' }));
   expect(mockTransitionIssueState).not.toHaveBeenCalled();
+});
+
+// --- The progress budget: progress never puts the batch's lifecycle events at risk ---
+
+function streamRecord(taskId: string, eventId: string, eventType: string, metadata: Record<string, string> = {}): DynamoDBRecord {
+  return {
+    eventID: eventId,
+    eventName: 'INSERT',
+    eventSource: 'aws:dynamodb',
+    dynamodb: {
+      SequenceNumber: `seq-${eventId}`,
+      NewImage: {
+        task_id: { S: taskId },
+        event_id: { S: eventId },
+        event_type: { S: eventType },
+        timestamp: { S: '2026-11-20T00:00:00Z' },
+        metadata: { M: Object.fromEntries(Object.entries(metadata).map(([k, v]) => [k, { S: v }])) },
+      },
+    },
+  } as unknown as DynamoDBRecord;
+}
+
+/** Get → the task of that id: `done` has finished with a pull request, any other is running. */
+function mockTasks(): void {
+  mockDdbSend.mockReset().mockImplementation(async (cmd: { _type: string; input: { Key?: { task_id: string } } }) => {
+    if (cmd._type !== 'Get') return {};
+    const taskId = cmd.input.Key!.task_id;
+    return {
+      Item: taskId === 'done'
+        ? { ...SESSION_TASK, task_id: 'done', status: 'COMPLETED', pr_url: PR_URL }
+        : { ...SESSION_TASK, task_id: taskId },
+    };
+  });
+}
+const progressEmits = () => mockEmitAgentActivity.mock.calls.filter((c) => (c[2] as { type: string }).type === 'thought');
+
+test('progress and checklist writes use the short timeout; lifecycle posts keep the default', async () => {
+  mockTask(SESSION_TASK);
+  await routeEvent(ev('agent_turn', { text_preview: 'Found it.' }), LINEAR_ONLY);
+  await routeEvent(ev('hydration_complete'), LINEAR_ONLY);
+  expect(mockEmitAgentActivity.mock.calls[0][3]).toEqual(expect.objectContaining({ timeoutMs: 2000 }));
+  expect(mockSetPlan.mock.calls[0][3]).toEqual({ timeoutMs: 2000 });
+
+  mockTask({ ...SESSION_TASK, status: 'COMPLETED', pr_url: PR_URL });
+  await routeEvent(ev('task_completed'), LINEAR_ONLY);
+  expect(mockEmitAgentActivity.mock.calls.at(-1)).toHaveLength(3);
+});
+
+test('after the first progress timeout the batch skips the rest of its progress, and its lifecycle events still go out', async () => {
+  mockTasks();
+  mockEmitAgentActivity.mockImplementation(async (_t: string, _s: string, content: { type: string }) =>
+    (content.type === 'thought' ? { ok: false, retryable: true } : { ok: true }));
+  const records = [
+    streamRecord('a', 'a1', 'agent_turn', { text_preview: 'one' }),
+    streamRecord('b', 'b1', 'agent_turn', { text_preview: 'two' }),
+    streamRecord('done', 'd1', 'task_completed'),
+    streamRecord('c', 'c1', 'agent_turn', { text_preview: 'three' }),
+  ];
+  const result = await handler({ Records: records });
+  expect(result.batchItemFailures).toEqual([]);
+  expect(progressEmits()).toHaveLength(1);
+  expect(mockEmitAgentActivity).toHaveBeenCalledWith('lin_tok', 'session-1', expect.objectContaining({ type: 'response' }));
+
+  // The next invocation starts with a fresh budget.
+  mockEmitAgentActivity.mockClear();
+  await handler({ Records: [streamRecord('e', 'e1', 'agent_turn', { text_preview: 'four' })] });
+  expect(progressEmits()).toHaveLength(1);
+});
+
+test('progress stops once it has spent its share of the invocation', async () => {
+  mockTasks();
+  let now = 1_000_000;
+  const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+  mockEmitAgentActivity.mockImplementation(async () => {
+    now += 6_000;
+    return { ok: true };
+  });
+  try {
+    const records = ['a', 'b', 'c', 'd', 'e'].map((t) => streamRecord(t, `${t}1`, 'agent_turn', { text_preview: t }));
+    await handler({ Records: [...records, streamRecord('done', 'd1', 'task_completed')] });
+  } finally {
+    clock.mockRestore();
+  }
+  expect(progressEmits()).toHaveLength(3);
+  expect(mockEmitAgentActivity).toHaveBeenCalledWith('lin_tok', 'session-1', expect.objectContaining({ type: 'response' }));
 });

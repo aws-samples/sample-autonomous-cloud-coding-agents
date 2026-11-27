@@ -243,6 +243,24 @@ describe('GraphQL helpers', () => {
     await expect(emitAgentActivity('tok', 's', { type: 'thought', body: 'x' })).resolves.toEqual({ ok: false, retryable: false });
   });
 
+  test('a short timeout aborts the request at that time, and reads as retryable', async () => {
+    jest.useFakeTimers();
+    try {
+      fetchMock.mockImplementation((_url: string, init: { signal: AbortSignal }) => new Promise((_resolve, reject) => {
+        init.signal.addEventListener('abort', () => reject(new Error('aborted')));
+      }));
+      let settled = false;
+      const emit = emitAgentActivity('tok', 's', { type: 'thought', body: 'x' }, { timeoutMs: 2000 })
+        .finally(() => { settled = true; });
+      await jest.advanceTimersByTimeAsync(1999);
+      expect(settled).toBe(false);
+      await jest.advanceTimersByTimeAsync(1);
+      await expect(emit).resolves.toEqual({ ok: false, retryable: true });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('addAgentSessionExternalUrl appends rather than replaces', async () => {
     fetchMock.mockResolvedValue(jsonResponse({ data: { agentSessionUpdate: { success: true } } }));
     await addAgentSessionExternalUrl('tok', 's-1', { label: 'Pull request #3', url: 'https://github.com/a/b/pull/3' });

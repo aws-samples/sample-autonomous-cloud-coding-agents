@@ -1688,12 +1688,18 @@ async function advanceSessionChecklist(
     state = { ...move, pr: prLabel(task.pr_url) };
   }
   const logCtx = { task_id: task.task_id, linear_agent_session_id: agentSessionId, event_type: effective };
+  // The task's last write is not skipped: one per task, and the checklist would stay mid-way.
+  const inFlight = !LINEAR_SESSION_TERMINAL_EVENTS.has(effective);
   try {
+    if (inFlight && !progressBudgetOpen(logCtx)) return;
     if (!ending && state.note !== 'waiting on your answer' && !(await claimChecklistStage(task.task_id, state.stage))) return;
-    const token = await resolveToken(ctx);
-    if (!token) return;
-    const result = await setAgentSessionPlan(token, agentSessionId, renderChecklist(kind, state, ending));
-    if (!result.ok) logger.warn('[fanout/linear-session] checklist not updated', { ...logCtx, retryable: result.retryable });
+    const result = await spendProgressBudget(logCtx, async () => {
+      const token = await resolveToken(ctx);
+      return token
+        ? setAgentSessionPlan(token, agentSessionId, renderChecklist(kind, state, ending), { timeoutMs: LINEAR_PROGRESS_TIMEOUT_MS })
+        : null;
+    });
+    if (result && !result.ok) logger.warn('[fanout/linear-session] checklist not updated', { ...logCtx, retryable: result.retryable });
   } catch (err) {
     logger.warn('[fanout/linear-session] checklist update failed (best effort)', {
       ...logCtx, error: err instanceof Error ? err.message : String(err),
@@ -1738,6 +1744,60 @@ async function moveSessionIssueToReview(task: TaskRecord, ctx: LinearFeedbackCon
 const LINEAR_SESSION_PROGRESS_CAP = 30;
 
 /**
+ * Timeout of one progress or checklist write to Linear. Lifecycle posts keep the
+ * 5 s default: they are the ones a batch is retried for.
+ */
+const LINEAR_PROGRESS_TIMEOUT_MS = 2_000;
+
+/**
+ * What progress and checklist writes may spend in one invocation, out of the
+ * function's 60 s. Progress runs inside the record loop, so without a budget a slow
+ * Linear could time the invocation out, and a timeout retries the whole batch,
+ * lifecycle events of every channel included.
+ */
+const LINEAR_PROGRESS_BUDGET_MS = 15_000;
+
+/** The progress budget of the running invocation; reset at the start of each one. */
+let progressBudget = { spentMs: 0, paused: false };
+
+/** Start the progress budget of an invocation (the handler, and tests that call routeEvent). */
+export function startLinearProgressBudget(): void {
+  progressBudget = { spentMs: 0, paused: false };
+}
+
+/** False once progress has spent its budget or Linear timed out in this invocation. */
+function progressBudgetOpen(logCtx: Record<string, unknown>): boolean {
+  if (!progressBudget.paused && progressBudget.spentMs >= LINEAR_PROGRESS_BUDGET_MS) pauseProgress(logCtx, 'budget_spent');
+  return !progressBudget.paused;
+}
+
+function pauseProgress(logCtx: Record<string, unknown>, reason: 'budget_spent' | 'linear_unavailable'): void {
+  progressBudget.paused = true;
+  logger.warn('[fanout/linear-session] progress paused for the rest of this batch', {
+    ...logCtx, event: 'fanout.linear.progress_paused', reason, spent_ms: progressBudget.spentMs,
+  });
+}
+
+/**
+ * Run one progress or checklist write and charge its time to the budget. A retryable
+ * failure (a timeout, a network error, a 5xx or 429) pauses progress for the rest of
+ * the batch: the next write would most likely wait just as long.
+ */
+async function spendProgressBudget(
+  logCtx: Record<string, unknown>,
+  write: () => Promise<LinearPostResult | null>,
+): Promise<LinearPostResult | null> {
+  const start = Date.now();
+  try {
+    const result = await write();
+    if (result && !result.ok && result.retryable && !progressBudget.paused) pauseProgress(logCtx, 'linear_unavailable');
+    return result;
+  } finally {
+    progressBudget.spentMs += Date.now() - start;
+  }
+}
+
+/**
  * Emit one progress activity into the task's session (#1066). Best effort: a failure is
  * logged and never retried through the batch, since the next event supersedes it. Never
  * posts after the session's final activity or into a finished task, because an activity
@@ -1760,14 +1820,18 @@ async function emitLinearSessionProgress(
   const logCtx = { task_id: task.task_id, linear_agent_session_id: agentSessionId, event_type: effectiveEventType(event) };
   const persistent = !progress.ephemeral;
   try {
+    if (!progressBudgetOpen(logCtx)) return;
     if (persistent && !(await claimProgressSlot(task.task_id, event.event_id))) return;
-    const token = await resolveToken(ctx);
-    const result: LinearPostResult = token
-      ? await emitAgentActivity(token, agentSessionId, progress.content, {
-        ephemeral: progress.ephemeral,
-        id: progressActivityId(event.event_id),
-      })
-      : { ok: false, retryable: false };
+    const result: LinearPostResult = await spendProgressBudget(logCtx, async () => {
+      const token = await resolveToken(ctx);
+      return token
+        ? emitAgentActivity(token, agentSessionId, progress.content, {
+          ephemeral: progress.ephemeral,
+          id: progressActivityId(event.event_id),
+          timeoutMs: LINEAR_PROGRESS_TIMEOUT_MS,
+        })
+        : null;
+    }) ?? { ok: false, retryable: false };
     if (!result.ok) {
       logger.warn('[fanout/linear-session] progress activity not emitted', { ...logCtx, retryable: result.retryable });
       if (persistent) await releaseProgressSlot(task.task_id, event.event_id);
@@ -2602,6 +2666,7 @@ export async function routeEvent(
 export const handler = async (
   event: DynamoDBStreamEvent,
 ): Promise<DynamoDBBatchResponse> => {
+  startLinearProgressBudget();
   const perTaskCounts = new Map<string, number>();
   // Session-progress events have their own per-task budget, so a burst of them can
   // never push a task's PR or terminal event out of the batch.

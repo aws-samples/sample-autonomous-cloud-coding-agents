@@ -295,9 +295,10 @@ export async function graphqlRequest(
   accessToken: string,
   query: string,
   variables: Record<string, unknown>,
+  timeoutMs: number = REQUEST_TIMEOUT_MS,
 ): Promise<LinearPostResult> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const resp = await fetch(LINEAR_GRAPHQL_URL, {
       method: 'POST',
