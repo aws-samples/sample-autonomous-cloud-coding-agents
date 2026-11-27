@@ -519,6 +519,121 @@ describe('linear-webhook-processor — orchestration routing', () => {
     });
   });
 
+  // As at seed time above: a sub-issue that the guardrail refuses never becomes a
+  // task, so no task event wakes the reconciler for the sub-issues that wait for it.
+  describe('a sub-issue that is refused for good when it is started after the seed', () => {
+    type Command = {
+      _type?: string;
+      input?: { Key?: Record<string, string>; UpdateExpression?: string; ExpressionAttributeValues?: Record<string, unknown> };
+    };
+    const shared = { orchestration_id: 'orch_gr', parent_issue_ref: 'issue-1', credentials_ref: 'org-1', repo: 'owner/repo' };
+    const row = (id: string, status: string, dependsOn: string[] = []): Record<string, unknown> => ({
+      ...shared, sub_issue_id: id, depends_on: dependsOn, child_status: status, updated_at: '2026-07-01T00:00:00.000Z',
+    });
+
+    /** The statuses a command writes to its row. */
+    const statusesSet = (cmd: Command): unknown[] => Object.entries(cmd.input?.ExpressionAttributeValues ?? {})
+      .filter(([bind]) => cmd.input?.UpdateExpression?.includes(`child_status = ${bind}`))
+      .map(([, value]) => value);
+    /** The statuses written to one row, in order. */
+    const statusWrites = (id: string): unknown[] => ddbSend.mock.calls
+      .map((c) => c[0] as Command)
+      .filter((cmd) => cmd._type === 'Update' && cmd.input?.Key?.sub_issue_id === id)
+      .flatMap(statusesSet);
+    const lastPanel = (): string => String(upsertStatusCommentMock.mock.calls.at(-1)![2]);
+
+    /** An epic that discovery reports as extended, in a table whose reads show what was written. */
+    function wireSeededEpic(children: Array<Record<string, unknown>>, added: string[], releasable: string[]): void {
+      const store: Record<string, Record<string, unknown>> = {
+        '#meta': { ...shared, sub_issue_id: '#meta', child_count: children.length, platform_user_id: 'u1' },
+      };
+      for (const c of children) store[String(c.sub_issue_id)] = { ...c };
+      ddbSend.mockImplementation(async (cmd: Command) => {
+        const key = cmd.input?.Key ?? {};
+        if (cmd._type === 'Get') {
+          if (key.linear_project_id) return { Item: { status: 'active', repo: 'owner/repo', label_filter: 'bgagent' } };
+          return key.linear_identity ? { Item: { platform_user_id: 'u1' } } : {};
+        }
+        if (cmd._type === 'Query') return { Items: Object.values(store).map((r) => ({ ...r })) };
+        if (cmd._type === 'Update' && store[key.sub_issue_id]) {
+          for (const status of statusesSet(cmd)) store[key.sub_issue_id].child_status = status;
+        }
+        return {};
+      });
+      resolveLinearOauthTokenMock.mockResolvedValue({ accessToken: 'tok', oauthSecretArn: 'arn', workspaceSlug: 'acme' });
+      discoverOrchestrationMock.mockResolvedValueOnce({
+        kind: 'extended', orchestrationId: 'orch_gr', addedSubIssueIds: added, releasableSubIssueIds: releasable,
+      });
+      createTaskCoreMock.mockResolvedValue({
+        statusCode: 400, body: '{"error":{"message":"Task description was blocked by content policy."}}',
+      });
+    }
+
+    test('added to a seeded epic: the sub-issue that waits for it is skipped in the same run', async () => {
+      wireSeededEpic([row('A', 'succeeded'), row('C', 'ready'), row('D', 'blocked', ['C'])], ['C', 'D'], ['C']);
+
+      await handler(eventWith(issue()));
+
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      expect(statusWrites('C')).toEqual(['releasing', 'failed']);
+      expect(statusWrites('D')).toEqual(['skipped']);
+      // The panel is edited from the rows as they are now.
+      expect(lastPanel()).toContain('- ❌ C — failed');
+      expect(lastPanel()).toContain('- ⏭️ D — skipped');
+    });
+
+    test('started again by a re-applied label: the sub-issue that waits for it is skipped again in the same run', async () => {
+      wireSeededEpic([row('A', 'failed'), row('B', 'skipped', ['A'])], [], []);
+
+      await handler(eventWith(issue()));
+
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      // The retry resets both rows and starts A, which is refused again.
+      expect(statusWrites('A')).toEqual(['ready', 'releasing', 'failed']);
+      expect(statusWrites('B')).toEqual(['blocked', 'skipped']);
+      expect(lastPanel()).toContain('- ❌ A — failed');
+      expect(lastPanel()).toContain('- ⏭️ B — skipped');
+    });
+
+    /** From here on the table refuses the write that skips this row, for another reason than its condition. */
+    function refuseSkipOf(id: string): void {
+      const table = ddbSend.getMockImplementation()!;
+      ddbSend.mockImplementation(async (cmd: Command) => {
+        if (cmd._type === 'Update' && cmd.input?.Key?.sub_issue_id === id && statusesSet(cmd).includes('skipped')) {
+          throw new Error('ProvisionedThroughputExceededException');
+        }
+        return table(cmd);
+      });
+    }
+
+    // The skip only saves the wait for the stranded sweep: when the table refuses it,
+    // the rest of the delivery still happens.
+    test('added to a seeded epic, and the skip is refused: the panel is still refreshed, with the sub-issue left to the sweep', async () => {
+      wireSeededEpic([row('A', 'succeeded'), row('C', 'ready'), row('D', 'blocked', ['C'])], ['C', 'D'], ['C']);
+      refuseSkipOf('D');
+
+      await handler(eventWith(issue()));
+
+      // Tried, and not written.
+      expect(statusWrites('D')).toEqual(['skipped']);
+      expect(lastPanel()).toContain('- ❌ C — failed');
+      expect(lastPanel()).toContain('- ⏳ D — blocked');
+    });
+
+    test('started again by a re-applied label, and the skip is refused: the retry note and the panel are still posted', async () => {
+      wireSeededEpic([row('A', 'failed'), row('B', 'skipped', ['A'])], [], []);
+      refuseSkipOf('B');
+
+      await handler(eventWith(issue()));
+
+      expect(statusWrites('B')).toEqual(['blocked', 'skipped']);
+      const posted = upsertStatusCommentMock.mock.calls.map((c) => String(c[2]));
+      expect(posted.join('\n')).toMatch(/Re-running the parts of this epic that didn't finish/i);
+      expect(lastPanel()).toContain('- ❌ A — failed');
+      expect(lastPanel()).toContain('- ⏳ B — blocked');
+    });
+  });
+
   test('no sub-issues → single_task falls through to normal task creation', async () => {
     happyPreamble();
     // No graph → the handler must NOT hydrate epic attachments; it

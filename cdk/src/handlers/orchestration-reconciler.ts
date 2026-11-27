@@ -1427,6 +1427,8 @@ async function maybeRecoverFailedNode(
         released: results.filter((r) => r.kind === 'released').length,
         requested: releasableRows.length,
       });
+      // Skip the dependents of a node refused for good. Step 4 reads the rows again.
+      await applyTerminalCreateFailures(ddb, ORCHESTRATION_TABLE, orchestrationId, freshChildren, results, now);
     }
   }
 

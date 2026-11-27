@@ -110,6 +110,16 @@ const screeningConfig: ScreeningConfig | undefined =
     : undefined;
 
 /**
+ * The user's free concurrency budget, for a release to throttle to. Undefined
+ * (release all; admission still gates) when the concurrency table is not set.
+ */
+async function freeConcurrencyBudget(userId: string): Promise<number | undefined> {
+  return USER_CONCURRENCY_TABLE
+    ? readConcurrencyBudget(ddb, USER_CONCURRENCY_TABLE, userId, MAX_CONCURRENT)
+    : undefined;
+}
+
+/**
  * Post a Jira comment without ever propagating an error. Mirrors the
  * Linear `safeReportIssueFailure` contract — feedback is best-effort,
  * advisory, and must never gate task-rejection logic.
@@ -233,7 +243,7 @@ interface ProcessorEvent {
  *   agent uses to address the originating issue via the Jira REST v3 API
  *   (`jira_reactions.py`; see ADR-015 for why outbound is REST, not MCP).
  */
-// eslint-disable-next-line complexity -- predates the ceiling (115, down from 116 when it landed); must not grow
+// eslint-disable-next-line complexity -- predates the ceiling (114, down from 116 when it landed); must not grow
 export async function handler(event: ProcessorEvent): Promise<void> {
   if (!event.raw_body) {
     logger.error('Jira webhook processor invoked without raw_body');
@@ -612,14 +622,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       const snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
       if (snapshot) {
         const now = new Date().toISOString();
-        const budget = USER_CONCURRENCY_TABLE
-          ? await readConcurrencyBudget(
-            ddb,
-            USER_CONCURRENCY_TABLE,
-            snapshot.meta.release_context.platform_user_id,
-            MAX_CONCURRENT,
-          )
-          : undefined;
+        const budget = await freeConcurrencyBudget(snapshot.meta.release_context.platform_user_id);
         const results = await releaseReadyChildren(
           ddb,
           ORCHESTRATION_TABLE,
@@ -711,6 +714,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
         let panelSnapshot = snapshot;
         if (releasableRows.length > 0) {
           const now = new Date().toISOString();
+          const budget = await freeConcurrencyBudget(snapshot.meta.release_context.platform_user_id);
           const results = await releaseReadyChildren(
             ddb,
             ORCHESTRATION_TABLE,
@@ -719,6 +723,8 @@ export async function handler(event: ProcessorEvent): Promise<void> {
             createTaskCore,
             now,
             snapshot.children,
+            'main',
+            budget,
           );
           await applyTerminalCreateFailures(
             ddb,
@@ -1192,14 +1198,7 @@ async function handleJiraEpicRetry(
     (child) => plan.toRelease.includes(child.sub_issue_id)
       && child.child_status === 'ready',
   );
-  const budget = USER_CONCURRENCY_TABLE
-    ? await readConcurrencyBudget(
-      ddb,
-      USER_CONCURRENCY_TABLE,
-      reset.meta.release_context.platform_user_id,
-      MAX_CONCURRENT,
-    )
-    : undefined;
+  const budget = await freeConcurrencyBudget(reset.meta.release_context.platform_user_id);
   const releaseResults = await releaseReadyChildren(
     ddb,
     ORCHESTRATION_TABLE,

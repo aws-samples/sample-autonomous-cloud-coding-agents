@@ -1412,6 +1412,15 @@ export async function handler(event: ProcessorEvent): Promise<void> {
             'main',
             budget,
           );
+          // Skip the dependents of a node refused for good. The panel below reads the rows again.
+          // Not fatal: a delivery that failed here would be delivered again, find nothing to add, and re-run every failed sub-issue.
+          await applyTerminalCreateFailures(
+            ddb, ORCHESTRATION_TABLE, discovery.orchestrationId, snapshot.children, results, new Date().toISOString(),
+          ).catch((err: unknown) => logger.warn('Failed to skip the dependents of a refused sub-issue on extend (sweep will recover)', {
+            issue_id: issue.id,
+            orchestration_id: discovery.orchestrationId,
+            error: err instanceof Error ? err.message : String(err),
+          }));
           releasedAdded = results.filter((r) => r.kind === 'released').length;
         }
       }
@@ -1800,10 +1809,16 @@ async function maybeRetryTerminalEpic(
       const budget = USER_CONCURRENCY_TABLE
         ? await readConcurrencyBudget(ddb, USER_CONCURRENCY_TABLE, releaseCtx.platform_user_id, MAX_CONCURRENT)
         : undefined;
-      await releaseReadyChildren(
+      const results = await releaseReadyChildren(
         ddb, ORCHESTRATION_TABLE, releasableRows, releaseCtx,
         createTaskCore, now, freshChildren, 'main', budget,
       );
+      // Skip the dependents of a node refused for good. The panel below reads the rows again.
+      // Not fatal: a delivery that failed here would be delivered again, find the retry comment claimed, and post no note or panel.
+      await applyTerminalCreateFailures(ddb, ORCHESTRATION_TABLE, orchestrationId, freshChildren, results, now)
+        .catch((err: unknown) => logger.warn('Epic retry: failed to skip the dependents of a refused sub-issue (sweep will recover)', {
+          orchestration_id: orchestrationId, error: err instanceof Error ? err.message : String(err),
+        }));
     }
   }
 
