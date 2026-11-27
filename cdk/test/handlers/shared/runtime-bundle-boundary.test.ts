@@ -63,13 +63,12 @@ describe('runtime handlers do not bundle aws-cdk-lib', () => {
 
   /**
    * What the real build keeps out of a bundle. Each `NodejsFunction` passes its own list,
-   * so this is their union: `externalModules` is `@aws-sdk/*`, part of it or empty,
-   * `nodeModules: ['pdf-parse']` ships pdf-parse beside the bundle, and get-policies takes
-   * cedar-wasm from a layer. A function that bundles some of the SDK is still covered,
-   * because no SDK package imports the CDK. Only list what the constructs list: anything
-   * else stays in the real bundle whatever this test says.
+   * so this is their union: `externalModules` is `@aws-sdk/*`, part of it or empty, and
+   * `nodeModules: ['pdf-parse']` ships pdf-parse beside the bundle. A function that bundles
+   * some of the SDK is still covered, because no SDK package imports the CDK. Only list what
+   * the constructs list: anything else stays in the real bundle whatever this test says.
    */
-  const EXTERNAL = ['@aws-sdk/*', 'pdf-parse', '@cedar-policy/cedar-wasm', '@cedar-policy/cedar-wasm/nodejs'];
+  const EXTERNAL = ['@aws-sdk/*', 'pdf-parse'];
 
   /** `aws-cdk-lib` and `constructs`, wherever module resolution found them. */
   const CDK_MODULE = /(^|\/)node_modules\/(aws-cdk-lib|constructs)\//;

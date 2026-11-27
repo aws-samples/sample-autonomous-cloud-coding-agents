@@ -251,21 +251,10 @@ describe('AgentStack', () => {
     template.hasOutput('BedrockModelIds', { Value: DEFAULT_BEDROCK_MODEL_IDS.join(',') });
   });
 
-  test('outputs CedarWasmLayerArn', () => {
-    template.hasOutput('CedarWasmLayerArn', {});
-  });
-
   test('enables Agent Registry by default', () => {
     template.hasOutput('AgentRegistryId', {});
     template.hasOutput('AgentRegistryArn', {});
     template.hasOutput('RegistryApiUrl', {});
-  });
-
-  test('creates the Cedar-wasm Lambda layer', () => {
-    template.resourceCountIs('AWS::Lambda::LayerVersion', 1);
-    template.hasResourceProperties('AWS::Lambda::LayerVersion', {
-      CompatibleRuntimes: ['nodejs22.x', 'nodejs24.x'],
-    });
   });
 
   test('runtime receives TASK_APPROVALS_TABLE_NAME env var', () => {

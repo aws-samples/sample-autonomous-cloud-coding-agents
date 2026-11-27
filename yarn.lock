@@ -1331,11 +1331,6 @@
     fs-extra "^11.4.1"
     typescript "^5.9.3"
 
-"@cedar-policy/cedar-wasm@4.12.0":
-  version "4.12.0"
-  resolved "https://registry.yarnpkg.com/@cedar-policy/cedar-wasm/-/cedar-wasm-4.12.0.tgz#bfcb72df711ffc8d096c5a5fda49cbdcff1350b5"
-  integrity sha512-tCSj92hh4fnmas4ojO4tjx8wAAW3mKVgQ7M388NsSpXp64FVeYY6xwhKtJRaaYGK0qLiN2jnq8/SNIU2r5fdPw==
-
 "@clack/core@1.6.0":
   version "1.6.0"
   resolved "https://registry.yarnpkg.com/@clack/core/-/core-1.6.0.tgz#943babea58496602d92666be05ac14d1a703ab9b"

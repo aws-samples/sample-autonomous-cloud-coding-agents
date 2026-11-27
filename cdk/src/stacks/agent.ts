@@ -50,7 +50,6 @@ import {
 import { Blueprint } from '../constructs/blueprint';
 import { BudgetAlerts } from '../constructs/budget-alerts';
 import { BudgetTable } from '../constructs/budget-table';
-import { CedarWasmLayer } from '../constructs/cedar-wasm-layer';
 import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
 import { DnsFirewall } from '../constructs/dns-firewall';
 import { EcsAgentCluster, resolveEcsTaskSizing } from '../constructs/ecs-agent-cluster';
@@ -381,12 +380,6 @@ export class AgentStack extends Stack {
         description: 'ABCA agent asset registry (#246)',
       })
       : undefined;
-
-    // Cedar-wasm Lambda layer (§15.2 task 10). Instantiated here so the
-    // asset is in the synthed template; Chunk 5 handlers (Approve,
-    // Deny, GetPolicies, CreateTask) attach the layer via
-    // ``fn.addLayers(cedarWasmLayer.layer)``.
-    const cedarWasmLayer = new CedarWasmLayer(this, 'CedarWasmLayer');
 
     // --trace trajectory storage (design §10.1). Opt-in per task; only
     // written when the submit payload sets ``trace: true``.
@@ -1139,11 +1132,6 @@ export class AgentStack extends Stack {
     new CfnOutput(this, 'TaskApprovalsTableName', {
       value: taskApprovalsTable.table.tableName,
       description: 'Name of the DynamoDB task approvals table (Cedar HITL)',
-    });
-
-    new CfnOutput(this, 'CedarWasmLayerArn', {
-      value: cedarWasmLayer.layer.layerVersionArn,
-      description: 'ARN of the Cedar-wasm Lambda layer (consumed by Chunk 5 REST handlers)',
     });
 
     new CfnOutput(this, 'UserConcurrencyTableName', {

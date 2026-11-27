@@ -99,11 +99,11 @@ def test_a():
 
 - ✅ **Always:** Add tests under `agent/tests/` for behavior changes; update `agent/README.md` for new env vars; emit structured progress events for operator-visible milestones
 - ⚠️ **Ask first:** Changes to agent–orchestrator contract, Dockerfile base image, new system dependencies in `pyproject.toml`
-- 🚫 **Never:** Bump `cedarpy` without bumping `@cedar-policy/cedar-wasm` and refreshing `contracts/cedar-parity/` fixtures; edit only `agent/` and skip `mise //agent:quality` before PR
+- 🚫 **Never:** Edit only `agent/` and skip `mise //agent:quality` before PR
 
 ## Common mistakes
 
-- **Cedar parity** — `cedarpy==4.12.2` (agent) and `@cedar-policy/cedar-wasm` 4.12.0 (cdk) must move together. See [cdk/AGENTS.md](../cdk/AGENTS.md) and `docs/design/CEDAR_HITL_GATES.md` §15.6.
+- **Built-in Cedar rules** — a rule added to `policies/*.cedar` needs a row in `BUILTIN_RULES` of `tests/test_policy_builtin_rules.py` and in the rule table of [`docs/guides/USER_GUIDE.md`](../docs/guides/USER_GUIDE.md#rule-ids); a soft rule also needs an entry in `RULE_ID_ALLOWLIST` of `cdk/src/handlers/shared/approval-metrics.ts`. A `cedarpy` bump is judged by `tests/test_policy_builtin_rules.py`, `tests/test_cedarpy_annotations_contract.py` and `tests/test_policy_three_outcome.py`.
 - **Claude Code CLI lockstep (#215)** — `claude-agent-sdk` (`pyproject.toml`) bundles a Claude Code CLI, and `Dockerfile` installs the same CLI from npm; the two must be the same version. Move both pins in one commit: `tests/test_claude_cli_lockstep.py` fails when they differ and names the version to use.
 - **Image instrumentation list** — `Dockerfile` sets `OTEL_PYTHON_DISABLED_INSTRUMENTATIONS` to the list the pinned `aws-opentelemetry-distro` applies in its agent observability mode, with `requests` and `urllib3` always in it (they would copy trace context and baggage into requests to Linear and Atlassian). An update of the distro can change that list: `tests/test_image_instrumentation.py` fails then and prints the instruction to write.
 - **Contract-owned constant** — a constant that `contracts/constants.json` owns (the names in `OWNED_PYTHON_NAMES` in `scripts/check-constants-sync.ts`) may only be assigned a plain read of its contract key, optionally inside one conversion such as `int(...)`, in any file under `src/`. A literal, arithmetic on the value or another key fails `mise run check:constants-sync`. A new owned constant also needs a row in `_OWNED` in `tests/test_constants_parity.py`; the check fails until it has one. Details: [`contracts/constants.md`](../contracts/constants.md).

@@ -94,7 +94,7 @@ Branch names: `(feat|fix|chore|docs)/<issue-number>-short-description` (e.g. `do
 - **Shell script that fails shellcheck** — `mise run check:shell` runs shellcheck over every `*.sh` file that git tracks or would add. The task is part of `mise run drift-prevention`, so of the build, and of `mise run security`, so of the push hook. The commit hook runs it when a `*.sh` file is staged. A new script that git does not ignore is checked before its first `git add`. A scratch script with a warning therefore fails the build and the push hook until it is fixed, removed or ignored. Errors and warnings fail (`--severity=warning`); `info` and `style` notes are not reported. The task reads no `.shellcheckrc` and no `SHELLCHECK_OPTS`. Fix the finding; for a false positive, put `# shellcheck disable=SC<code> # <reason>` on the line above the command.
 - **Optional feature read from context, or catalog edited in one place** — new optional modules belong in `DeploymentFeatures` (`cdk/src/deployment/features.ts`) and are gated in `AgentStack` from that selection, not with a fresh `tryGetContext`. Regional data lives in `contracts/deployment-capabilities.json`; mirror it into `cli/src/deployment-capabilities.ts` (parity test), and update `lastVerified` only when the AgentCore Regions page was checked again. The date records the last check of that page, not of the Lambda MicroVM Regions ([Regional availability](./docs/guides/DEPLOYMENT_GUIDE.md#regional-availability)). See [ADR-024](./docs/decisions/ADR-024-deployment-profiles.md).
 - **Broken link or misplaced image in Markdown** — `mise //docs:link-check` checks the relative links of every Markdown file in the repository, tracked or new (READMEs, `AGENTS.md` files and plugin skills included), and `mise //docs:build` fails on a broken link or anchor of the rendered site. An image shown in a mirrored doc must be a file in `docs/imgs/`, or `mise //docs:sync` fails. See [docs/AGENTS.md](./docs/AGENTS.md).
-- **Package-specific pitfalls** — API type drift, CDK test bundling, Cedar parity, generated docs: see package `AGENTS.md` files.
+- **Package-specific pitfalls** — API type drift, CDK test bundling, generated docs: see package `AGENTS.md` files.
 
 ## Tech stack
 
@@ -102,7 +102,7 @@ Branch names: `(feat|fix|chore|docs)/<issue-number>-short-description` (e.g. `do
 - **TypeScript compiler checks** (cdk, cli, web; `src/` and `test/`) — `strict`, plus `noImplicitOverride` (a member that overrides one of its base class needs the `override` modifier) and `noFallthroughCasesInSwitch`; unreachable code and unused labels are errors
 - **AWS CDK** `aws-cdk-lib` 2.x · `@aws-cdk/aws-bedrock-alpha`, `@aws-cdk/aws-bedrock-agentcore-alpha`, `cdk-nag`
 - **Test / lint** — Jest 30 (cdk, cli), Vitest (web), ESLint flat config (`cdk/eslint.config.mjs`, `cli/eslint.config.mjs`, `web/eslint.config.mjs`), Ruff (agent)
-- **Cedar** — `@cedar-policy/cedar-wasm` 4.12.0 (cdk) + `cedarpy==4.12.2` (agent); must bump together, with `contracts/cedar-parity/engines/versions.json`, which names the pair (`cdk/test/constructs/cedar-wasm-layer.test.ts` fails on any other pin)
+- **Cedar** — `cedarpy==4.12.2` in the agent is the only Cedar engine, pinned exactly; `agent/tests/test_cedarpy_annotations_contract.py` names the version, so a bump is a change made by hand
 - **Tooling** — mise, Yarn workspaces, prek hooks, Starlight docs sync
 
 ## Repository structure

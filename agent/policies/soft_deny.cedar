@@ -19,10 +19,6 @@ permit (principal, action, resource);
 //   @approval_timeout_s     — integer seconds >= 30 (<120 emits WARN per IMPL-25)
 //   @severity               — "low" | "medium" | "high"
 //   @category               — optional free-form UX grouping
-//
-// Blueprints may OPT OUT of specific rules here via
-// `security.cedarPolicies.disable: [rule_id]`. They may NOT disable any
-// rule in hard_deny.cedar (blueprint loader rejects those at task start).
 
 // Gate any git --force / -f push. 300s default approval window, medium severity.
 // Covers both long-form (--force) and short-form (-f) variants, including

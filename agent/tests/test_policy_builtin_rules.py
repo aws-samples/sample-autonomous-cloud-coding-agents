@@ -9,13 +9,7 @@ calls are chosen with that in mind (see ``BUILTIN_RULES``), but they are
 examples: a pattern that still matches every one of them passes.
 
 The calls go through ``PolicyEngine.evaluate_tool_use``, the only place the
-shipped rules are evaluated. ``cdk/src/handlers/shared/builtin-policies.ts``
-carries the same text for the API handlers, which parse it but never evaluate
-it, and ``cdk/test/handlers/shared/builtin-policies.test.ts`` keeps that copy
-byte-identical: a rule cannot be weakened there without being weakened here.
-
-``contracts/cedar-parity/`` is a different check. It compares the two Cedar
-engines on policy text written into each fixture, not on the shipped rules.
+shipped rules are evaluated.
 """
 
 import json
