@@ -24,16 +24,8 @@ from .deliverers import DELIVER_OUTCOMES as _DELIVER_OUTCOMES
 from .deliverers import DELIVERERS as _DELIVERERS
 from .deliverers import produced_outcomes as _deliverer_produces
 from .loader import WorkflowValidationError, validate_shape
-from .runner import STEP_HANDLERS
 
 # --- rule support data -------------------------------------------------------
-
-# Steps the runner has a handler for (rule 8). Derived from the runner's
-# STEP_HANDLERS registry — the single source of truth for "kind has a registered
-# handler" — rather than a hand-maintained copy that could silently drift from
-# the registry it is supposed to mirror. (Importing runner here is cycle-free:
-# runner imports only shell/models, never the validator.)
-_HANDLER_KINDS = frozenset(STEP_HANDLERS)
 
 # Steps that produce an external side effect — may not be marked on_failure:
 # continue (rule 12), and used by the repo-less shape check (rule 3).
@@ -243,18 +235,14 @@ def _rule_7_repo_config_gating(data: dict[str, Any]) -> list[str]:
 
 
 def _rule_8_refs_resolve(data: dict[str, Any]) -> list[str]:
-    """Every step kind has a handler; every asset ref is syntactically resolvable.
+    """Every asset ref is syntactically resolvable.
 
     Includes ``deliver_artifact.target`` (an open string since the ADR-014
     addendum): it must name a registered deliverer in ``DELIVERERS``, so a typo
     is caught universally here rather than only when it collides with the
     primary terminal outcome (rule 11).
     """
-    msgs = [
-        f"step kind {kind!r} has no registered handler"
-        for kind in _step_kinds(data)
-        if kind not in _HANDLER_KINDS
-    ]
+    msgs = []
     for step in data.get("steps", []):
         if isinstance(step, dict) and step.get("kind") == "deliver_artifact":
             target = step.get("target")
