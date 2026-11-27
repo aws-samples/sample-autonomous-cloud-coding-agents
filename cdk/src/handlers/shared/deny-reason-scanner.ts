@@ -102,8 +102,9 @@ const PATTERNS: readonly SecretPattern[] = [
   },
   {
     name: 'LINEAR_TOKEN',
-    // Linear personal API keys (`lin_api_`) and OAuth access tokens (`lin_oauth_`).
-    regex: /\blin_(?:api|oauth)_[A-Za-z0-9]{16,}/g,
+    // Linear personal API keys (`lin_api_`), OAuth access and refresh tokens
+    // (`lin_oauth_`, `lin_refresh_`) and webhook signing secrets (`lin_wh_`).
+    regex: /\blin_(?:api|oauth|refresh|wh)_[A-Za-z0-9]{16,}/g,
   },
   {
     name: 'GENERIC_BEARER',
