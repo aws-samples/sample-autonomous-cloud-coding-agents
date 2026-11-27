@@ -31,6 +31,11 @@
   },
   {
     "template": "backgroundagent-dev.template.json",
+    "logicalId": "ApprovalRequestsNestedStackApprovalRequestsNestedStackResource7951430F",
+    "type": "AWS::CloudFormation::Stack"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
     "logicalId": "AttachmentsBucket28B3CCF2",
     "type": "AWS::S3::Bucket"
   },
@@ -233,6 +238,11 @@
     "template": "backgroundagent-dev.template.json",
     "logicalId": "WebhookTable610F8307",
     "type": "AWS::DynamoDB::Table"
+  },
+  {
+    "template": "backgroundagentdevApprovalRequestsCA2748DA.nested.template.json",
+    "logicalId": "AccessLogs8B620ECA",
+    "type": "AWS::Logs::LogGroup"
   },
   {
     "template": "backgroundagentdevRegistryApiF3ADADE2.nested.template.json",

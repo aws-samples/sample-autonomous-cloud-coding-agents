@@ -479,6 +479,23 @@ until completing the [resource migration](https://github.com/aws-samples/sample-
 Omitting the setting fails synthesis. Selecting `true` does not migrate existing flat resources.
 
 
+### Drain, then deploy the stack and the worker images together (#1000, #1002)
+
+**Affects:** an existing deployment on its first deploy of a version with the trusted approval writer ([ADR-025](/sample-autonomous-cloud-coding-agents/decisions/adr-025-trusted-approval-writer)) and payload bootstrap v2 ([ADR-021](/sample-autonomous-cloud-coding-agents/decisions/adr-021-lambda-microvms-compute-backend)).
+
+**Symptom:** a new stack with an old worker image, or an old stack with a new image, fails tasks. On ECS and Lambda MicroVMs every task start fails: the coordinator sends only the v2 payload reference, and the image accepts only that. On every backend an old image cannot record an approval request, because the session role can no longer write the approvals table, so every approval gate denies its call.
+
+`mise //cdk:deploy` rebuilds the AgentCore and ECS images with the stack. It does not rebuild the Lambda MicroVM image: `cdk/scripts/package-microvm-artifact.sh` packages that image in a separate step, so a deployment that runs only the stack deploy keeps the old MicroVM image.
+
+**Resolution:**
+
+1. Pause new task submissions, including scheduled and queued ones. Let running tasks, pending approvals and queued starts finish.
+2. On a MicroVM deployment, run `cdk/scripts/package-microvm-artifact.sh` from the commit you deploy. It uploads the image artifact and prints its digest; it changes nothing that a running task uses.
+3. Deploy the stack once, with the new `microvm_artifact_sha256` digest on a MicroVM deployment (or the new `microvm_image_identifier` when the script ran with `--create-image`).
+4. Resume submissions.
+
+To roll back, pause submissions again and restore the previous code and images together. The full sequence, its checks and the rollback are in the [payload bootstrap runbook](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/docs/verification/645-payload-bootstrap.md#coordinated-deployment-and-rollback). Its AWS checks (authorization, networking, expiry and the coordinated deployment) have not been run against a deployed stack yet.
+
 ### Log-delivery rename on upgrade (pin-table removal, #703)
 
 **Affects:** any stack — **whatever its name** — whose live `AWS::Logs::Delivery*` logical ids contain `CDKSource` or `CdkLogGroup`. In practice that is any stack last deployed before the CDK library switch in #339 (2026-06-13), plus any stack deployed while the pin table held those ids. The legacy names come from the *previous library version*, not from the pin table, so a custom stack name confers no immunity. A currently-working deployment is **not** evidence of being unaffected: the failure only appears on the first deploy after upgrading past the pin removal.

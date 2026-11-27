@@ -57,6 +57,8 @@ const REPO_ROOT = path.resolve(import.meta.dirname, '..');
 const CONSTANTS_JSON = path.join(REPO_ROOT, 'contracts/constants.json');
 const AGENT_SRC = path.join(REPO_ROOT, 'agent/src');
 const PARITY_TEST = 'agent/tests/test_constants_parity.py';
+const PAYLOAD_BOOTSTRAP_PY = path.join(REPO_ROOT, 'agent/src/payload_bootstrap.py');
+const PAYLOAD_BOOTSTRAP_TS = path.join(REPO_ROOT, 'cdk/src/handlers/shared/payload-bootstrap.ts');
 const MICROVM_COMPUTE_TS = path.join(REPO_ROOT, 'cdk/src/constructs/lambda-microvm-compute.ts');
 const MICROVM_IMAGE_CAPABILITY_TS = path.join(REPO_ROOT, 'cdk/src/handlers/shared/microvm/image-capability.ts');
 const MICROVM_STRATEGY_TS = path.join(REPO_ROOT, 'cdk/src/handlers/shared/strategies/lambda-microvm-strategy.ts');
@@ -249,6 +251,15 @@ function main(): number {
       image_protocol_env: string;
       hook_port: number;
       maximum_duration_seconds: number;
+    };
+    payload_bootstrap?: {
+      version: number;
+      manifest_prefix: string;
+      launch_filename: string;
+      max_manifest_bytes: number;
+      max_payload_bytes: number;
+      url_ttl_seconds: number;
+      minimum_url_lifetime_seconds: number;
     };
   };
   try {
@@ -444,6 +455,27 @@ function main(): number {
     );
   }
 
+
+  const bootstrap = json.payload_bootstrap;
+  const bootstrapNumbers = [
+    'version', 'max_manifest_bytes', 'max_payload_bytes',
+    'url_ttl_seconds', 'minimum_url_lifetime_seconds',
+  ] as const;
+  if (!bootstrap || bootstrapNumbers.some(key => !Number.isInteger(bootstrap[key]) || bootstrap[key] <= 0)
+    || typeof bootstrap.manifest_prefix !== 'string' || !/^[a-z][a-z0-9_-]*\/$/.test(bootstrap.manifest_prefix)
+    || typeof bootstrap.launch_filename !== 'string' || !/^[a-z][a-z0-9_-]*\.json$/.test(bootstrap.launch_filename)
+    || bootstrap.launch_filename === 'payload.json') {
+    invariantErrors.push('payload_bootstrap must define positive integer bounds and distinct safe object paths');
+  } else if (bootstrap.minimum_url_lifetime_seconds > bootstrap.url_ttl_seconds
+    || bootstrap.max_manifest_bytes > bootstrap.max_payload_bytes) {
+    invariantErrors.push('payload_bootstrap minimum lifetime/manifest size exceeds its corresponding maximum');
+  }
+  // Check that both implementations still read the shared block. Literal copies
+  // would allow a security cap or protocol version to drift across languages.
+  if (!/CONTRACT\s*=\s*SHARED_CONSTANTS\["payload_bootstrap"\]/.test(fs.readFileSync(PAYLOAD_BOOTSTRAP_PY, 'utf8'))
+    || !/PAYLOAD_BOOTSTRAP\s*=\s*constants\.payload_bootstrap/.test(fs.readFileSync(PAYLOAD_BOOTSTRAP_TS, 'utf8'))) {
+    invariantErrors.push('payload_bootstrap consumers must read the shared contract');
+  }
 
   if (invariantErrors.length > 0) {
     console.error(`Semantic invariant violations in ${CONSTANTS_JSON}:\n`);

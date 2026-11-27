@@ -62,7 +62,7 @@ const COMPONENTS: ReadonlyArray<readonly [string, readonly string[]]> = [
   ]],
   ['Orchestration', [
     'TaskOrchestrator', 'ConcurrencyMaintenance', 'OrchestrationReconciler', 'StrandedOrchestrationReconciler',
-    'IterationHeartbeat', 'FanOutConsumer', 'ApprovalMetricsPublisherConsumer',
+    'IterationHeartbeat', 'FanOutConsumer', 'ApprovalMetricsPublisherConsumer', 'ApprovalRequests',
   ]],
   ['Monitoring & alerts', ['TaskDashboard', 'OperationalAlerts', 'BudgetAlerts', 'ModelInvocationLogGroup', 'BedrockLoggingRole', 'ModelInvocationLogging']],
   ['Slack', ['SlackIntegration']],

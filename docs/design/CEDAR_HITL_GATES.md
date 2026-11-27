@@ -211,12 +211,12 @@ Narrative walk-through of the happy path. Sequence diagrams in the round-trip Me
       "status": "PENDING",
       "created_at": "2026-04-23T14:00:00Z",
       "timeout_s": 300,
-      "ttl": 1734567890,  # created_at + timeout_s + CLEANUP_MARGIN_120S; always covers the decision window
+      "deadline_epoch": 1776953100,  # created_at + timeout_s
       "user_id": "...",
       "repo": "my-org/my-app"
     }
     ```
-15. **Atomic transition** — hook issues `TransactWriteItems` with two operations:
+15. **Atomic transition** — hook sends the row in a SigV4-signed `create` request to the trusted approval writer ([ADR-025](../decisions/ADR-025-trusted-approval-writer.md)). The writer validates it, sets its `ttl` (`deadline_epoch + CLEANUP_MARGIN_120S`) and issues `TransactWriteItems` with two operations:
     - Put on `TaskApprovalsTable` (new row with status=PENDING)
     - ConditionalUpdate on `TaskTable`: `status = :awaiting, awaiting_approval_request_id = :rid WHERE status = :running`
     Both succeed or both fail. On `TransactionCanceledException` (most likely the TaskTable condition fails because another process moved the status), the hook emits `approval_write_failed` and returns DENY.
@@ -1282,10 +1282,10 @@ TaskApprovalsTable rows are **terminal on first decision** — a row never re-op
 
 ```mermaid
 stateDiagram-v2
-    [*] --> PENDING: Agent writes row<br/>(TransactWriteItems with<br/>TaskTable → AWAITING_APPROVAL)
+    [*] --> PENDING: Approval writer creates row<br/>for the agent (TransactWriteItems with<br/>TaskTable → AWAITING_APPROVAL)
     PENDING --> APPROVED: ApproveTaskFn<br/>(cross-table transaction)
     PENDING --> DENIED: DenyTaskFn<br/>(cross-table transaction)
-    PENDING --> TIMED_OUT: Agent poll timeout<br/>(best-effort update)
+    PENDING --> TIMED_OUT: Agent poll timeout<br/>(best-effort request to the approval writer)
     PENDING --> STRANDED: Reconciler detects<br/>orphan (age > 2×timeout_s)
     APPROVED --> [*]: terminal
     DENIED --> [*]: terminal
@@ -1619,7 +1619,7 @@ These alarms transition to `ALARM` state in CloudWatch and appear in the console
 
 ### 12.1 Trust boundaries
 
-- **Agent container ↔ TaskApprovalsTable**: IAM role on the runtime has `GetItem` / `PutItem` / conditional `UpdateItem` on the table. Agent writes pending, reads decisions, writes TIMED_OUT on internal timeout.
+- **Agent container ↔ TaskApprovalsTable**: the task's session role can only read the table (`GetItem`, `BatchGetItem`, `Query`, `ConditionCheckItem`, on its own task's rows), which is enough to poll decisions. The agent cannot write approval rows. It asks the trusted approval writer ([ADR-025](../decisions/ADR-025-trusted-approval-writer.md)), an IAM-authenticated API that the session can call only on its own task's path, to create a pending request or to record TIMED_OUT on internal timeout. The writer cannot record a human decision.
 - **User CLI ↔ API Gateway**: Cognito JWT (same authorizer as `/tasks/*`). Cognito `sub` is the canonical caller identity, used **verbatim** in DDB `ConditionExpression` (§7.1, finding #6).
 - **ApproveTaskFn/DenyTaskFn ↔ TaskApprovalsTable + TaskTable**: Lambda IAM policy allows `UpdateItem` on both tables under `TransactWriteItems`. Authorization is in the ConditionExpression (ownership AND state), not in a separate IAM boundary.
 - **Blueprint origin**: blueprints are CDK-deployed constructs (see `cdk/src/constructs/blueprint.ts`). Platform operators deploy them. Users cannot upload arbitrary blueprint.yaml from the target repo. This property is load-bearing for the security model — if blueprint origin ever becomes user-uploaded, the blueprint-injection section (§12.4) must be re-evaluated. The 64 KB text cap (§5.1, finding #12) and `disable:` hard-deny rejection (finding #9) are applied regardless of origin as defense in depth.

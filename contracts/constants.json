@@ -41,6 +41,7 @@
       "task_table_name": "TASK_TABLE_NAME",
       "task_events_table_name": "TASK_EVENTS_TABLE_NAME",
       "task_approvals_table_name": "TASK_APPROVALS_TABLE_NAME",
+      "approval_requests_api_url": "APPROVAL_REQUESTS_API_URL",
       "nudges_table_name": "NUDGES_TABLE_NAME",
       "log_group_name": "LOG_GROUP_NAME",
       "artifacts_bucket_name": "ARTIFACTS_BUCKET_NAME",
@@ -59,6 +60,7 @@
     "required": [
       "task_table_name",
       "task_events_table_name",
+      "approval_requests_api_url",
       "github_token_secret_arn",
       "agent_session_role_arn"
     ],
@@ -69,6 +71,15 @@
       "agent_session_role_arn"
     ],
     "account_anchor_key": "agent_session_role_arn"
+  },
+  "payload_bootstrap": {
+    "version": 2,
+    "manifest_prefix": "bootstrap/",
+    "launch_filename": "launch.json",
+    "max_manifest_bytes": 16384,
+    "max_payload_bytes": 8388608,
+    "url_ttl_seconds": 900,
+    "minimum_url_lifetime_seconds": 300
   },
   "microvm_hook_budgets": {
     "ready_hook_timeout_seconds": 300,

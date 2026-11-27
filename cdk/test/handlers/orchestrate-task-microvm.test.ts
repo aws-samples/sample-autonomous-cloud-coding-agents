@@ -150,6 +150,7 @@ process.env.MICROVM_PAYLOAD_BUCKET = 'test-microvm-payload-bucket';
 process.env.TASK_TABLE_NAME = 'Tasks';
 process.env.APPROVAL_REQUESTS_API_URL = 'https://approval.execute-api.us-east-1.amazonaws.com/v1';
 process.env.TASK_EVENTS_TABLE_NAME = 'TaskEvents';
+process.env.APPROVAL_REQUESTS_API_URL = 'https://fixture.execute-api.us-east-1.amazonaws.com/v1/';
 process.env.USER_CONCURRENCY_TABLE_NAME = 'UserConcurrency';
 process.env.TASK_RETENTION_DAYS = '90';
 
@@ -374,7 +375,7 @@ describe('orchestrate-task for a lambda-microvm task', () => {
     expect(commandsOfType('TerminateMicrovm')).toHaveLength(1);
   });
 
-  test('registry assets alone exceed the hook cap and survive real hydration and S3-pointer delivery (#818)', async () => {
+  test('registry assets alone exceed the hook cap and survive real hydration and v2 bootstrap delivery (#818, #1002)', async () => {
     const runtime = {
       transport: 'http',
       url: 'https://mcp.example.com/tools',
@@ -396,19 +397,17 @@ describe('orchestrate-task for a lambda-microvm task', () => {
 
     expect(mockResolveAsset).toHaveBeenCalledTimes(1);
     const upload = s3CommandsOfType('PutObject').find(c => c.input.Key === 'TASK001/payload.json');
-    const document = JSON.parse(upload.input.Body);
+    const document = JSON.parse(upload.input.Body).agent_payload;
     expect(document.resolved_assets).toEqual([asset]);
-    const { resolved_assets: assets, platform_config: _config, ...basePayload } = document;
+    const { resolved_assets: assets, ...basePayload } = document;
     expect(Buffer.byteLength(JSON.stringify(basePayload))).toBeLessThan(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES);
     expect(Buffer.byteLength(JSON.stringify(assets))).toBeGreaterThan(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES);
     const run = commandsOfType('RunMicrovm');
     expect(run).toHaveLength(1);
     const wire = run[0].input.runHookPayload;
     expect(Buffer.byteLength(wire)).toBeLessThanOrEqual(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES);
-    expect(JSON.parse(wire)).toMatchObject({
-      agent_payload_s3_uri: 's3://test-microvm-payload-bucket/TASK001/payload.json',
-      platform_config: expect.any(Object),
-    });
+    // The hook body is only the signed, task-scoped reference; the assets ride in the task object.
+    expect(JSON.parse(wire)).toMatchObject({ version: 2, task_id: 'TASK001', payload_url: expect.any(String) });
     expect(wire).not.toContain('X-Registry-Context');
     const audit = mockDdbSend.mock.calls.find(([c]) => c.input.ExpressionAttributeValues?.[':ra']);
     expect(audit![0].input.ExpressionAttributeValues[':ra']).toEqual([
@@ -722,18 +721,22 @@ describe('orchestrate-task for a lambda-microvm task', () => {
 
   // --- finalize-time payload delete (review NB3) ---
 
-  test('deletes its own payload object on finalize', async () => {
-    // The execution role can read the whole payload bucket, so finalize deletes
-    // this task's prompt instead of leaving it to the one-day lifecycle rule.
+  test('deletes its own payload and saved capability on finalize', async () => {
+    // Revoke the signed payload link and remove its private replay record.
+    // The one-day lifecycle remains a cleanup backstop.
     runMicrovmOk();
 
     await handler({ task_id: 'TASK001' }, fakeContext().ctx as never);
 
     const deletes = s3CommandsOfType('DeleteObject');
-    expect(deletes).toHaveLength(1);
+    expect(deletes).toHaveLength(2);
     expect(deletes[0].input).toEqual({
       Bucket: 'test-microvm-payload-bucket',
       Key: 'TASK001/payload.json',
+    });
+    expect(deletes[1].input).toEqual({
+      Bucket: 'test-microvm-payload-bucket',
+      Key: 'TASK001/launch.json',
     });
     // ...and it did not reach for the ECS deleter.
     expect(mockDeleteEcsPayload).not.toHaveBeenCalled();

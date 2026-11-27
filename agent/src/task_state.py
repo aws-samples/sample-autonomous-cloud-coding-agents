@@ -7,7 +7,10 @@ operations are no-ops.
 
 import os
 import time
-from typing import TypedDict
+from http import HTTPStatus
+from typing import NotRequired, TypedDict
+
+import requests
 
 from shell import log, log_error_cw
 
@@ -34,6 +37,7 @@ class ApprovalRow(TypedDict):
     created_at: str
     timeout_s: int
     ttl: int
+    deadline_epoch: NotRequired[int]
     user_id: str
     repo: str
 
@@ -645,6 +649,20 @@ def _ddb_attr_to_py(attr):
     return attr
 
 
+# Waits before the second and third attempt of a create whose answer was lost.
+_CREATE_RETRY_DELAYS_S = (0.5, 1.0)
+
+
+def _answer_lost(exc: BaseException) -> bool:
+    """The writer may have committed: no answer arrived, or the service failed."""
+    if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
+        return True
+    response = getattr(exc, "response", None)
+    metadata = response.get("ResponseMetadata") if isinstance(response, dict) else None
+    status = metadata.get("HTTPStatusCode") if isinstance(metadata, dict) else None
+    return isinstance(status, int) and status >= HTTPStatus.INTERNAL_SERVER_ERROR
+
+
 def transact_write_approval_request(
     task_id: str,
     request_id: str,
@@ -653,6 +671,9 @@ def transact_write_approval_request(
     client=None,
 ) -> None:
     """Atomically record a pending approval + transition the task to AWAITING_APPROVAL.
+
+    The trusted approval service performs the transaction when configured. Direct
+    DynamoDB is retained only for unscoped local/legacy deployments.
 
     Two items:
       1. Put on ``TaskApprovalsTable`` with ``ConditionExpression:
@@ -670,6 +691,29 @@ def transact_write_approval_request(
     DDB-layer exceptions propagate so the hook's outer try/except can
     fail-closed with a specific reason.
     """
+    import approval_requests
+
+    if approval_requests.configured():
+        # The writer reports a repeat of a committed create as its success, so a
+        # create whose answer was lost is repeated with the same request id.
+        for retry_delay_s in (*_CREATE_RETRY_DELAYS_S, None):
+            try:
+                approval_requests.record_request(
+                    "create", task_id, request_id, approval=dict(approval_row)
+                )
+                return
+            except Exception as exc:
+                if _extract_error_code(exc) == "TransactionCanceledException":
+                    reasons = _extract_cancellation_reasons(exc)
+                    raise ApprovalWriteError(
+                        f"approval write cancelled: reasons={reasons}", cancellation_reasons=reasons
+                    ) from exc
+                if retry_delay_s is None or not _answer_lost(exc):
+                    raise
+                log("WARN", f"approval request {request_id} unconfirmed, repeating: {exc}")
+                time.sleep(retry_delay_s)
+    # Compatibility with unscoped legacy/local deployments. configured() rejects
+    # a missing service URL for cloud workers that use the session role.
     task_table, approvals_table = _require_tables()
     ddb = _get_ddb_client(client=client)
 
@@ -806,6 +850,23 @@ def best_effort_update_approval_status(
     Returns ``True`` on successful write, ``False`` on
     ``ConditionalCheckFailedException``. All other errors propagate.
     """
+    import approval_requests
+
+    if new_status != "TIMED_OUT":
+        raise ValueError("Workers may record only non-human timeouts")
+    if approval_requests.configured():
+        try:
+            approval_requests.record_request("timeout", task_id, request_id, reason=reason)
+            return True
+        except Exception as exc:
+            reasons = _extract_cancellation_reasons(exc)
+            if _extract_error_code(exc) == "TransactionCanceledException" and (
+                reasons
+                and reasons[0].get("Code") == "ConditionalCheckFailed"
+                and all(reason.get("Code") == "None" for reason in reasons[1:])
+            ):
+                return False
+            raise
     _, approvals_table = _require_tables()
     ddb = _get_ddb_client(client=client)
 

@@ -1,0 +1,19 @@
+{
+  "_comment": "The approval request a worker gate builds (agent/src/hooks.py, step 5) and sends to the trusted approval writer (cdk/src/handlers/request-approval.ts), without the ttl that the worker drops before sending. agent/tests/test_hooks.py checks that the hook builds exactly these fields, agent/tests/test_approval_requests.py sends this row, and cdk/test/handlers/request-approval.test.ts and request-approval-local.test.ts validate and store it, so a field added on one side only fails a test. The hook always sends a timeout of at least approval_timeout_s.min with deadline_epoch = created_at + timeout_s.",
+  "row": {
+    "task_id": "task",
+    "request_id": "gate",
+    "tool_name": "Bash",
+    "tool_input_preview": "{\"command\":\"git push\"}",
+    "tool_input_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "reason": "Soft-deny: protected",
+    "severity": "high",
+    "matching_rule_ids": ["protected"],
+    "status": "PENDING",
+    "created_at": "2026-09-18T00:00:00Z",
+    "timeout_s": 300,
+    "user_id": "owner",
+    "repo": "owner/repo",
+    "deadline_epoch": 1789689900
+  }
+}

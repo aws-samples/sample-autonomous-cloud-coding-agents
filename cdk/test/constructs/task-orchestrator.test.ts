@@ -854,9 +854,18 @@ describe('TaskOrchestrator with the Lambda MicroVMs backend (ADR-021)', () => {
       .filter(s => JSON.stringify(s.Resource).includes('MicrovmPayloadBucket'));
     const actions = payloadStatements.flatMap(s => Array.isArray(s.Action) ? s.Action : [s.Action]);
     expect(actions).toContain('s3:PutObject');
-    expect(actions.some(action => action.startsWith('s3:DeleteObject'))).toBe(true);
-    // The MicroVM execution role is the only reader of a task's payload.
-    expect(actions.some(action => action.startsWith('s3:GetObject'))).toBe(false);
+    expect(actions).toContain('s3:DeleteObject');
+    expect(actions).toContain('s3:GetObject');
+    expect(actions.filter(action => action.startsWith('s3:List'))).toEqual(['s3:ListBucket']);
+    const list = payloadStatements.find(s => s.Action === 's3:ListBucket');
+    expect(list!.Resource).toEqual({ 'Fn::GetAtt': [expect.stringMatching(/^MicrovmPayloadBucket/), 'Arn'] });
+    const deletes = payloadStatements.filter(s =>
+      (Array.isArray(s.Action) ? s.Action : [s.Action]).some(action => action.startsWith('s3:Delete')));
+    expect(deletes).toHaveLength(1);
+    expect(deletes[0]!.Action).toEqual(['s3:GetObject', 's3:DeleteObject']);
+    expect(JSON.stringify(deletes[0]!.Resource)).toContain('/*/payload.json');
+    expect(JSON.stringify(deletes[0]!.Resource)).toContain('/*/launch.json');
+    expect(JSON.stringify(deletes[0]!.Resource)).not.toContain('/bootstrap/*');
   });
 
   test('adds no MicroVM statements when microvmConfig is omitted', () => {
@@ -902,6 +911,7 @@ describe('TaskOrchestrator agentPlatformConfig (ADR-021 P2 platform_config trans
       ...(withConfig && {
         agentPlatformConfig: {
           taskApprovalsTableName: approvalsTable.tableName,
+          approvalRequestsApiUrl: 'https://api.example.com/v1/approval-requests',
           nudgesTableName: nudgesTable.tableName,
           logGroupName: '/aws/abca/application',
           artifactsBucketName: traceBucket.bucketName,
@@ -960,6 +970,7 @@ describe('TaskOrchestrator agentPlatformConfig (ADR-021 P2 platform_config trans
       githubTokenSecretArn: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:github-token-abc123',
       agentPlatformConfig: {
         taskApprovalsTableName: 'approvals',
+        approvalRequestsApiUrl: 'https://api.example.com/v1/approval-requests',
         nudgesTableName: 'nudges',
         logGroupName: '/aws/abca/application',
         artifactsBucketName: 'artifacts',

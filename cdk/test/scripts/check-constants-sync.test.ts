@@ -60,6 +60,7 @@ const PARITY_TEST_REL = 'agent/tests/test_constants_parity.py';
 const FIXTURE_FILES = [
   SCRIPT_REL,
   'contracts/constants.json',
+  'cdk/src/handlers/shared/payload-bootstrap.ts',
   'cdk/src/constructs/lambda-microvm-compute.ts',
   'cdk/src/handlers/shared/microvm/image-capability.ts',
   'cdk/src/handlers/shared/strategies/lambda-microvm-strategy.ts',
@@ -159,6 +160,30 @@ describe('check-constants-sync', () => {
       expect(result.status).toBe(1);
       expect(result.stderr).toContain(name);
       expect(result.stderr).toContain('Cross-language constants drift detected');
+    });
+  });
+
+  describe('payload bootstrap contract', () => {
+    test.each([
+      ['max_payload_bytes', 0],
+      ['minimum_url_lifetime_seconds', 901],
+      ['manifest_prefix', '../'],
+      ['launch_filename', 'payload.json'],
+    ])('rejects unsafe %s', (key, value) => {
+      const result = runInMutatedRepo(root => patchContract(root, json => {
+        json.payload_bootstrap[key] = value;
+      }));
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('payload_bootstrap');
+    });
+
+    test.each([
+      ['agent/src/payload_bootstrap.py', 'CONTRACT = {}'],
+      ['cdk/src/handlers/shared/payload-bootstrap.ts', 'export const PAYLOAD_BOOTSTRAP = {};'],
+    ])('rejects a consumer with its own copy: %s', (file, source) => {
+      const result = runInMutatedRepo(root => write(root, file, source));
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('consumers must read the shared contract');
     });
   });
 

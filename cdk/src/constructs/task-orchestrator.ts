@@ -52,6 +52,8 @@ const ORCHESTRATOR_TIMEOUT_SECONDS = 60;
 /** Orchestrator Lambda memory (MB). */
 const ORCHESTRATOR_MEMORY_MB = 1024;
 
+import { grantCoordinatorPayloads } from './payload-bootstrap-permissions';
+
 /**
  * Properties for TaskOrchestrator construct.
  */
@@ -240,6 +242,11 @@ export interface TaskOrchestratorProps {
      * fails closed with `approval_write_failed`.
      */
     readonly taskApprovalsTableName: string;
+    /**
+     * Trusted approval writer base URL (`APPROVAL_REQUESTS_API_URL`, ADR-025).
+     * Workers create PENDING requests and record timeouts through it.
+     */
+    readonly approvalRequestsApiUrl: string;
     /** Nudges table (`NUDGES_TABLE_NAME`) the agent polls for mid-task nudges. */
     readonly nudgesTableName: string;
     /** Application log group (`LOG_GROUP_NAME`) the agent writes progress logs to. */
@@ -526,6 +533,7 @@ export class TaskOrchestrator extends Construct {
         // backends. NO IAM grant accompanies any of these (see the prop docs).
         ...(props.agentPlatformConfig && {
           TASK_APPROVALS_TABLE_NAME: props.microvmConfig?.approvalsTable.tableName ?? props.agentPlatformConfig.taskApprovalsTableName,
+          APPROVAL_REQUESTS_API_URL: props.agentPlatformConfig.approvalRequestsApiUrl,
           NUDGES_TABLE_NAME: props.agentPlatformConfig.nudgesTableName,
           LOG_GROUP_NAME: props.agentPlatformConfig.logGroupName,
           ARTIFACTS_BUCKET_NAME: props.agentPlatformConfig.artifactsBucketName,
@@ -560,22 +568,10 @@ export class TaskOrchestrator extends Construct {
       props.attachmentsBucket.grantReadWrite(this.fn);
     }
 
-    // ECS payload bucket (#502): the orchestrator writes the payload before
-    // RunTask and deletes it at finalize. Write + delete only (it never reads
-    // its own payload back; the ECS container is the reader, with its own
-    // read-only grant from EcsAgentCluster).
-    if (props.ecsPayloadBucket) {
-      props.ecsPayloadBucket.grantPut(this.fn);
-      props.ecsPayloadBucket.grantDelete(this.fn);
-    }
-
-    // ADR-021: MicroVM payload bucket. The strategy uploads an oversized /run
-    // payload and deletes it at finalize (`deleteMicrovmPayload`); it never
-    // reads it back — the MicroVM execution role is the reader.
-    if (props.microvmConfig) {
-      props.microvmConfig.payloadBucket.grantPut(this.fn);
-      props.microvmConfig.payloadBucket.grantDelete(this.fn);
-    }
+    // Publish manifests/payloads, sign one-object reads and persist private
+    // launch references for replay. Workers cannot read the launch records.
+    if (props.ecsPayloadBucket) grantCoordinatorPayloads(props.ecsPayloadBucket, this.fn);
+    if (props.microvmConfig) grantCoordinatorPayloads(props.microvmConfig.payloadBucket, this.fn);
 
     // Durable execution managed policy
     this.fn.role!.addManagedPolicy(

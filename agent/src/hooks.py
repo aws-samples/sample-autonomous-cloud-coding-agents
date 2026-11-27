@@ -705,6 +705,29 @@ async def pre_tool_use_hook(
     )
 
 
+async def _close_unconfirmed_request(ts: Any, task_id: str, request_id: str) -> None:
+    """Leave no task waiting on a request the writer may have committed unseen.
+
+    The timeout and resume that follow an unanswered gate: both change nothing
+    unless the task waits on ``request_id``, so a create that did not commit is
+    left as it was. Best effort; the call is denied either way.
+    """
+    try:
+        await asyncio.to_thread(
+            ts.best_effort_update_approval_status,
+            task_id,
+            request_id,
+            "TIMED_OUT",
+            reason="approval request was not confirmed",
+        )
+    except Exception as exc:
+        log("WARN", f"approval TIMED_OUT write raised: {type(exc).__name__}: {exc}")
+    try:
+        await asyncio.to_thread(ts.transact_resume_from_approval, task_id, request_id)
+    except Exception as exc:
+        log("WARN", f"approval resume raised: {type(exc).__name__}: {exc}")
+
+
 async def _handle_require_approval(  # noqa: C901 -- 24, down from 35 when the ceiling of 15 was set; must not grow
     *,
     decision: Any,
@@ -872,6 +895,7 @@ async def _handle_require_approval(  # noqa: C901 -- 24, down from 35 when the c
             request_id=request_id,
             error=f"{type(exc).__name__}: {exc}",
         )
+        await _close_unconfirmed_request(ts, task_id, request_id)
         return _deny_response("approval system unavailable")
 
     # Step 8 — ``approval_requested`` milestone so the user's stream
