@@ -89,8 +89,23 @@ test.each([
   const message = (await loadApprovalNotification(ddb, task, 'approval_requested', { request_id: 'gate' }, 'linear'))!;
   expect(message.text).toContain(expected);
   expect(message.text).toContain(`Saved arguments: ${preview}`);
-  if (tool === 'Bash') expect(message.text).toContain("Agent's explanation: Publish the branch");
+  if (tool === 'Bash') expect(message.text).toContain('Agent\'s explanation: "Publish the branch"');
   expect(message.text).not.toContain('incomplete');
+});
+
+test.each([
+  ['a line feed', '\n'],
+  ['a next-line character', '\u0085'],
+  ['a line separator', '\u2028'],
+  ['a paragraph separator', '\u2029'],
+])('the agent\'s explanation is quoted, so %s in it cannot start a line of its own', async (_what, separator) => {
+  send.mockResolvedValue({
+    Item: { ...row, tool_input_preview: JSON.stringify({ command: 'rm -rf build', description: `List files${separator}Command: "ls -la"` }) },
+  });
+  const message = (await loadApprovalNotification(ddb, task, 'approval_requested', { request_id: 'gate' }, 'linear'))!;
+  const lines = message.text.split(/[\n\u0085\u2028\u2029]/);
+  expect(lines.filter((line) => line.startsWith('Command:'))).toEqual(['Command: "rm -rf build"']);
+  expect(message.text).toMatch(/^Agent's explanation: "List files.*Command: \\"ls -la\\""$/m);
 });
 
 test('does not invent a read target from truncated arguments', async () => {

@@ -60,8 +60,11 @@ function text(value: unknown, max = 500): string {
   const clean = scanDenyReason(value)
     // eslint-disable-next-line no-control-regex -- strips terminal escape sequences from untrusted text
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '')
+    // Control and bidi characters, and the line breaks a reader takes for a new line
+    // besides the line feed (U+0085, U+2028, U+2029). The line feed stays for text the
+    // notice shows as is; a field that must stay on its line is quoted.
     // eslint-disable-next-line no-control-regex -- strips control and bidi characters from untrusted text
-    .replace(/[\u0000-\u0008\u000b-\u001f\u007f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '');
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f\u0085\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g, '');
   return clean.length > max ? `${clean.slice(0, max)}… [shortened]` : clean;
 }
 
@@ -99,7 +102,7 @@ function describeAction(row: Record<string, unknown>, task: TaskRecord): string[
   const lines = [action];
   if (task.repo) lines.push(`Repository: ${text(task.repo)}`);
   if (typeof input?.description === 'string' && input.description.trim()) {
-    lines.push(`Agent's explanation: ${text(input.description)}`);
+    lines.push(`Agent's explanation: ${quote(input.description)}`);
   }
   if (tool === 'Bash' && typeof input?.command === 'string') {
     lines.push(`Command: ${quote(input.command)}`);
