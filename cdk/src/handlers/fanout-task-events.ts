@@ -235,8 +235,6 @@ export const CHANNEL_DEFAULTS: Record<NotificationChannel, ReadonlySet<string>> 
   // even earlier, at task-admission in the webhook processor (ADR-016 P4.5).
   linear: new Set<string>([
     ...TERMINAL_EVENT_TYPES,
-    // Approval request and outcome notices, rendered from the saved approval
-    // row with per-request delivery receipts (#1001).
     ...LINEAR_APPROVAL_EVENTS,
     'pr_created',
     // Include task_timed_out so a Linear standalone iteration
@@ -407,8 +405,6 @@ export function parseStreamRecord(record: DynamoDBRecord): FanOutEvent | null {
  * ``trajectory_uploaded``, ``trace_truncated``. Only ``pr_created``
  * is currently in any channel's default filter (§6.2 Slack + GitHub).
  */
-// Approval milestones route by name so channels see them as their own event
-// type. Slack's dispatcher still drops them at its NOTIFIABLE_EVENTS gate.
 const ROUTABLE_MILESTONES: ReadonlySet<string> = new Set([
   'pr_created', ...LINEAR_APPROVAL_EVENTS, ...LINEAR_SESSION_PROGRESS_MILESTONES,
 ]);
@@ -1269,8 +1265,6 @@ async function closeEndedApprovalThread(
   workspaceId: string,
   issueId: string,
 ): Promise<void> {
-  // A task that ends while waiting (e.g. cancelled) leaves its reply thread
-  // open; start its retention so late replies find nothing to decide.
   if (approvalsTable && task.awaiting_approval_request_id
     && (TERMINAL_EVENT_TYPES as readonly string[]).includes(event.event_type)) {
     await closeLinearApprovalThread(ddb, approvalsTable, {
@@ -1385,7 +1379,7 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
   const effectiveType = effectiveEventType(event);
   if (isApprovalNotification(effectiveType)) {
     await dispatchLinearApprovalNotice(event, task, effectiveType, approvalsTable, workspaceId, issueId, registryTableName);
-    return; // An approval notice never settles the task's final status.
+    return;
   }
   await closeEndedApprovalThread(event, task, approvalsTable, workspaceId, issueId);
 

@@ -200,7 +200,6 @@ export async function createTaskCore(
   // in the "Task created" log. A repo-less submission has no blueprint, so it
   // stays false.
   let capFromBlueprint = false;
-  // The blueprint's approval window, the default for this task unless the request sets its own.
   let blueprintApprovalTimeoutS: number | undefined;
   if (body.repo) {
     const { onboarded, config: repoConfig } = await lookupRepo(body.repo);
@@ -949,15 +948,9 @@ export async function createTaskCore(
 }
 
 /**
- * Check one entry of initial_approvals (§7.3 step 4).
- * @param entry - the entry as the request body holds it.
- * @returns the parsed scope, or the message of the 400 that refuses the entry.
- */
-/**
  * The blueprint's ``approval_timeout_s``, or undefined when it has none. A value out
- * of the ``[min, max]`` envelope (a hand-edited row; the construct validates at
- * synth) is logged and ignored, so the task gets the platform default rather than
- * being refused: a wrong waiting time is not a reason to stop work.
+ * of the ``[min, max]`` envelope (a hand-edited row) is logged and ignored, so the
+ * task gets the platform default rather than being refused.
  */
 function blueprintApprovalTimeout(
   config: { readonly approval_timeout_s?: unknown } | null, repo: string, requestId: string,
@@ -972,6 +965,11 @@ function blueprintApprovalTimeout(
   return undefined;
 }
 
+/**
+ * Check one entry of initial_approvals (§7.3 step 4).
+ * @param entry - the entry as the request body holds it.
+ * @returns the parsed scope, or the message of the 400 that refuses the entry.
+ */
 function checkInitialApproval(entry: unknown): { ok: true; scope: string } | { ok: false; message: string } {
   const parseResult = parseApprovalScope(String(entry));
   if (!parseResult.ok) {
