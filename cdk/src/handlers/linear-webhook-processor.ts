@@ -299,7 +299,7 @@ async function hydrateCommentAttachments(params: {
   readonly accessToken: string;
   readonly taskId: string;
   /** Also probe the issue for paperclips (true for fresh new-work; false for
-   *  PR-iteration/clarify where the new material rides in the comment body and
+   *  PR-iteration where the new material rides in the comment body and
    *  re-probing would re-screen the issue's existing files every round). */
   readonly probeIssue: boolean;
 }): Promise<HydrateResult> {
@@ -608,6 +608,110 @@ async function reportCommentTaskNotCreated(ack: CommentAck, statusCode: number, 
 /** What the commenter is told when createTaskCore threw: there is no status to translate, and the cause is in the log. */
 const COMMENT_TASK_ERROR_MESSAGE = '❌ ABCA hit an error and couldn\'t start this. Please re-comment in a few minutes.';
 
+/**
+ * Start the task an `@bgagent` comment asks for: the one sequence of every comment
+ * path. 👀 on the comment and the "On it" reply, the files the comment points at,
+ * then createTaskCore. A dispatch that creates no task settles its own
+ * acknowledgement, because no task exists that could report on it.
+ */
+async function dispatchCommentTask(p: {
+  workspaceId: string;
+  registryTableName: string;
+  resolved: BuilderResolvedToken;
+  commentId: string;
+  /** The thread root: replies go under it, never under a reply. */
+  replyTargetId: string;
+  commentBody: string | undefined;
+  /** The issue the trigger comment lives on. */
+  ackIssueId: string;
+  /** The comment already carries the 👀. */
+  skipAck?: boolean;
+  /** The issue whose paperclips are read as well when `probeIssue` is set. */
+  attachmentsIssueId: string;
+  probeIssue: boolean;
+  keyPrefix: 'iterate' | 'newwork' | 'clarify';
+  keySubject: string;
+  userId: string;
+  /** The issue the agent addresses. */
+  linearIssueId: string;
+  /** What this path adds to the channel metadata. */
+  metadata?: Record<string, string>;
+  request: { repo: string; workflow_ref: string; pr_number?: number; task_description: string };
+  log: { created: string; threw: string; fields: Record<string, unknown> };
+}): Promise<void> {
+  const {
+    workspaceId, registryTableName, resolved, commentId, replyTargetId, commentBody, ackIssueId, skipAck,
+    attachmentsIssueId, probeIssue, keyPrefix, keySubject, userId, linearIssueId, metadata, request, log,
+  } = p;
+  const channel = channelFor(registryTableName);
+  const issue = issueRef(ackIssueId, workspaceId);
+  if (!skipAck) {
+    await channel.reactToComment?.({ commentId }, issue, 'started');
+  }
+  const replyId = lookupValueOr(await postIterationAck(workspaceId, registryTableName, ackIssueId, replyTargetId), null);
+  const ack: CommentAck = { channel, issue, commentId, replyTargetId, replyId };
+
+  // One task per comment: a redelivery of the same comment replays the first.
+  const idempotencyKey = `${keyPrefix}_${keySubject}_${commentId}`.replace(/[^A-Za-z0-9_-]/g, '').slice(0, MAX_IDEMPOTENCY_KEY_LENGTH);
+  const channelMetadata: Record<string, string> = {
+    linear_issue_id: linearIssueId,
+    linear_workspace_id: workspaceId,
+    linear_oauth_secret_arn: resolved.oauthSecretArn,
+    linear_workspace_slug: resolved.workspaceSlug,
+    ...vaultMetadata(resolved),
+    trigger_comment_id: replyTargetId,
+    // The "On it" reply, which later events edit instead of posting a new one.
+    ...(replyId && { iteration_reply_comment_id: replyId }),
+    ...metadata,
+  };
+
+  const taskId = ulid();
+  const hydrated = await hydrateCommentAttachments({
+    issueId: attachmentsIssueId,
+    commentBody,
+    workspaceId,
+    platformUserId: userId,
+    accessToken: resolved.accessToken,
+    taskId,
+    probeIssue,
+  });
+  if (!hydrated.ok) {
+    await settleFailedCommentAck(ack, `❌ ${hydrated.message}`);
+    return;
+  }
+
+  try {
+    const result = await createTaskCore(
+      request,
+      {
+        userId,
+        channelSource: 'linear',
+        channelMetadata,
+        idempotencyKey,
+        taskId,
+        ...(hydrated.records.length > 0 && { preScreenedAttachments: hydrated.records }),
+      },
+      idempotencyKey,
+    );
+    // No 201 (a refusal, or the 200 replay of a redelivery): this call's taskId never
+    // became a task, so the files stored under it would be orphaned.
+    if (result.statusCode !== 201) {
+      await cleanupPreScreenedForComment(hydrated.records);
+      await reportCommentTaskNotCreated(ack, result.statusCode, result.body);
+    }
+    logger.info(log.created, {
+      ...log.fields,
+      ...(request.pr_number !== undefined && { pr_number: request.pr_number }),
+      status_code: result.statusCode,
+      attachments: hydrated.records.length,
+    });
+  } catch (err) {
+    await cleanupPreScreenedForComment(hydrated.records);
+    logger.error(log.threw, { ...log.fields, error: err instanceof Error ? err.message : String(err) });
+    await settleFailedCommentAck(ack, COMMENT_TASK_ERROR_MESSAGE);
+  }
+}
+
 async function safeReportIssueFailure(
   issueId: string,
   linearWorkspaceId: string | undefined,
@@ -736,7 +840,7 @@ type BuilderResolvedToken = {
   vaultUserId?: string;
 };
 
-// eslint-disable-next-line complexity -- predates the ceiling (118, down from 120 when it landed); must not grow
+// eslint-disable-next-line complexity -- predates the ceiling (115, down from 120 when it landed); must not grow
 export async function handler(event: ProcessorEvent): Promise<void> {
   if (!event.raw_body) {
     logger.error('Linear webhook processor invoked without raw_body');
@@ -2525,125 +2629,59 @@ async function iterateOrchestrationChild(args: {
     prNumber = prNumberResult.value;
   }
 
-  // Attribute to the orchestration's release user (the comment author may not
-  // be a linked platform user; the orchestration already ran under this id).
-  const platformUserId = snapshot.meta.release_context.platform_user_id;
-
-  // ACK the request the instant we commit to acting on it. 👀 on the TRIGGERING
-  // comment is the zero-clutter "on it" signal. The parent-epic path already
-  // acked, so it passes skipAck.
-  if (!args.skipAck) {
-    await channel.reactToComment?.({ commentId }, commentedRef, 'started');
-  }
-
-  // Iteration-UX: post the immediate "👀 On it" threaded reply (kills the
-  // silence) and persist its id so the fanout dispatcher matures THIS reply
-  // (🔄→✅/💬) instead of posting new top-level comments. The reply threads under
-  // the conversation root (replyTargetId) on the issue the comment lives on.
-  const iterationReplyId = lookupValueOr(await postIterationAck(workspaceId, registryTableName, triggerCommentIssueId, replyTargetId), null);
-  const ack: CommentAck = { channel, issue: commentedRef, commentId, replyTargetId, replyId: iterationReplyId };
-
-  // Idempotency: one iteration per (sub-issue, comment). The comment id is
-  // unique per comment, so a webhook retry of the same comment dedups.
-  const idempotencyKey = `iterate_${subIssueId}_${commentId}`.replace(/[^A-Za-z0-9_-]/g, '').slice(0, MAX_IDEMPOTENCY_KEY_LENGTH);
-
-  const channelMetadata: Record<string, string> = {
-    orchestration_id: orchestrationId,
-    orchestration_sub_issue_id: subIssueId,
-    // Mark this as a cascade SOURCE so the reconciler re-stacks dependents
-    // when the iteration completes (the reconciler reads this flag).
-    orchestration_iteration: 'true',
-    // The reconciler replies ✅/❌ to the thread ROOT when the
-    // iteration lands (threaded ack — closes the conversation the human opened).
-    trigger_comment_id: replyTargetId,
-    // The issue that comment lives on, so the reconciler's reply
-    // uses the right commentCreate issueId (parent epic for a routed comment;
-    // the sub-issue for a direct comment).
-    trigger_comment_issue_id: triggerCommentIssueId,
-    linear_workspace_id: workspaceId,
-    linear_oauth_secret_arn: resolved.oauthSecretArn,
-    linear_workspace_slug: resolved.workspaceSlug,
-    ...vaultMetadata(resolved),
+  await dispatchCommentTask({
+    workspaceId,
+    registryTableName,
+    resolved,
+    commentId,
+    replyTargetId,
+    commentBody,
+    ackIssueId: triggerCommentIssueId,
+    skipAck: args.skipAck,
+    // The new material rides in the comment body — don't re-probe the issue (that
+    // would re-screen the issue's existing paperclips every round).
+    attachmentsIssueId: subIssueId,
+    probeIssue: false,
+    keyPrefix: 'iterate',
+    keySubject: subIssueId,
+    // Attribute to the orchestration's release user (the comment author may not
+    // be a linked platform user; the orchestration already ran under this id).
+    userId: snapshot.meta.release_context.platform_user_id,
     // The agent addresses a REAL Linear issue for its reactions/comments. The
     // synthetic integration node has no Linear issue — its id is a derived string
     // (`<orchestrationId>__integration`), and handing that to the agent makes it
     // call Linear with an id that cannot resolve. Fall back to the issue the
     // trigger comment lives on, which for a routed parent comment is the epic.
-    linear_issue_id: isIntegrationNode(subIssueId) ? triggerCommentIssueId : subIssueId,
-    // Iteration-UX: the maturing reply to EDIT (not re-create) on later events.
-    ...(iterationReplyId && { iteration_reply_comment_id: iterationReplyId }),
-  };
-
-  // ADR-016: a reviewer can drop a NEW screenshot/log into the @bgagent comment
-  // ("this is still broken, see attached"). The agent has no Linear MCP to fetch
-  // it, so hydrate the comment's uploads here and pass them to the iteration.
-  // The new material rides in the comment body — don't re-probe the issue (that
-  // would re-screen the issue's existing paperclips every round). Fail-closed:
-  // an unscreenable attachment aborts the iteration with a threaded reply rather
-  // than iterating blind on a spec the agent can't see.
-  const iterTaskId = ulid();
-  const iterHydrated = await hydrateCommentAttachments({
-    issueId: subIssueId,
-    commentBody,
-    workspaceId,
-    platformUserId,
-    accessToken: resolved.accessToken,
-    taskId: iterTaskId,
-    probeIssue: false,
-  });
-  if (!iterHydrated.ok) {
-    await settleFailedCommentAck(ack, `❌ ${iterHydrated.message}`);
-    return;
-  }
-
-  try {
-    const result = await createTaskCore(
-      {
-        repo: child.repo,
-        workflow_ref: PR_ITERATION_WORKFLOW_ID,
-        pr_number: prNumber,
-        // An iteration on the COMBINED PR gets a prompt that tells the agent to
-        // reproduce across the merged siblings and fix the mismatch at its source.
-        // The default prompt is actively wrong there: on a branch that builds and
-        // whose tests pass, "X is wrong" reads as a presentation bug.
-        task_description: isIntegrationNode(subIssueId)
-          ? buildIntegrationIterationInstruction(trigger)
-          : buildIterationInstruction(trigger),
-      },
-      {
-        userId: platformUserId,
-        channelSource: 'linear',
-        channelMetadata,
-        idempotencyKey,
-        taskId: iterTaskId,
-        ...(iterHydrated.records.length > 0 && { preScreenedAttachments: iterHydrated.records }),
-      },
-      idempotencyKey,
-    );
-    // A non-201 (validation reject, or a 200 idempotent replay on a webhook
-    // redelivery) means THIS call's freshly-minted taskId never became a task —
-    // its S3 uploads would orphan (the replay points at the first delivery's
-    // distinct key). Clean them up.
-    if (result.statusCode !== 201) {
-      await cleanupPreScreenedForComment(iterHydrated.records);
-      await reportCommentTaskNotCreated(ack, result.statusCode, result.body);
-    }
-    logger.info('Comment trigger: iteration task created for sub-issue PR', {
+    linearIssueId: isIntegrationNode(subIssueId) ? triggerCommentIssueId : subIssueId,
+    metadata: {
       orchestration_id: orchestrationId,
-      sub_issue_id: subIssueId,
+      orchestration_sub_issue_id: subIssueId,
+      // Mark this as a cascade SOURCE so the reconciler re-stacks dependents
+      // when the iteration completes (the reconciler reads this flag).
+      orchestration_iteration: 'true',
+      // The issue the trigger comment lives on, so the reconciler's reply
+      // uses the right commentCreate issueId (parent epic for a routed comment;
+      // the sub-issue for a direct comment).
+      trigger_comment_issue_id: triggerCommentIssueId,
+    },
+    request: {
+      repo: child.repo,
+      workflow_ref: PR_ITERATION_WORKFLOW_ID,
       pr_number: prNumber,
-      status_code: result.statusCode,
-      attachments: iterHydrated.records.length,
-    });
-  } catch (err) {
-    await cleanupPreScreenedForComment(iterHydrated.records);
-    logger.error('Comment trigger: createTaskCore threw for iteration', {
-      orchestration_id: orchestrationId,
-      sub_issue_id: subIssueId,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    await settleFailedCommentAck(ack, COMMENT_TASK_ERROR_MESSAGE);
-  }
+      // An iteration on the COMBINED PR gets a prompt that tells the agent to
+      // reproduce across the merged siblings and fix the mismatch at its source.
+      // The default prompt is actively wrong there: on a branch that builds and
+      // whose tests pass, "X is wrong" reads as a presentation bug.
+      task_description: isIntegrationNode(subIssueId)
+        ? buildIntegrationIterationInstruction(trigger)
+        : buildIterationInstruction(trigger),
+    },
+    log: {
+      created: 'Comment trigger: iteration task created for sub-issue PR',
+      threw: 'Comment trigger: createTaskCore threw for iteration',
+      fields: { orchestration_id: orchestrationId, sub_issue_id: subIssueId },
+    },
+  });
 }
 
 /**
@@ -2793,84 +2831,35 @@ async function handleStandaloneCommentTrigger(args: {
     return;
   }
 
-  // ACK the instant we commit (same as the orchestration path).
-  const channel = channelFor(registryTableName);
-  const target = issueRef(issueId, workspaceId);
-  await channel.reactToComment?.({ commentId }, target, 'started');
-  // Immediate "👀 On it" threaded reply + persist its id so the fanout dispatcher
-  // matures THIS reply instead of posting new comments.
-  const iterationReplyId = lookupValueOr(await postIterationAck(workspaceId, registryTableName, issueId, replyTargetId), null);
-  const ack: CommentAck = { channel, issue: target, commentId, replyTargetId, replyId: iterationReplyId };
-
-  const idempotencyKey = `iterate_${issueId}_${commentId}`.replace(/[^A-Za-z0-9_-]/g, '').slice(0, MAX_IDEMPOTENCY_KEY_LENGTH);
-  const channelMetadata: Record<string, string> = {
-    // NO orchestration_id / orchestration_iteration — the reconciler skips
-    // this; the fanout dispatcher posts the ✅/❌ reply on terminal. Reply to
-    // the thread ROOT (replyTargetId), never to a reply.
-    trigger_comment_id: replyTargetId,
-    linear_issue_id: issueId,
-    linear_workspace_id: workspaceId,
-    linear_oauth_secret_arn: resolved.oauthSecretArn,
-    linear_workspace_slug: resolved.workspaceSlug,
-    ...vaultMetadata(resolved),
-    // Iteration-UX: the maturing reply to EDIT on later events.
-    ...(iterationReplyId && { iteration_reply_comment_id: iterationReplyId }),
-  };
-
-  // ADR-016: hydrate any file the reviewer dropped into this iteration comment
-  // (see iterateOrchestrationChild). New material rides in the comment body →
-  // don't re-probe the issue. Fail-closed: an unscreenable file aborts with a reply.
-  const iterTaskId = ulid();
-  const iterHydrated = await hydrateCommentAttachments({
-    issueId,
-    commentBody,
+  // NO orchestration_id / orchestration_iteration in the metadata — the reconciler
+  // skips this; the fanout dispatcher posts the ✅/❌ reply on terminal.
+  await dispatchCommentTask({
     workspaceId,
-    platformUserId: task.user_id,
-    accessToken: resolved.accessToken,
-    taskId: iterTaskId,
+    registryTableName,
+    resolved,
+    commentId,
+    replyTargetId,
+    commentBody,
+    ackIssueId: issueId,
+    // New material rides in the comment body → don't re-probe the issue.
+    attachmentsIssueId: issueId,
     probeIssue: false,
-  });
-  if (!iterHydrated.ok) {
-    await settleFailedCommentAck(ack, `❌ ${iterHydrated.message}`);
-    return;
-  }
-
-  try {
-    const result = await createTaskCore(
-      {
-        repo: task.repo,
-        workflow_ref: PR_ITERATION_WORKFLOW_ID,
-        pr_number: prNumber,
-        task_description: buildIterationInstruction(trigger),
-      },
-      {
-        userId: task.user_id,
-        channelSource: 'linear',
-        channelMetadata,
-        idempotencyKey,
-        taskId: iterTaskId,
-        ...(iterHydrated.records.length > 0 && { preScreenedAttachments: iterHydrated.records }),
-      },
-      idempotencyKey,
-    );
-    if (result.statusCode !== 201) {
-      await cleanupPreScreenedForComment(iterHydrated.records);
-      await reportCommentTaskNotCreated(ack, result.statusCode, result.body);
-    }
-    logger.info('Comment trigger (standalone): iteration task created for issue PR', {
-      linear_issue_id: issueId,
+    keyPrefix: 'iterate',
+    keySubject: issueId,
+    userId: task.user_id,
+    linearIssueId: issueId,
+    request: {
+      repo: task.repo,
+      workflow_ref: PR_ITERATION_WORKFLOW_ID,
       pr_number: prNumber,
-      status_code: result.statusCode,
-      attachments: iterHydrated.records.length,
-    });
-  } catch (err) {
-    await cleanupPreScreenedForComment(iterHydrated.records);
-    logger.error('Comment trigger (standalone): createTaskCore threw for iteration', {
-      linear_issue_id: issueId,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    await settleFailedCommentAck(ack, COMMENT_TASK_ERROR_MESSAGE);
-  }
+      task_description: buildIterationInstruction(trigger),
+    },
+    log: {
+      created: 'Comment trigger (standalone): iteration task created for issue PR',
+      threw: 'Comment trigger (standalone): createTaskCore threw for iteration',
+      fields: { linear_issue_id: issueId },
+    },
+  });
 }
 
 /**
@@ -2970,85 +2959,32 @@ async function maybeStartStandaloneNewWork(args: {
     return true;
   }
 
-  // ACK immediately (👀 reaction + threaded "On it"), same as the iteration and
-  // clarify-resume paths.
-  await channel.reactToComment?.({ commentId }, target, 'started');
-  const iterationReplyId = lookupValueOr(await postIterationAck(workspaceId, registryTableName, issueId, replyTargetId), null);
-  const ack: CommentAck = { channel, issue: target, commentId, replyTargetId, replyId: iterationReplyId };
-
-  // Idempotency: key on (issue, comment) so a webhook redelivery of the SAME
-  // comment doesn't spawn a second task. Distinct prefix from iterate_/clarify_.
-  const idempotencyKey = `newwork_${issueId}_${commentId}`.replace(/[^A-Za-z0-9_-]/g, '').slice(0, MAX_IDEMPOTENCY_KEY_LENGTH);
-  const channelMetadata: Record<string, string> = {
-    // NO orchestration_id / orchestration_iteration — the reconciler skips this;
-    // the fanout dispatcher posts the ✅/❌ reply on terminal. Reply to the thread
-    // ROOT (replyTargetId), never to a reply.
-    trigger_comment_id: replyTargetId,
-    linear_issue_id: issueId,
-    linear_workspace_id: workspaceId,
-    linear_oauth_secret_arn: resolved.oauthSecretArn,
-    linear_workspace_slug: resolved.workspaceSlug,
-    ...vaultMetadata(resolved),
-    ...(iterationReplyId && { iteration_reply_comment_id: iterationReplyId }),
-  };
-
-  // ADR-016: this starts FRESH work from the comment, so hydrate BOTH the
-  // comment body's uploads AND any paperclip newly attached to the issue
-  // (probeIssue: true) — a "do X instead, see attached mockup" follow-up puts the
-  // file on the issue or in the comment. Fail-closed: an unscreenable file aborts
-  // with a reply rather than running the new task blind.
-  const newTaskId = ulid();
-  const newHydrated = await hydrateCommentAttachments({
-    issueId,
-    commentBody,
-    workspaceId,
-    platformUserId: task.user_id,
-    accessToken: resolved.accessToken,
-    taskId: newTaskId,
-    probeIssue: true,
-  });
-  if (!newHydrated.ok) {
-    await settleFailedCommentAck(ack, `❌ ${newHydrated.message}`);
-    return true;
-  }
   const taskDescription = await buildFollowUpDescription(task.task_id, instruction);
-
-  try {
-    const result = await createTaskCore(
-      {
-        repo: task.repo,
-        workflow_ref: 'coding/new-task-v1',
-        task_description: taskDescription,
-      },
-      {
-        userId: task.user_id,
-        channelSource: 'linear',
-        channelMetadata,
-        idempotencyKey,
-        taskId: newTaskId,
-        ...(newHydrated.records.length > 0 && { preScreenedAttachments: newHydrated.records }),
-      },
-      idempotencyKey,
-    );
-    if (result.statusCode !== 201) {
-      await cleanupPreScreenedForComment(newHydrated.records);
-      await reportCommentTaskNotCreated(ack, result.statusCode, result.body);
-    }
-    logger.info('Comment trigger (standalone): fresh new-task dispatched from follow-up on PR-less task', {
-      linear_issue_id: issueId,
-      prior_task_id: task.task_id,
-      status_code: result.statusCode,
-      attachments: newHydrated.records.length,
-    });
-  } catch (err) {
-    await cleanupPreScreenedForComment(newHydrated.records);
-    logger.error('Comment trigger (standalone): createTaskCore threw for new-work dispatch', {
-      linear_issue_id: issueId,
-      prior_task_id: task.task_id,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    await settleFailedCommentAck(ack, COMMENT_TASK_ERROR_MESSAGE);
-  }
+  await dispatchCommentTask({
+    workspaceId,
+    registryTableName,
+    resolved,
+    commentId,
+    replyTargetId,
+    commentBody,
+    ackIssueId: issueId,
+    // ADR-016: this starts FRESH work from the comment, so hydrate BOTH the
+    // comment body's uploads AND any paperclip newly attached to the issue — a
+    // "do X instead, see attached mockup" follow-up puts the file on the issue or
+    // in the comment.
+    attachmentsIssueId: issueId,
+    probeIssue: true,
+    keyPrefix: 'newwork',
+    keySubject: issueId,
+    userId: task.user_id,
+    linearIssueId: issueId,
+    request: { repo: task.repo, workflow_ref: 'coding/new-task-v1', task_description: taskDescription },
+    log: {
+      created: 'Comment trigger (standalone): fresh new-task dispatched from follow-up on PR-less task',
+      threw: 'Comment trigger (standalone): createTaskCore threw for new-work dispatch',
+      fields: { linear_issue_id: issueId, prior_task_id: task.task_id },
+    },
+  });
   return true;
 }
 
@@ -3102,7 +3038,7 @@ async function buildFollowUpDescription(priorTaskId: string, instruction: string
  *
  * Returns true when it handled the comment (a resume was dispatched), false when
  * the task is not a clarify-hold (caller falls through to its no-op log).
- * Best-effort: a read/dispatch failure returns false (caller logs the no-op).
+ * Best-effort: a read failure returns false (caller logs the no-op).
  */
 async function maybeResumeClarifyHold(args: {
   issueId: string;
@@ -3140,84 +3076,37 @@ async function maybeResumeClarifyHold(args: {
     return false;
   }
 
-  // ACK immediately (👀 reaction + threaded "On it") — same feedback as an
-  // iteration, so the reviewer sees the answer was received.
-  const channel = channelFor(registryTableName);
-  const target = issueRef(issueId, workspaceId);
-  await channel.reactToComment?.({ commentId }, target, 'started');
-  const iterationReplyId = lookupValueOr(await postIterationAck(workspaceId, registryTableName, issueId, replyTargetId), null);
-  const ack: CommentAck = { channel, issue: target, commentId, replyTargetId, replyId: iterationReplyId };
-
-  const resumeDescription = buildClarifyResumeDescription(
-    typeof row.task_description === 'string' ? row.task_description : undefined,
-    typeof row.answer_text === 'string' ? row.answer_text : undefined,
-    answer,
-  );
-  // Idempotency: key on (issue, comment) so a webhook redelivery of the SAME
-  // answer reply doesn't spawn a second resume.
-  const idempotencyKey = `clarify_${issueId}_${commentId}`.replace(/[^A-Za-z0-9_-]/g, '').slice(0, MAX_IDEMPOTENCY_KEY_LENGTH);
-  const channelMetadata: Record<string, string> = {
-    linear_issue_id: issueId,
-    linear_workspace_id: workspaceId,
-    linear_oauth_secret_arn: resolved.oauthSecretArn,
-    linear_workspace_slug: resolved.workspaceSlug,
-    ...vaultMetadata(resolved),
-    // Reply to the thread root, and mature THIS ack on terminal (fanout path).
-    trigger_comment_id: replyTargetId,
-    ...(iterationReplyId && { iteration_reply_comment_id: iterationReplyId }),
-  };
-  // ADR-016: the reviewer may answer a clarifying question WITH a file ("here's
-  // the mockup you asked for"), attached to the issue or dropped in the reply.
-  // Hydrate both (probeIssue: true) so the resumed run sees it. Fail-closed.
-  const resumeTaskId = ulid();
-  const resumeHydrated = await hydrateCommentAttachments({
-    issueId,
-    commentBody,
+  await dispatchCommentTask({
     workspaceId,
-    platformUserId: task.user_id,
-    accessToken: resolved.accessToken,
-    taskId: resumeTaskId,
+    registryTableName,
+    resolved,
+    commentId,
+    replyTargetId,
+    commentBody,
+    ackIssueId: issueId,
+    // ADR-016: the reviewer may answer a clarifying question WITH a file ("here's
+    // the mockup you asked for"), attached to the issue or dropped in the reply.
+    attachmentsIssueId: issueId,
     probeIssue: true,
+    keyPrefix: 'clarify',
+    keySubject: issueId,
+    userId: task.user_id,
+    linearIssueId: issueId,
+    request: {
+      repo: task.repo,
+      workflow_ref: 'coding/new-task-v1',
+      task_description: buildClarifyResumeDescription(
+        typeof row.task_description === 'string' ? row.task_description : undefined,
+        typeof row.answer_text === 'string' ? row.answer_text : undefined,
+        answer,
+      ),
+    },
+    log: {
+      created: 'Clarify-resume: fresh new-task dispatched from the reviewer answer',
+      threw: 'Clarify-resume: createTaskCore threw',
+      fields: { linear_issue_id: issueId, prior_task_id: task.task_id },
+    },
   });
-  if (!resumeHydrated.ok) {
-    await settleFailedCommentAck(ack, `❌ ${resumeHydrated.message}`);
-    return true;
-  }
-
-  try {
-    const result = await createTaskCore(
-      {
-        repo: task.repo,
-        workflow_ref: 'coding/new-task-v1',
-        task_description: resumeDescription,
-      },
-      {
-        userId: task.user_id,
-        channelSource: 'linear',
-        channelMetadata,
-        idempotencyKey,
-        taskId: resumeTaskId,
-        ...(resumeHydrated.records.length > 0 && { preScreenedAttachments: resumeHydrated.records }),
-      },
-      idempotencyKey,
-    );
-    if (result.statusCode !== 201) {
-      await cleanupPreScreenedForComment(resumeHydrated.records);
-      await reportCommentTaskNotCreated(ack, result.statusCode, result.body);
-    }
-    logger.info('Clarify-resume: fresh new-task dispatched from the reviewer answer', {
-      linear_issue_id: issueId,
-      prior_task_id: task.task_id,
-      status_code: result.statusCode,
-      attachments: resumeHydrated.records.length,
-    });
-  } catch (err) {
-    await cleanupPreScreenedForComment(resumeHydrated.records);
-    logger.error('Clarify-resume: createTaskCore threw', {
-      linear_issue_id: issueId, prior_task_id: task.task_id, error: err instanceof Error ? err.message : String(err),
-    });
-    await settleFailedCommentAck(ack, COMMENT_TASK_ERROR_MESSAGE);
-  }
   return true;
 }
 

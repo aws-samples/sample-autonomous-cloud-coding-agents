@@ -377,3 +377,64 @@ describe('linear-webhook-processor — parent epic attachment hydration', () => 
     expect(dropNote).toBeDefined();
   });
 });
+
+// A file dropped into an `@bgagent` comment. The cases are in this file because it
+// is the one suite with attachment screening configured: in the others such a
+// comment is refused before anything is stored.
+describe('linear-webhook-processor — a file in an @bgagent comment', () => {
+  const subIssueFetch = jest.requireMock('../../src/handlers/shared/linear-subissue-fetch') as { fetchIssueParentId: jest.Mock };
+  const attachments = jest.requireMock('../../src/handlers/shared/linear-attachments') as {
+    cleanupPreScreenedAttachments: (...args: unknown[]) => Promise<void>;
+  };
+  const { LOOKUP_ABSENT } = jest.requireActual('../../src/handlers/shared/lookup-result') as { LOOKUP_ABSENT: unknown };
+  const RECORD = { ...SCREENED_RECORD, attachment_id: 'shot', filename: 'shot.png', s3_key: 'attachments/u-solo/t/shot/shot.png' };
+  let cleanup: jest.SpyInstance;
+
+  const fileComment = (): { raw_body: string } => eventWith({
+    type: 'Comment',
+    action: 'create',
+    organizationId: 'org-1',
+    actor: { id: 'user-9' },
+    data: { id: 'comment-1', body: '@bgagent still broken, see ![shot](https://uploads.linear.app/a/b/shot.png)', issueId: 'issue-9' },
+  });
+
+  beforeEach(() => {
+    // A plain issue whose task opened pull request 99; the commenter is a linked user.
+    subIssueFetch.fetchIssueParentId.mockResolvedValue(LOOKUP_ABSENT);
+    ddbSend.mockReset().mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
+      if (cmd._type === 'Query' && cmd.input.IndexName === 'LinearIssueIndex') {
+        return { Items: [{ channel_metadata: { linear_workspace_id: 'org-1' }, task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r', pr_number: 99 }] };
+      }
+      if (cmd._type === 'Get' && (cmd.input.Key as { linear_identity?: string })?.linear_identity) {
+        return { Item: { platform_user_id: 'commenter-user', status: 'active' } };
+      }
+      return {};
+    });
+    resolveLinearOauthTokenMock.mockReset().mockResolvedValue({ accessToken: 'tok', oauthSecretArn: 'arn:secret', workspaceSlug: 'acme' });
+    downloadMock.mockReset().mockResolvedValue([RECORD]);
+    createTaskCoreMock.mockReset().mockResolvedValue({ statusCode: 201, body: '{}' });
+    cleanup = jest.spyOn(attachments, 'cleanupPreScreenedAttachments').mockResolvedValue(undefined);
+  });
+  afterEach(() => cleanup.mockRestore());
+
+  test('the file is stored under the id of the task that is created, as the user the task runs as', async () => {
+    await handler(fileComment());
+
+    const store = downloadMock.mock.calls[0][2];
+    const [, ctx] = createTaskCoreMock.mock.calls[0];
+    expect(ctx.preScreenedAttachments).toEqual([RECORD]);
+    expect(ctx.taskId).toBe(store.taskId);
+    expect(store).toMatchObject({ userId: 'u-solo', accessToken: 'tok' });
+    expect(cleanup).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['a refusal', () => createTaskCoreMock.mockResolvedValue({ statusCode: 400, body: '{}' })],
+    ['the replay of a redelivery', () => createTaskCoreMock.mockResolvedValue({ statusCode: 200, body: '{}' })],
+    ['a throw', () => createTaskCoreMock.mockRejectedValue(new Error('ProvisionedThroughputExceededException'))],
+  ])('%s creates no task under that id, so the stored file is removed', async (_outcome, arrange) => {
+    arrange();
+    await handler(fileComment());
+    expect(cleanup).toHaveBeenCalledWith(expect.anything(), 'attachments-bucket', [RECORD]);
+  });
+});

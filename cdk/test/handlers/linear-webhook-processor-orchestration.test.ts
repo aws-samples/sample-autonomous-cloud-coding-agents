@@ -126,8 +126,10 @@ process.env.ORCHESTRATION_TABLE_NAME = 'OrchestrationTable';
 import { handler } from '../../src/handlers/linear-webhook-processor';
 import { buildClarifyResumeDescription } from '../../src/handlers/shared/clarify-resume';
 import { resetSessionWorkspaceCacheForTests } from '../../src/handlers/shared/linear-channel-metadata';
+import { probeLinearIssueContext } from '../../src/handlers/shared/linear-issue-context-probe';
 import { LOOKUP_ABSENT, lookupFailed, lookupFound } from '../../src/handlers/shared/lookup-result';
 import { isBotAuthoredComment } from '../../src/handlers/shared/orchestration-comment-trigger';
+import { deriveOrchestrationId } from '../../src/handlers/shared/orchestration-store';
 
 function eventWith(payload: Record<string, unknown>): { raw_body: string } {
   return { raw_body: JSON.stringify(payload) };
@@ -1763,6 +1765,18 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
       expect(swapCommentReactionMock).toHaveBeenCalledWith(expect.anything(), 'comment-1', 'x');
     });
 
+    test('a reply in a thread: the reason goes under the thread root, and the ❌ on the reply itself', async () => {
+      // Linear refuses a reply to a reply; the comment the human wrote is the reply.
+      mockStandaloneOnly({ task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r', pr_number: 99 });
+      upsertThreadedReplyMock.mockResolvedValueOnce(null); // the acknowledgement failed to post
+      createTaskCoreMock.mockResolvedValueOnce(BUDGET_REFUSAL);
+      await handler(eventWith(comment({ data: { id: 'reply-9', parentId: 'root-1', body: '@bgagent tweak it', issueId: 'sub-issue-1' } })));
+
+      // The "On it" reply, then the reason: both under the root.
+      expect(upsertThreadedReplyMock.mock.calls.map((call) => call[2])).toEqual(['root-1', 'root-1']);
+      expect(swapCommentReactionMock).toHaveBeenCalledWith(expect.anything(), 'reply-9', 'x');
+    });
+
     test('an idempotent replay (200) is not a refusal: the first delivery\'s task owns the reply', async () => {
       mockStandaloneOnly({ task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r', pr_number: 99 });
       createTaskCoreMock.mockResolvedValueOnce({ statusCode: 200, body: JSON.stringify({ data: { task_id: 'T1' } }) });
@@ -1819,7 +1833,110 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
         data: { id: 'comment-1', body: '@bgagent still broken, see ![shot](https://uploads.linear.app/a/b/c)', issueId: 'sub-issue-1' },
       })));
       expect(createTaskCoreMock).not.toHaveBeenCalled();
-      expectAckSettledAsFailed(/attachment screening is not configured/);
+      expectAckSettledAsFailed(/^❌ .*attachment screening is not configured/);
+    });
+  });
+
+  // What differs from one comment path to the next is what it hands to
+  // dispatchCommentTask. The provider and the subject, from which the agent mints
+  // its own Linear token, come from the workspace on every path: a check of the
+  // source cannot show that they arrive.
+  describe('what each comment path hands to the task it starts', () => {
+    /** A plain issue whose run paused to ask a question: the index hit, and the base row of that task. */
+    function mockClarifyHold(): void {
+      mockStandaloneOnly({ task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r', status: 'COMPLETED' });
+      const indexOnly = ddbSend.getMockImplementation()!;
+      ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => (
+        (cmd.input.Key as { task_id?: string } | undefined)?.task_id === 'task-solo'
+          ? { Item: { workflow_ref: 'coding/new-task-v1', code_changed: false, answer_text: 'Which environment?' } }
+          : indexOnly(cmd)));
+    }
+
+    describe.each([
+      {
+        path: 'an iteration of an orchestration sub-issue',
+        arrange: () => mockOrchWithChild({ subIssueId: 'sub-issue-1', childTaskId: 'task-sub-1', prUrl: 'https://github.com/o/r/pull/42' }),
+        idempotencyKey: 'iterate_sub-issue-1_comment-1',
+        userId: 'release-user', // the user the epic runs as, not the commenter
+        readsIssueFiles: false,
+        request: { repo: 'o/r', workflow_ref: 'coding/pr-iteration-v1', pr_number: 42 },
+        added: {
+          orchestration_id: deriveOrchestrationId('PARENT'),
+          orchestration_sub_issue_id: 'sub-issue-1',
+          orchestration_iteration: 'true',
+          trigger_comment_issue_id: 'sub-issue-1',
+        },
+      },
+      {
+        path: 'an iteration of a plain issue',
+        arrange: () => mockStandaloneOnly({ task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r', pr_number: 99 }),
+        idempotencyKey: 'iterate_sub-issue-1_comment-1',
+        userId: 'u-solo',
+        readsIssueFiles: false,
+        request: { repo: 'o/r', workflow_ref: 'coding/pr-iteration-v1', pr_number: 99 },
+        added: {},
+      },
+      {
+        path: 'new work on an issue whose run opened no pull request',
+        arrange: () => mockStandaloneOnly({ task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r' }),
+        idempotencyKey: 'newwork_sub-issue-1_comment-1',
+        userId: 'u-solo',
+        readsIssueFiles: true,
+        request: { repo: 'o/r', workflow_ref: 'coding/new-task-v1' },
+        added: {},
+      },
+      {
+        path: 'the answer to a clarifying question',
+        arrange: mockClarifyHold,
+        idempotencyKey: 'clarify_sub-issue-1_comment-1',
+        userId: 'u-solo',
+        readsIssueFiles: true,
+        request: { repo: 'o/r', workflow_ref: 'coding/new-task-v1' },
+        added: {},
+      },
+    ])('$path', ({ arrange, idempotencyKey, userId, readsIssueFiles, request, added }) => {
+      const metadata = {
+        linear_issue_id: 'sub-issue-1',
+        linear_workspace_id: 'org-1',
+        linear_oauth_secret_arn: 'arn:secret',
+        linear_workspace_slug: 'acme',
+        trigger_comment_id: 'comment-1',
+        iteration_reply_comment_id: 'reply-1',
+        ...added,
+      };
+
+      test('a workspace without a provider: no vault field, so the agent keeps to the stored token', async () => {
+        arrange();
+        await handler(eventWith(comment()));
+
+        expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+        const [body, ctx] = createTaskCoreMock.mock.calls[0];
+        expect(body).toStrictEqual({ ...request, task_description: expect.any(String) });
+        expect(ctx.idempotencyKey).toBe(idempotencyKey);
+        expect(ctx.userId).toBe(userId);
+        expect(ctx.channelMetadata).toStrictEqual(metadata);
+        // Paperclips on the issue are read for work that starts fresh, not for an iteration.
+        expect(probeLinearIssueContext).toHaveBeenCalledTimes(readsIssueFiles ? 1 : 0);
+      });
+
+      test('a workspace with a provider: the provider and the subject as well', async () => {
+        arrange();
+        resolveLinearOauthTokenMock.mockResolvedValue({
+          accessToken: 'tok',
+          oauthSecretArn: 'arn:secret',
+          workspaceSlug: 'acme',
+          providerName: 'bgagent-linear-oauth-acme',
+          vaultUserId: 'linear-ws-acme',
+        });
+        await handler(eventWith(comment()));
+
+        expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+        expect(createTaskCoreMock.mock.calls[0][1].channelMetadata).toStrictEqual({
+          ...metadata,
+          linear_provider_name: 'bgagent-linear-oauth-acme',
+          linear_vault_user_id: 'linear-ws-acme',
+        });
+      });
     });
   });
 
@@ -2057,6 +2174,16 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
       expect(ctx.channelMetadata.trigger_comment_id).toBe('pc-1');
       // No disambiguation reply — we acted.
       expect(replyToCommentMock).not.toHaveBeenCalled();
+    });
+
+    test('a comment routed from the epic: the "On it" reply goes on the epic, and the key names the sub-issue', async () => {
+      // The one path on which the comment is on one issue and the task is about another.
+      mockParentEpic('PARENT-EPIC');
+      await handler(eventWith(parentComment('@bgagent for the footer change the tagline')));
+
+      expect(upsertThreadedReplyMock).toHaveBeenCalledTimes(1);
+      expect(upsertThreadedReplyMock.mock.calls[0][1]).toBe('PARENT-EPIC');
+      expect(createTaskCoreMock.mock.calls[0][1].idempotencyKey).toBe('iterate_sub-footer_pc-1');
     });
 
     test('targeting by Linear identifier on the epic → iterates that node', async () => {
