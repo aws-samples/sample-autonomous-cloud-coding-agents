@@ -48,7 +48,7 @@ JSON at TypeScript compile time via `resolveJsonModule`.
   "approval_timeout_s": {
     "min": 30,
     "max": 3600,
-    "default": 300
+    "default": 1800
   },
   "max_budget_usd": {
     "min": 0.01,

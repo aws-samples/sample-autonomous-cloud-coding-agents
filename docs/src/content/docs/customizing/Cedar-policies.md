@@ -47,7 +47,7 @@ new Blueprint(this, 'PaymentsBlueprint', {
 - The hard rule blocks Write and Edit for files under any directory named `prod`, including nested directories. It matches both relative and absolute paths as supplied by the tool.
 - Keep hard and soft rules in **separate entries**. An entry that declares both tiers, or `@rule_id` without a tier, fails task start rather than being guessed.
 - An entry with no annotations at all is treated as a legacy soft rule with a generated rule ID (`legacy_extra_<n>`).
-- The soft rule asks for approval with a 900-second limit. The task's approval window can shorten it. The default gives 300 seconds, `--approval-timeout 600` gives 600, and `--approval-timeout 3600` gives 900. The remaining task lifetime can shorten the window further.
+- The soft rule asks for approval with a 900-second limit. The task's approval window can shorten it. The default window of 1800 seconds leaves it at 900, `--approval-timeout 600` gives 600, and `--approval-timeout 3600` gives 900. The remaining task lifetime can shorten the window further.
 - Disabling built-in soft rules and capping `--pre-approve` scopes per repository are not supported yet.
 
 `bgagent policies list --repo owner/repo` lists the built-in rules and the repository's inline Blueprint rules. To see the additional rules the agent loads at task start, inspect the registry modules referenced by `assets.cedarPolicyModules`. The built-in rules are in [`hard_deny.cedar`](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/agent/policies/hard_deny.cedar) and [`soft_deny.cedar`](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/agent/policies/soft_deny.cedar).

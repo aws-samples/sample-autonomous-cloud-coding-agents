@@ -169,9 +169,10 @@ when { context.command like "*git push --force*"
     || context.command like "*git push * -f >*"
     || context.command like "*git push * -f 2>*" };
 
-// Force-push to main/prod specifically — longer window, higher severity.
+// Force-push to main/prod specifically — higher severity.
 // Multi-match with force_push_any is expected: the engine's annotation
-// merging picks min(300, 600)=300s and max(medium, high)=high.
+// merging picks the shorter window (both 3600s, capped by the task's) and
+// max(medium, high)=high.
 @tier("soft")
 @rule_id("force_push_main")
 @approval_timeout_s("3600")
@@ -196,7 +197,7 @@ when { context.command like "*git push origin main*"
     || context.command like "*git push origin prod*"
     || context.command like "*git push origin release/*" };
 
-// Writes to \`.env\` files typically contain secrets. 600s window, high severity.
+// Writes to \`.env\` files typically contain secrets. High severity.
 @tier("soft")
 @rule_id("write_env_files")
 @approval_timeout_s("3600")
@@ -206,7 +207,7 @@ forbid (principal, action == Agent::Action::"write_file", resource)
 when { context.file_path like "*.env" };
 
 // Writes to any path containing "credentials" — SSH keys, AWS creds,
-// service-account JSON, etc. 300s window, high severity.
+// service-account JSON, etc. High severity.
 @tier("soft")
 @rule_id("write_credentials")
 @approval_timeout_s("3600")
