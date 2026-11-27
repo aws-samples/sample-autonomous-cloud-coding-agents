@@ -52,8 +52,7 @@ import {
 } from './linear-channel-metadata';
 import { resolveLinearOauthToken, type ResolvedLinearToken } from './linear-oauth-resolver';
 import {
-  isBareApprovalAnswer,
-  NOTHING_TO_APPROVE_MESSAGE,
+  lateApprovalAnswerReply,
   parseSessionApprovalAnswer,
   repeatedApprovalChoice,
   sessionApprovalNoticeId,
@@ -209,9 +208,12 @@ async function respondToAgentSession(
     return;
   }
   // A late "approve" / "deny" (after its request timed out, or in the wrong session)
-  // is an answer to nothing. Taken as a prompt it would start new work.
-  if (isBareApprovalAnswer(request.directive)) {
-    await emit({ type: 'response', body: NOTHING_TO_APPROVE_MESSAGE });
+  // is an answer to nothing. Taken as a prompt it would start new work. A run that
+  // ended with a question takes it as the answer, as any other reply.
+  const gateCount = priorTask?.approval_gate_count;
+  const late = isClarifyHold(priorTask) ? null : lateApprovalAnswerReply(request.directive, gateCount);
+  if (late) {
+    await emit({ type: 'response', body: late });
     return;
   }
 
@@ -453,8 +455,9 @@ async function steerRunningTask(
     await decideSessionApproval(request, task, openRequest, platformUserId, emit, accessToken);
     return;
   }
-  if (isBareApprovalAnswer(request.directive)) {
-    await reply(NOTHING_TO_APPROVE_MESSAGE);
+  const late = lateApprovalAnswerReply(request.directive, task.approval_gate_count);
+  if (late) {
+    await reply(late);
     return;
   }
   if (!request.directive) {
@@ -614,7 +617,7 @@ async function linearRefusalOf(taskId: string, requestId: string): Promise<strin
 /** The prior task as read from the base table (strongly consistent). */
 type PriorTask = LinearIssueTask & ClarifyHoldRow
   & Pick<TaskRecord, 'session_id' | 'agent_runtime_arn' | 'compute_type' | 'compute_metadata' | 'created_at'
-    | 'awaiting_approval_request_id'>
+    | 'awaiting_approval_request_id' | 'approval_gate_count'>
   & {
     readonly status: TaskStatusType;
     readonly channel_metadata?: Readonly<Record<string, string>>;

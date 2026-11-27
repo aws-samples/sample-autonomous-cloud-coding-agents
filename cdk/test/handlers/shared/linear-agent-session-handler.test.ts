@@ -961,6 +961,37 @@ describe('handleAgentSessionEvent — approval requests in the session (#1066)',
     expect(submitNudgeMock).toHaveBeenCalledWith(expect.objectContaining({ message: 'deny-list the tracker domains too' }));
   });
 
+  test('a "deny <reason>" after the task\'s request closed is not passed to the running agent', async () => {
+    priorTask({ task_id: 't-1', status: 'RUNNING', user_id: 'platform-user-1', linear_workspace_id: 'org-1', session: 'session-1', approval_gate_count: 1 });
+    await answer('deny use the staging config');
+    expect(submitNudgeMock).not.toHaveBeenCalled();
+    expect(lastEmit()[2]).toEqual(expect.objectContaining({ type: 'thought', body: expect.stringContaining('That approval request is already closed') }));
+  });
+
+  test('a "deny <reason>" after the finished task\'s request closed starts nothing', async () => {
+    priorTask({ task_id: 't-1', status: 'COMPLETED', repo: 'acme/web', linear_workspace_id: 'org-1', session: 'session-1', approval_gate_count: 2 });
+    await answer('deny use the staging config');
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+    expect(lastEmit()[2]).toEqual(expect.objectContaining({ type: 'response', body: expect.stringContaining('That approval request is already closed') }));
+  });
+
+  test.each(['approve', 'deny'])('a one-word "%s" to a run that ended with a question resumes it with that answer', async (word) => {
+    priorTask({
+      task_id: 't-1',
+      status: 'COMPLETED',
+      repo: 'acme/web',
+      linear_workspace_id: 'org-1',
+      session: 'session-1',
+      code_changed: false,
+      answer_text: 'Should I drop the legacy table?',
+      task_description: 'Clean up the schema',
+      workflow_ref: 'coding/new-task-v1',
+    });
+    await answer(word);
+    expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+    expect(createTaskCoreMock.mock.calls[0][0].task_description).toContain(`The reviewer answered: ${word}`);
+  });
+
   test('an Approve while the task runs without a request is not passed to the agent', async () => {
     priorTask({ task_id: 't-1', status: 'RUNNING', user_id: 'platform-user-1', linear_workspace_id: 'org-1', session: 'session-1' });
     await answer('deny');

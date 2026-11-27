@@ -56,14 +56,18 @@ export function parseSessionApprovalAnswer(text: string): SessionApprovalAnswer 
 }
 
 /**
- * An answer with nothing left to answer: a button's value, or approve / deny alone.
- * ``deny <text>`` is not one, because with no request open it reads as an instruction
- * ("deny anonymous access to /admin").
+ * The reply to an answer that has no open request to decide, or null when the text
+ * is not one: ``approve`` or ``deny`` alone (also a button's value), or ``deny
+ * <reason>`` once the task had a request that is closed now. With no request ever,
+ * ``deny <text>`` is work ("deny anonymous access to /admin").
  * @param text - the prompt.
+ * @param approvalGateCount - how many approval requests the task has had.
  */
-export function isBareApprovalAnswer(text: string): boolean {
+export function lateApprovalAnswerReply(text: string, approvalGateCount: number | undefined): string | null {
   const answer = parseSessionApprovalAnswer(text);
-  return answer !== null && !answer.reason;
+  if (!answer) return null;
+  if ((approvalGateCount ?? 0) > 0) return REQUEST_CLOSED_MESSAGE;
+  return answer.reason ? null : NOTHING_TO_APPROVE_MESSAGE;
 }
 
 /**
@@ -199,6 +203,11 @@ export function sessionDecisionNote(reply: SessionApprovalAnswer, result: Decisi
   return 'I couldn\'t record that decision. Reply again, or use `bgagent approve` / `bgagent deny`.';
 }
 
+/** The reply to an approve / deny when the task's approval request is closed already. */
+const REQUEST_CLOSED_MESSAGE = 'That approval request is already closed (it was answered or timed out), so nothing was approved '
+  + 'or denied, and I haven\'t started or passed on anything. If you meant this as new work, say it without starting with '
+  + '"approve" or "deny".';
+
 /** The reply to an approve / deny when nothing in the session is waiting for one. */
-export const NOTHING_TO_APPROVE_MESSAGE = 'Nothing is waiting for your approval here, so nothing was approved or denied. '
+const NOTHING_TO_APPROVE_MESSAGE = 'Nothing is waiting for your approval here, so nothing was approved or denied. '
   + 'I haven\'t started or re-run anything. To ask for more work, say what you want done.';
