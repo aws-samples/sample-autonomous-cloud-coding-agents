@@ -244,6 +244,17 @@ class Workflow(BaseModel):
         return self.domain == "coding"
 
     @property
+    def uses_pull_request(self) -> bool:
+        """Whether the workflow works on an existing pull request.
+
+        True when ``required_inputs.all_of`` names ``pr_number``: the rule the
+        orchestrator applies (``workflowUsesPr`` in
+        ``cdk/src/handlers/shared/workflows.ts``).
+        """
+        required = self.required_inputs
+        return required is not None and "pr_number" in (required.all_of or ())
+
+    @property
     def ensure_pr_strategy(self) -> EnsurePrStrategy:
         """The strategy of the workflow's ``ensure_pr`` step: ``create`` when it has none.
 

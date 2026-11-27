@@ -580,34 +580,25 @@ def _validate_required_params(params: dict) -> list[str]:
     Returns the list of missing field names (empty list = valid). A repo-bound
     workflow requires ``repo_url``; a repo-less workflow (``requires_repo:false``,
     #248 Phase 3) does not. All non-PR workflows need either an ``issue_number``
-    or ``task_description``; PR workflows (``coding/pr-iteration-v1`` /
-    ``coding/pr-review-v1`` / ``coding/restack-v1``) require ``pr_number``
-    instead and carry no description.
+    or ``task_description``; PR workflows (``Workflow.uses_pull_request``)
+    require ``pr_number`` instead and carry no description.
+
+    A workflow that cannot be loaded gets no verdict here, so the list is empty:
+    the pipeline thread fails the task, because ``config.build_config`` raises
+    the loader's error and ``_run_task_background`` records it.
     """
+    from workflow import WorkflowValidationError, load_workflow
+
     missing: list[str] = []
     workflow_id = (params.get("resolved_workflow") or {}).get("id", "coding/new-task-v1")
-
-    # Repo is mandatory only for repo-bound workflows. Resolve requires_repo from
-    # the workflow itself (authoritative, matches config.build_config); a load
-    # failure fails SAFE — assume a repo is required so a repo-bound task is never
-    # admitted without one.
-    requires_repo = True
     try:
-        from workflow import WorkflowValidationError, load_workflow
-
-        try:
-            requires_repo = load_workflow(workflow_id).resolved_requires_repo
-        except WorkflowValidationError:
-            # Expected failure modes (missing/corrupt/schema-invalid file, or a
-            # future registry-only id) — fail SAFE (repo required). A genuine
-            # programming error is NOT caught here so it surfaces loudly.
-            _warn_cw(f"could not resolve requires_repo for {workflow_id!r}; assuming repo required")
-    except ImportError:
-        _warn_cw(f"workflow loader unavailable for {workflow_id!r}; assuming repo required")
-    if requires_repo and not params.get("repo_url"):
+        workflow = load_workflow(workflow_id)
+    except WorkflowValidationError:
+        return []  # nosemgrep: py-silent-success-masking -- the task fails in build_config
+    if workflow.resolved_requires_repo and not params.get("repo_url"):
         missing.append("repo_url")
 
-    if workflow_id in ("coding/pr-iteration-v1", "coding/pr-review-v1", "coding/restack-v1"):
+    if workflow.uses_pull_request:
         if not params.get("pr_number"):
             missing.append("pr_number")
     else:
