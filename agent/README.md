@@ -504,7 +504,7 @@ agent/
 ├── prepare-commit-msg.sh Git hook (Task-Id / Prompt-Version / Workflow-Id / Workflow-Step trailers on commits)
 ├── run.sh               Build + run helper for local/server mode with AgentCore constraints
 ├── tests/               pytest unit tests (pythonpath: src/)
-│   ├── test_config.py       Config validation and workflow-resolution tests (requires_repo / read_only / is_pr_workflow, load-failure fallback)
+│   ├── test_config.py       Config validation and workflow-resolution tests (requires_repo / read_only / is_pr_workflow)
 │   ├── test_hooks.py        PreToolUse hook and hook matcher tests
 │   ├── test_models.py       Pydantic model tests (construction, validation, frozen enforcement, model_dump)
 │   ├── test_policy.py       Cedar policy engine tests (fail-closed, deny-list)
