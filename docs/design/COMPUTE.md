@@ -167,7 +167,7 @@ Plugins, skills, and MCP servers are out of scope for MVP. Additional tools can 
 
 The harness enforces tool-call policy via Cedar-based hooks:
 
-- **PreToolUse** (`agent/src/hooks.py` + `agent/src/policy.py`) - Evaluates tool calls before execution. `pr_review` agents cannot use `Write`/`Edit`. Writes to `.git/*` are blocked. Destructive bash commands are denied. Fail-closed: if Cedar is unavailable, all calls are denied.
+- **PreToolUse** (`agent/src/hooks.py` + `agent/src/policy.py`) - Evaluates tool calls before execution. `pr_review` agents cannot use `Write`/`Edit`. Writes to `.git/*` are blocked. Destructive bash commands are denied. Fail-closed: an agent whose Cedar engine cannot be loaded does not start, and a call that Cedar cannot evaluate is denied.
 - **PostToolUse** (`agent/src/hooks.py` + `agent/src/output_scanner.py`) - Screens tool outputs for secrets and redacts before re-entering agent context.
 
 Per-repo custom Cedar policies are supported via Blueprint `security.cedarPolicies`. See [SECURITY.md](./SECURITY.md) for the full policy enforcement model.

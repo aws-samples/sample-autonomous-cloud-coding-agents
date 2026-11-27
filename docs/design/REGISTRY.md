@@ -82,7 +82,7 @@ Agent Registry is enabled by default for compatibility. Customers that cannot us
 cdk deploy --context enableAgentRegistry=false
 ```
 
-The boolean or string value `false` omits the registry nested stack, registry API, IAM grants, `AGENT_REGISTRY_ID`, and registry outputs. Blueprints without `registry://` references continue to run normally. If a Blueprint still contains a registry reference, task startup fails closed with an error directing the operator to remove the references or deploy with `enableAgentRegistry=true`.
+The boolean or string value `false` omits the registry nested stack, registry API, IAM grants, `AGENT_REGISTRY_ID`, and registry outputs. Repositories without `registry://` references continue to run normally. If a repository's record still holds a registry reference (`bgagent repo show <owner/repo>` prints the record, and deleting a list from the Blueprint leaves it there), task startup fails closed with an error directing the operator to detach the list, with `assets: { <list>: [] }` and a deploy or with `bgagent repo onboard <owner/repo> --unset <column>`, or to deploy with `enableAgentRegistry=true`.
 
 The string form is case-sensitive: use lowercase `true` or `false`. Any other value fails synthesis with an actionable validation error.
 

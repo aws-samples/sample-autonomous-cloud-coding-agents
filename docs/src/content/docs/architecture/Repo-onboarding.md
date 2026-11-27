@@ -19,24 +19,26 @@ Repositories vary in ways that affect how the agent works: different languages, 
 
 ## Onboarding mechanism
 
-The **canonical** onboarding path is **CDK-based**. Each repo is an instance of the `Blueprint` construct in the CDK stack. The construct writes a `RepoConfig` record to DynamoDB. Deploying the stack = onboarding or updating repos. There is no **task-submitter** REST API for repo CRUD — the orchestrator gate reads `RepoTable` at runtime.
+A repository is onboarded when `RepoTable` holds a `RepoConfig` record for it with `status: 'active'`. Two writers share that record, and each changes only the attributes it names:
 
-This treats blueprints as infrastructure, not runtime config. Each repo's blueprint defines AWS resources (compute, networking, credentials). CDK manages the lifecycle. The gate (rejecting tasks for non-onboarded repos) reads DynamoDB at runtime, keeping the runtime path simple.
+- **`bgagent repo onboard`** is the default way to register a repository and to change or remove one of its settings. It writes the record with operator AWS credentials: no Cognito login, no CDK redeploy.
+- **A `Blueprint`** is the checked-in declaration of a repository's settings. The stack creates one `Blueprint` construct per definition in `cdk/src/blueprints/definitions.ts`, and every deploy writes what the definition declares.
 
-### Operator CLI path (day-2)
-
-For operators with IAM access to the deployed stack, `bgagent repo onboard` and `bgagent repo offboard` write `RepoTable` directly (no Cognito login, no CDK redeploy). This path ships in [#378](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/378) / PR [#385](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/385) ahead of a future `POST /v1/repos` API.
+There is no REST API for repo CRUD: the platform's own handlers only read `RepoTable`. The task API reads the record when a task is submitted (the gate that rejects non-onboarded repos) and the orchestrator reads it again when the task starts. A task that is already running keeps the values it started with.
 
 | Aspect | CDK `Blueprint` | `bgagent repo onboard` / `offboard` |
 |--------|-----------------|-------------------------------------|
 | **Who** | Deploy role at `mise //cdk:deploy` | Operator AWS credentials (`operator-context`) |
-| **What it writes** | Full `RepoConfig` + supporting AWS resources | `RepoTable` row only (same schema) |
-| **Soft-delete** | `status=removed` + 30-day TTL on stack removal | Same semantics on `offboard` |
+| **What it writes** | The settings its definition declares, on every deploy | The settings its flags name |
+| **Removing a setting** | Only a registry asset list, by declaring it as `[]` | `--unset <column>` |
+| **Cedar policies, registry pins, prompt, budget, build and lint commands** | Supported via construct props | Supported via flags (`bgagent repo onboard --help` lists them) |
+| **Egress domains** | `networking.egressAllowlist` | Not exposed — use CDK |
 | **Custom runtime / token IAM** | `additionalRuntimeArns` / `additionalSecretArns` in CDK | Stored in the row, but orchestrator IAM still requires a CDK deploy |
-| **Cedar, egress, pipeline steps** | Supported via construct props | Not exposed — use CDK |
+| **Soft-delete** | `status=removed` and a `ttl` when the construct is removed from the stack | `status=removed` and a `ttl` 30 days ahead on `offboard` |
+| **Template resources** | Two per `Blueprint`, counted against the application stack's [490-resource ceiling](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide#network-stack-topology) | None |
 | **Audit trail** | CloudFormation change set + deploy logs | CLI stdout only today (see [ADR-017](/sample-autonomous-cloud-coding-agents/decisions/adr-017-operator-cli-repo-onboarding)) |
 
-Use the CLI path for quick day-2 registration with platform defaults (runtime ARN, GitHub token secret). Use CDK when the repo needs durable infrastructure, custom IAM, Cedar policies, egress rules, or pipeline customization. The onboard command prints notes explaining which platform defaults apply and when a redeploy is still required.
+Use the CLI to register a repository and for every setting that is plain data. Use a Blueprint to keep a repository's settings in the checked-in CDK app, and for egress domains, which only a Blueprint can add. IAM for a custom runtime or token secret needs a CDK deploy with either writer. The onboard command prints notes explaining which platform defaults apply and when a redeploy is still required.
 
 See also: [Using the CLI — operator commands](/sample-autonomous-cloud-coding-agents/using/using-the-cli#operator-commands-stack-admin) and [ADR-017](/sample-autonomous-cloud-coding-agents/decisions/adr-017-operator-cli-repo-onboarding).
 
@@ -47,9 +49,8 @@ interface BlueprintProps {
   repo: string;                        // "owner/repo"
   repoTable: dynamodb.ITable;
   compute?: {
-    type?: 'agentcore' | 'ecs' | 'lambda-microvm'; // inherits first deployed backend
+    type?: 'agentcore' | 'ecs';        // inherits first deployed backend; lambda-microvm: CLI only
     runtimeArn?: string;
-    config?: Record<string, unknown>;
   };
   agent?: {
     modelId?: string;
@@ -59,13 +60,8 @@ interface BlueprintProps {
     systemPromptOverrides?: string;
   };
   security?: {
-    capabilityTier?: 'standard' | 'elevated' | 'read-only';
     cedarPolicies?: string[];          // custom Cedar policies
-    circuitBreaker?: {
-      maxCallsPerMinute?: number;      // default: 50
-      maxCostUsd?: number;             // default: 10
-      maxConsecutiveFailures?: number; // default: 5
-    };
+    approvalGateCap?: number;          // 1-500, default: 50
   };
   credentials?: {
     githubTokenSecretArn?: string;
@@ -75,21 +71,25 @@ interface BlueprintProps {
   };
   pipeline?: {
     pollIntervalMs?: number;
-    customSteps?: CustomStepConfig[];
-    stepSequence?: StepRef[];
+    buildCommand?: string;             // default: mise run build
+    lintCommand?: string;              // default: mise run lint
+  };
+  assets?: {                           // registry:// refs
+    mcpServers?: string[];
+    cedarPolicyModules?: string[];
+    skills?: string[];
   };
 }
 ```
 
 At deploy time, the construct creates a CDK custom resource that writes the `RepoConfig` record:
 
-- **Create** (the first deploy of the construct): `PutItem` writes the whole record with `status: 'active'` and every override the Blueprint declares. It replaces a record that already exists for the repo.
-- **Update** (every later deploy): `UpdateItem` sets `status: 'active'`, `updated_at` and every override the Blueprint declares. It removes the registry asset lists (`mcp_servers`, `cedar_policy_modules`, `skills`) that the Blueprint does not declare, and leaves every other attribute as it is.
-- **Delete** (the construct is removed from the stack): `UpdateItem` soft-deletes the record (`status: 'removed'`).
+- **Create and update** (every deploy of the construct): one `UpdateItem` sets `status: 'active'`, `updated_at`, `onboarded_at` (only if the record has none) and every override the Blueprint declares. It removes `ttl`, so that a record that was soft-deleted earlier does not expire once it is active again, and each registry asset list (`mcp_servers`, `cedar_policy_modules`, `skills`) that the Blueprint declares as `[]`. It leaves every other attribute as it is. A Blueprint created for a repository whose record still exists (also a removed one that has not expired) therefore merges into that record and keeps the attributes it does not declare.
+- **Delete** (the construct is removed from the stack): `UpdateItem` soft-deletes the record (`status: 'removed'`) and sets a `ttl`, after which DynamoDB deletes it. The `ttl` is 30 days after the synthesis of the last deploy that still contained the construct, because the value is a literal in that deploy's template. It does not count from the removal: the record expires less than 30 days after the removal, and at once if that deploy is more than 30 days old.
 
-A redeploy therefore does not overwrite the record. An override that was deleted from the Blueprint keeps its last value: a deleted `agent.maxBudgetUsd` is still the repo's default budget, and a deleted `agent.modelId` still selects the old model. This holds for every override except the asset lists: `compute_type`, `runtime_arn`, `model_id`, `max_turns`, `max_budget_usd`, `memory_token_budget`, `system_prompt_overrides`, `github_token_secret_arn`, `poll_interval_ms`, `build_command`, `lint_command`, `egress_allowlist`, `cedar_policies` and `approval_gate_cap`. An empty string or an empty list does not clear one either.
+A redeploy therefore does not overwrite the record. An override that was deleted from the Blueprint keeps its last value: a deleted `agent.maxBudgetUsd` is still the repo's default budget, a deleted `agent.modelId` still selects the old model, and a deleted asset list keeps its pins. An empty string or an empty list does not clear an override either. The one exception is an asset list declared as `[]` (`assets: { mcpServers: [] }`), which is removed from the record.
 
-The update is selective on purpose. `bgagent repo onboard` writes the same record ([ADR-017](/sample-autonomous-cloud-coding-agents/decisions/adr-017-operator-cli-repo-onboarding)), and the update runs on every deploy: if it cleared what the Blueprint does not declare, an unrelated deploy would delete a value an operator set with the CLI, such as a model pin. So a Blueprint owns the attributes it declares, which every deploy writes again, and the three asset lists. Any other attribute stays as its last writer left it. To clear one, see [Removing a per-repo override](/sample-autonomous-cloud-coding-agents/customizing/per-repo-overrides#removing-a-per-repo-override).
+The write is selective on purpose. `bgagent repo onboard` writes the same record with the same kind of `UpdateItem` ([ADR-017](/sample-autonomous-cloud-coding-agents/decisions/adr-017-operator-cli-repo-onboarding)), and the Blueprint's write runs on every deploy: if it cleared what the Blueprint does not declare, an unrelated deploy would delete a value an operator set with the CLI, such as a model pin. So a Blueprint owns the attributes it declares, which every deploy writes again. Any other attribute stays as its last writer left it. To remove a setting, run `bgagent repo onboard <owner/repo> --unset <column>` and, if the Blueprint declares it, delete it there too: see [Removing a per-repo override](/sample-autonomous-cloud-coding-agents/customizing/per-repo-overrides#removing-a-per-repo-override).
 
 ### RepoConfig schema
 
@@ -111,17 +111,24 @@ interface RepoConfig {
   github_token_secret_arn?: string;
   egress_allowlist?: string[];
   poll_interval_ms?: number;
-  custom_steps?: CustomStepConfig[];
-  step_sequence?: StepRef[];
+  build_command?: string;
+  lint_command?: string;
+  cedar_policies?: string[];
+  approval_gate_cap?: number;
+  mcp_servers?: string[];              // registry:// refs
+  cedar_policy_modules?: string[];     // registry:// refs
+  skills?: string[];                   // registry:// refs
 }
 ```
+
+The first four attributes identify the record and its state; the 17 below them are the per-repo settings, absent when not set. `bgagent repo onboard` sets and removes 16 of them; the [user guide](/sample-autonomous-cloud-coding-agents/customizing/per-repo-overrides) lists each with its flag, its Blueprint property and its default. The exception is `egress_allowlist`, which only a Blueprint writes: no runtime reader uses it, because the domains take effect through the deploy. A soft-deleted record also carries `ttl`. `bgagent repo show <owner/repo>` prints the settings a record holds.
 
 ### Override precedence
 
 From lowest to highest priority:
 
 1. **Platform defaults** (CDK stack props)
-2. **Per-repo config** (`RepoConfig` from Blueprint)
+2. **Per-repo config** (the repository's `RepoConfig` record)
 3. **Per-task overrides** (API request fields, e.g. `max_turns`)
 
 ### Platform defaults
@@ -132,8 +139,8 @@ From lowest to highest priority:
 | `runtime_arn` | Stack-level env var | CDK stack props |
 | `model_id` | `global.anthropic.claude-opus-5-5` | injected by the stack as `ANTHROPIC_MODEL` from `bedrockGeoRegion`; `agent/src/config.py` holds the no-env fallback — see [Model configuration](/sample-autonomous-cloud-coding-agents/developer-guide/model-configuration) |
 | `max_turns` | 100 | Platform constant |
-| `max_budget_usd` | None (unlimited) | No platform default by design — a global ceiling would kill long tasks mid-change. Set a per-repo default with Blueprint `agent.maxBudgetUsd` (`0.01`–`100`, validated at synth) or per task with `--max-budget` / `max_budget_usd`. See [Per-repo overrides](/sample-autonomous-cloud-coding-agents/customizing/per-repo-overrides) for the complete list of surfaces a budget can come from |
-| `memory_token_budget` | 2000 | Platform constant (`DEFAULT_MEMORY_TOKEN_BUDGET` in `cdk/src/handlers/shared/memory.ts`). Set a per-repo value with Blueprint `agent.memoryTokenBudget` (a positive integer, validated at synth); there is no per-task override |
+| `max_budget_usd` | None (unlimited) | No platform default by design — a global ceiling would kill long tasks mid-change. Set a per-repo default with `bgagent repo onboard --max-budget` or Blueprint `agent.maxBudgetUsd` (`0.01`–`100`, checked by the CLI and at synth) or per task with `bgagent submit --max-budget` / `max_budget_usd`. See [Per-repo overrides](/sample-autonomous-cloud-coding-agents/customizing/per-repo-overrides) for the complete list of surfaces a budget can come from |
+| `memory_token_budget` | 2000 | Platform constant (`DEFAULT_MEMORY_TOKEN_BUDGET` in `cdk/src/handlers/shared/memory.ts`). Set a per-repo value with `bgagent repo onboard --memory-token-budget` or Blueprint `agent.memoryTokenBudget` (a positive integer, checked by the CLI and at synth); there is no per-task override |
 | `github_token_secret_arn` | Stack-level secret | CDK stack props |
 | `poll_interval_ms` | 30000 | Orchestrator constant |
 
@@ -143,23 +150,22 @@ The orchestrator reads `RepoConfig` at task time. Each pipeline step consumes sp
 
 | Step | Fields consumed |
 |---|---|
-| `load-blueprint` | `compute_type`, `custom_steps`, `step_sequence` |
+| `load-blueprint` | `compute_type` |
 | `admission-control` | `status` (defense-in-depth) |
 | `hydrate-context` | `github_token_secret_arn`, `system_prompt_overrides`, `memory_token_budget` |
 | `pre-flight` | `github_token_secret_arn` |
 | `start-session` | `compute_type`, `runtime_arn`, `model_id`, `max_turns`, `max_budget_usd` |
 | `await-agent-completion` | `poll_interval_ms` |
-| Custom steps | `custom_steps[].config` |
 
 ## Pipeline customization
 
 Blueprints customize the orchestrator pipeline through three progressively powerful layers. See [ORCHESTRATOR.md](/sample-autonomous-cloud-coding-agents/architecture/orchestrator) for how the framework enforces invariants regardless of customization.
 
-> **Implementation status:** Only **Layer 1** is shipped today. The Blueprint construct's `pipeline` prop currently exposes a single override, `pollIntervalMs` (`cdk/src/constructs/blueprint.ts`); there is no `customSteps`/`stepSequence` support, no `CustomStepConfig`/`StepRef` wiring, and no `INVALID_STEP_SEQUENCE` validation in code. **Layer 2 (Lambda-backed custom steps)** and **Layer 3 (custom step sequences)** below describe a planned design — tracked as [GitHub issues](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues). The interfaces and validation rules in those subsections are forward-looking, not current behavior.
+> **Implementation status:** Only **Layer 1** is shipped today. The Blueprint construct's `pipeline` prop currently exposes `pollIntervalMs`, `buildCommand` and `lintCommand` (`cdk/src/constructs/blueprint.ts`); there is no `customSteps`/`stepSequence` support, no `CustomStepConfig`/`StepRef` wiring, and no `INVALID_STEP_SEQUENCE` validation in code. **Layer 2 (Lambda-backed custom steps)** and **Layer 3 (custom step sequences)** below describe a planned design — tracked as [GitHub issues](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues). The interfaces and validation rules in those subsections are forward-looking, not current behavior.
 
 ### Layer 1: Parameterized strategies
 
-Select and configure built-in step implementations without writing code. Set `compute.type`, `agent.modelId`, `agent.maxTurns`, and other Blueprint props. (The only pipeline-stage override available today is `pipeline.pollIntervalMs`.)
+Select and configure built-in step implementations without writing code. Set `compute.type`, `agent.modelId`, `agent.maxTurns`, and other Blueprint props. (Under `pipeline`, the overrides available today are `pollIntervalMs`, `buildCommand` and `lintCommand`.)
 
 ### Layer 2: Lambda-backed custom steps (planned)
 
@@ -257,7 +263,7 @@ Configurations can become stale as repos evolve. The platform supports re-onboar
 
 | Trigger | Mechanism | When to use |
 |---|---|---|
-| Manual | Update Blueprint props + `cdk deploy` | Known major changes (migration, restructure) |
+| Manual | `bgagent repo onboard` with the changed settings, or updated Blueprint props + `cdk deploy` | Known major changes (migration, restructure) |
 | On major change | GitHub webhook detects significant changes in default branch | Automated, event-driven |
 | Periodic | EventBridge scheduled re-analysis | Safety net for gradual drift |
 

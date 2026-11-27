@@ -1592,7 +1592,7 @@ These alarms transition to `ALARM` state in CloudWatch and appear in the console
 - **Agent container ↔ TaskApprovalsTable**: IAM role on the runtime has `GetItem` / `PutItem` / conditional `UpdateItem` on the table. Agent writes pending, reads decisions, writes TIMED_OUT on internal timeout.
 - **User CLI ↔ API Gateway**: Cognito JWT (same authorizer as `/tasks/*`). Cognito `sub` is the canonical caller identity, used **verbatim** in DDB `ConditionExpression` (§7.1, finding #6).
 - **ApproveTaskFn/DenyTaskFn ↔ TaskApprovalsTable + TaskTable**: Lambda IAM policy allows `UpdateItem` on both tables under `TransactWriteItems`. Authorization is in the ConditionExpression (ownership AND state), not in a separate IAM boundary.
-- **Blueprint origin**: blueprints are CDK-deployed constructs (see `cdk/src/constructs/blueprint.ts`). Platform operators deploy them. Users cannot upload arbitrary blueprint.yaml from the target repo. This property is load-bearing for the security model — if blueprint origin ever becomes user-uploaded, the blueprint-injection section (§12.4) must be re-evaluated. The 64 KB text cap (§5.1, finding #12) and `disable:` hard-deny rejection (finding #9) are applied regardless of origin as defense in depth.
+- **Blueprint origin**: blueprint Cedar policies are written by platform operators, through a deploy (the `Blueprint` construct, see `cdk/src/constructs/blueprint.ts`) or with operator credentials (`bgagent repo onboard`). Users cannot upload arbitrary blueprint.yaml from the target repo. This property is load-bearing for the security model — if blueprint origin ever becomes user-uploaded, the blueprint-injection section (§12.4) must be re-evaluated. The 64 KB text cap (§5.1, finding #12) and `disable:` hard-deny rejection (finding #9) are applied regardless of origin as defense in depth.
 - **Slack → ApproveTaskFn**: mediated by the fan-out Lambda + `SlackUserMappingTable` (§11.2). Slack admin cannot forge mappings; Slack approvals capped at `severity: low|medium` (finding #4).
 
 ### 12.2 Ownership encoded in ConditionExpression
@@ -1632,7 +1632,7 @@ Authorization + approvals-state + task-state transition all atomic. A compromise
 
 ### 12.4 Blueprint content safety
 
-The blueprint trust model (§12.1) means blueprint Cedar policies are trusted by construction. Nonetheless the engine enforces, at ALL origin sources (CDK-deployed today; potentially user-uploadable in future):
+The blueprint trust model (§12.1) means blueprint Cedar policies are trusted by construction. Nonetheless the engine enforces, at ALL origin sources (written by platform operators today, through a deploy or with operator credentials; potentially user-uploadable in future):
 
 - Cedar syntax validation at load → fail-on-error
 - Duplicate `@rule_id` → fail-on-error

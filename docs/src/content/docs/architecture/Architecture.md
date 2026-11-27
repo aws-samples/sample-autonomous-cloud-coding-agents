@@ -54,7 +54,7 @@ Optional modules (Slack, Linear, Jira, deploy-preview screenshots, Agent Registr
 
 ## Repository onboarding
 
-Onboarding is CDK-based. Plain repository definitions in `cdk/src/blueprints/definitions.ts` feed both network egress policy and the `Blueprint` constructs in the application stack. Each construct writes a `RepoConfig` record to DynamoDB; the orchestrator reads it at task time. Resolving configuration before stack construction keeps the optional network stack independent of repository resources.
+A repository is onboarded by a `RepoConfig` record in DynamoDB; the orchestrator reads it at task time. `bgagent repo onboard` writes the record without a deploy, and a `Blueprint` declares it in the CDK app. Plain repository definitions in `cdk/src/blueprints/definitions.ts` feed both network egress policy and the `Blueprint` constructs in the application stack, and each construct writes its repository's record at deploy. Resolving configuration before stack construction keeps the optional network stack independent of repository resources.
 
 Blueprints configure how the orchestrator executes steps for each repo: compute strategy, model selection, turn limits, GitHub token, and optional custom steps. See [REPO_ONBOARDING.md](/sample-autonomous-cloud-coding-agents/architecture/repo-onboarding) for the full design.
 
@@ -99,6 +99,6 @@ ABCA is not a construct library. There is no jsii compilation, no npm publishing
 
 | Audience | How to use ABCA |
 |---|---|
-| **Operators** | Deploy the CDK app, onboard repos via Blueprint, submit tasks through CLI/API/webhooks. |
+| **Operators** | Deploy the CDK app, onboard repos with `bgagent repo onboard` or a Blueprint, submit tasks through CLI/API/webhooks. |
 | **Platform developers** | Extend by implementing internal interfaces (ComputeStrategy, custom step Lambdas). |
 | **Teams building their own platforms** | Study the architecture and design docs. Fork and adapt the patterns. |

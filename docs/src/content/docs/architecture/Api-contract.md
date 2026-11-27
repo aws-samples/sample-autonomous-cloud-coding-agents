@@ -702,7 +702,7 @@ There is no per-user request-rate or "tasks-per-hour" limiter on task creation. 
 | `TASK_ALREADY_TERMINAL` | 409 | Cannot cancel a terminal task |
 | `WEBHOOK_ALREADY_REVOKED` | 409 | Webhook is already revoked |
 | `WORKSPACE_SLUG_AMBIGUOUS` | 409 | More than one active Linear workspace registration carries the slug (`DELETE /v1/linear/workspaces/{slug}`). Nothing is removed, and the message names the `linear_workspace_id` of each. The [Linear setup guide](/sample-autonomous-cloud-coding-agents/using/linear-setup-guide#manual-fallback) gives the steps |
-| `REPO_NOT_ONBOARDED` | 422 | Repository not registered (onboard via CDK, not runtime API) |
+| `REPO_NOT_ONBOARDED` | 422 | Repository not registered (register it with `bgagent repo onboard` or a Blueprint; the REST API has no onboarding endpoint) |
 | `REPO_NOT_FOUND_OR_NO_ACCESS` | 422 | Repo onboarded but credentials cannot reach it |
 | `PR_NOT_FOUND_OR_CLOSED` | 422 | PR does not exist, is closed, or is inaccessible |
 | `PR_FROM_FORK` | 422 | PR comes from a fork: its branch is not in the onboarded repository |

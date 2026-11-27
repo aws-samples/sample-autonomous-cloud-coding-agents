@@ -44,7 +44,7 @@ The orchestrator is deliberately scoped. It handles coordination and bookkeeping
 | Agent logic (clone, code, test, PR) | Agent runtime | [COMPUTE.md](/sample-autonomous-cloud-coding-agents/architecture/compute) |
 | Compute substrate internals (VM/task provisioning, image pull) | Selected compute service | [COMPUTE.md](/sample-autonomous-cloud-coding-agents/architecture/compute) |
 | Memory storage and retrieval | AgentCore Memory | [MEMORY.md](/sample-autonomous-cloud-coding-agents/architecture/memory) |
-| Repository onboarding | Blueprint construct | [REPO_ONBOARDING.md](/sample-autonomous-cloud-coding-agents/architecture/repo-onboarding) |
+| Repository onboarding | `bgagent repo onboard` or a Blueprint | [REPO_ONBOARDING.md](/sample-autonomous-cloud-coding-agents/architecture/repo-onboarding) |
 
 ## Task state machine
 
@@ -157,7 +157,7 @@ Multiple timeout mechanisms work together to prevent runaway tasks. Substrate ti
 | Max session duration | 8 hours | AgentCore caps a session at 8h; Lambda MicroVMs use `maximumDurationInSeconds: 28,800`, including suspended time. The orchestrator's safety-net poll loop runs up to `MAX_POLL_ATTEMPTS` (1020) × 30s ≈ 8.5h; a task still `RUNNING` when that window is exhausted is driven to `TIMED_OUT`. |
 | Idle timeout | Backend-specific | AgentCore has an idle timeout. Lambda MicroVMs omit `idlePolicy` because inbound-traffic idleness would suspend an outbound-only agent while it is working. See Liveness monitoring. |
 | Max turns | 100 (range 1-500) | Agent stops after N model invocations. Configurable per task or per repo. |
-| Max cost budget | $0.01-$100 | Agent stops when budget is reached. Per-task or per-repo via Blueprint. |
+| Max cost budget | $0.01-$100 | Agent stops when budget is reached. Configurable per task or per repo. |
 | Hydration timeout | 2 minutes | Fail the task if context assembly takes too long. |
 
 ## Blueprint execution

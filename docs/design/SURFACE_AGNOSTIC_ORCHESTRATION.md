@@ -8,10 +8,12 @@ orchestration engine work across issue-tracking surfaces (Linear and Jira today)
 surface's specifics live in its own adapter.
 
 **Scope of the "no core edit" claim** — worth stating precisely, because the loose version
-of it is not true. Adding a surface needs no change to the *engine*: nothing in discovery,
-release, reconcile, or rollup names a surface, and an adapter can be registered from its own
-module via `registerChannelFactory`. Three things outside the engine still need editing, and
-none is hidden:
+of it is not true. Adding a surface needs no change to discovery, reconcile, or rollup: none
+of them branches on a surface, and an adapter can be registered from its own module via
+`registerChannelFactory`. Release, the reconciler's iteration reply and the heartbeat sweep
+do branch on a surface: [What was coupled](#what-was-coupled-and-what-still-is) says where,
+and which of them a further surface has to edit. Three things outside the engine still need
+editing, and none is hidden:
 
 1. **Registry-table wiring per handler.** Each handler declares which surfaces' credentials
    registries it can reach (`CHANNEL_REGISTRY_TABLES` in the reconciler), plus the CDK env +
@@ -46,20 +48,32 @@ forks) and reduces the current Linear/Jira duplication (both already expose para
   `reportIssueFailure`, `reactToComment`, `replyToComment`, `upsertThreadedReply`)
   from `orchestration-rollup.ts`,
   `orchestration-reconciler.ts`, `linear-webhook-processor.ts`, and
-  `iteration-heartbeat-sweep.ts`. All of those now go through a `Channel`.
+  `iteration-heartbeat-sweep.ts`. All of those now go through a `Channel`, except Jira's
+  iteration reply (below).
 - **Fixed** — the orchestration row FIELDS are now channel-neutral with dual-read
   back-compat (see the row-shape section below).
 - **Still coupled** — `fetchIssueParentId` on the Linear-webhook entry path; that entry
   point is Linear-specific by definition, so it was left in place.
+- **Still coupled** — three places branch on a surface:
+  - `replyToIterationComment` in `orchestration-reconciler.ts` writes Jira's iteration
+    reply with Jira's own code (`updateJiraIterationComment`, `postIssueCommentAdf`)
+    instead of `upsertThreadedReply`. Every other surface takes the `Channel` path.
+  - The heartbeat sweep (`iteration-heartbeat-sweep.ts` with `iteration-heartbeat.ts`)
+    plans a heartbeat for Linear and Jira tasks only, and edits a Jira reply with the same
+    Jira code. A further surface gets no heartbeat until it is added there.
+  - `releaseChild` in `orchestration-release.ts` stamps Linear's `channel_metadata` keys
+    on a child of a Linear orchestration. Another surface's keys come from the row's own
+    `channel_metadata`, so it needs no edit there.
 
 ## The Channel adapter interface
 
-A `Channel` captures everything the engine needs from a surface. The engine holds a
-`Channel` and never names a concrete surface. As built (`orchestration-channel.ts`):
+A `Channel` captures what the engine needs from a surface for issue feedback. The engine
+holds a `Channel`; where it still branches on a surface is listed above. As built
+(`orchestration-channel.ts`):
 
 ```
 interface Channel {
-  readonly kind: ChannelKind;   // open string, logging/metrics only — never branched on
+  readonly kind: ChannelKind;   // open string; the reconciler's iteration reply branches on 'jira'
 
   // --- feedback: REQUIRED (unifies the duplicated linear-/jira-feedback) ---
   postComment(issue, body): Promise<CommentRef | null>;
@@ -135,9 +149,10 @@ The feedback axis is only one of the couplings. Besides its adapter, each surfac
   `channel_source` (`'linear'`, `'jira'`). The event-driven paths then follow the stored
   row through the registry. A webhook processor only ever handles its own surface, so it
   builds its adapter directly.
-- **The registry wiring per handler** (point 1 above). The reconciler and the heartbeat
-  sweep are given each surface's credentials registry: an environment variable and an IAM
-  grant per surface.
+- **The registry wiring per handler** (point 1 above). The reconciler, the
+  stranded-orchestration sweep and the heartbeat sweep are given each surface's credentials
+  registry: an environment variable and an IAM grant per surface.
 
 A further surface therefore needs a graph source (or a declarative one), a seeding path
-and that wiring.
+and that wiring, and an entry in the heartbeat sweep if its iteration replies are to get
+a heartbeat.
