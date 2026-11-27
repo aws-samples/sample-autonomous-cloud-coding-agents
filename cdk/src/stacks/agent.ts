@@ -565,6 +565,9 @@ export class AgentStack extends Stack {
         return microvmImageArnHolder;
       },
     });
+    // The image ARN for the handlers that act on a MicroVM-backed task (cancel, and the
+    // approval decisions that wake it), or nothing when no image is configured.
+    const microvmImageGrant = microvmImageConfigured ? { lambdaMicrovmImageArn: lazyMicrovmImageArn } : {};
 
     // Network isolation — VPC with restricted egress.
     // AgentCore only supports a subset of physical availability zones per
@@ -707,7 +710,7 @@ export class AgentStack extends Stack {
       // platform MicroVM image, so cancelling a MicroVM-backed task stops compute
       // immediately. Omitted when no image is configured — there can be no
       // MicroVM-backed task to cancel then.
-      ...(microvmImageConfigured && { lambdaMicrovmImageArn: lazyMicrovmImageArn }),
+      ...microvmImageGrant,
       largeBodyWebhookPaths: ([
         features.linear && '/v1/linear/webhook',
         features.jira && '/v1/jira/webhook',
@@ -1765,6 +1768,7 @@ export class AgentStack extends Stack {
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
       taskApprovalsTable: taskApprovalsTable.table,
+      ...microvmImageGrant,
       budgetTable: budgetTable.table,
       repoTable: repoTable.table,
       // Enables the webhook processor's orchestration path

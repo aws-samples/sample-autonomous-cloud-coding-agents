@@ -85,6 +85,14 @@ export interface LinearIntegrationProps {
    */
   readonly taskApprovalsTable?: dynamodb.ITable;
 
+  /**
+   * IAM resource ARN of the platform's MicroVM image (ADR-021). A decision recorded
+   * from Linear wakes a suspended MicroVM as the approve and deny handlers do, so
+   * the processor gets the same ``lambda:GetMicrovm`` and ``lambda:ResumeMicrovm``.
+   * Absent: no grant.
+   */
+  readonly lambdaMicrovmImageArn?: string;
+
   /** Monthly user/team budget configuration and spend table. */
   readonly budgetTable?: dynamodb.ITable;
 
@@ -465,8 +473,17 @@ export class LinearIntegration extends Construct {
     }
     props.taskTable.grantReadWriteData(webhookProcessorFn);
     props.taskEventsTable.grantReadWriteData(webhookProcessorFn);
-    // Approval replies: thread mapping, rate-limit counter and the decision.
-    props.taskApprovalsTable?.grantReadWriteData(webhookProcessorFn);
+    // Approval replies: thread mapping, rate-limit counter and the decision; the
+    // same two actions as the fan-out consumer, which posts the notices.
+    if (props.taskApprovalsTable) {
+      props.taskApprovalsTable.grant(webhookProcessorFn, 'dynamodb:GetItem', 'dynamodb:UpdateItem');
+      if (props.lambdaMicrovmImageArn) {
+        webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
+          actions: ['lambda:GetMicrovm', 'lambda:ResumeMicrovm'],
+          resources: [props.lambdaMicrovmImageArn, `${props.lambdaMicrovmImageArn}:*`],
+        }));
+      }
+    }
     if (props.repoTable) {
       props.repoTable.grantReadData(webhookProcessorFn);
     }

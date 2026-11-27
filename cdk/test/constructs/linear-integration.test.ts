@@ -550,7 +550,7 @@ describe('LinearIntegration construct — agent sessions (ADR-018 Phase 2)', () 
 });
 
 describe('LinearIntegration construct — approval replies (#1001)', () => {
-  function buildWith(opts: { withApprovals: boolean }): { t: Template; approvalsId?: string } {
+  function buildWith(opts: { withApprovals: boolean; microvmImageArn?: string }): { t: Template; approvalsId?: string } {
     const app = new App();
     const stack = new Stack(app, 'TestStack');
     const api = new apigw.RestApi(stack, 'TestApi');
@@ -574,6 +574,7 @@ describe('LinearIntegration construct — approval replies (#1001)', () => {
       taskTable,
       taskEventsTable,
       ...(taskApprovalsTable && { taskApprovalsTable }),
+      ...(opts.microvmImageArn && { lambdaMicrovmImageArn: opts.microvmImageArn }),
     });
     return {
       t: Template.fromStack(stack),
@@ -601,6 +602,35 @@ describe('LinearIntegration construct — approval replies (#1001)', () => {
       });
     });
     expect(grants).toHaveLength(1);
+  });
+
+  /** Every action the processor's policies grant on a resource whose reference names ``id``. */
+  function actionsOn(t: Template, id: string): string[] {
+    return Object.values(t.findResources('AWS::IAM::Policy')).flatMap((p) =>
+      (p as { Properties: { PolicyDocument: { Statement: Array<{ Action: string | string[]; Resource: unknown }> } } })
+        .Properties.PolicyDocument.Statement
+        .filter((st) => JSON.stringify(st.Resource).includes(id))
+        .flatMap((st) => (Array.isArray(st.Action) ? st.Action : [st.Action])));
+  }
+
+  test('the processor gets only GetItem and UpdateItem on the approvals table, as the fan-out does', () => {
+    const { t, approvalsId } = buildWith({ withApprovals: true });
+    expect(new Set(actionsOn(t, approvalsId!))).toEqual(new Set(['dynamodb:GetItem', 'dynamodb:UpdateItem']));
+  });
+
+  test('a decision recorded from Linear can wake a suspended MicroVM: GetMicrovm and ResumeMicrovm on the image', () => {
+    const image = 'arn:aws:lambda:us-east-1:123456789012:microvm-image:abca-agent';
+    const { t } = buildWith({ withApprovals: true, microvmImageArn: image });
+    t.hasResourceProperties('AWS::IAM::Policy', {
+      PolicyDocument: {
+        Statement: Match.arrayWith([Match.objectLike({
+          Action: ['lambda:GetMicrovm', 'lambda:ResumeMicrovm'],
+          Resource: [image, `${image}:*`],
+        })]),
+      },
+    });
+    const withoutImage = buildWith({ withApprovals: true }).t;
+    expect(JSON.stringify(withoutImage.toJSON())).not.toContain('lambda:ResumeMicrovm');
   });
 
   test('does NOT set TASK_APPROVALS_TABLE_NAME when the table is omitted (back-compat)', () => {
