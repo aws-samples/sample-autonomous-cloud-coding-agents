@@ -116,6 +116,10 @@ _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     # between the host and the port (1 to 5 digits, also behind the rest of
     # an IPv6 address, "]:"). It reads from the port to that segment only
     # while no further ":" comes, which keeps the scan linear as well.
+    # Only the user and the password are replaced, and the query and the
+    # fragment, which can hold a secret as well (AWS_SESSION_TOKEN:... in a
+    # MongoDB URL): the scheme, the "@", the host and the path stay, so a
+    # reader still sees where the URL points (see _connection_string_marker).
     # Second form: the user ends in the marker that AWS_KEY has put there.
     # What follows up to the "@" (the rest of a password, or ":" and a
     # password or session token) may have any length while it holds no
@@ -129,12 +133,12 @@ _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     (
         "CONNECTION_STRING",
         re.compile(
-            r"[a-zA-Z][a-zA-Z0-9+.-]{0,20}://"
+            r"(?P<keep>[a-zA-Z][a-zA-Z0-9+.-]{0,20}://)"
             r"(?:[^\s:/\"']*:" + _NOT_ONLY_A_PLACEHOLDER + r"(?:[^\s@/\"']+"
             r"|(?!(?:[^\s@/\"']*\]:)?[0-9]{1,5}/(?:[^\s@:\"']*/)?@)"
             r"(?:[^\s@:\"']+|[^\s@\"']{1,256}))"
             r"|[^\s:/\"']*\[REDACTED-AWS_KEY\](?::?[^\s@:\"'\[]*|[^\s@\"']{0,256}))"
-            r"@[^\s\"']+"
+            r"@(?=[^\s\"'])(?P<host>[^\s\"'?#]*)(?P<query>[?#][^\s\"']*)?"
         ),
     ),
     # GitHub App installation tokens of the stateless format that GitHub issues
@@ -162,6 +166,17 @@ _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ),
 ]
 
+
+def _connection_string_marker(match: re.Match[str]) -> str:
+    """``scheme://[REDACTED-CONNECTION_STRING]@host/path``, and a marker for a query."""
+    marker = "[REDACTED-CONNECTION_STRING]"
+    query = match.group("query")
+    tail = query[0] + marker if query else ""
+    return f"{match.group('keep')}{marker}@{match.group('host')}{tail}"
+
+
+# What a pattern's match is replaced by, where it is not ``[REDACTED-<label>]``.
+_REPLACEMENTS = {"CONNECTION_STRING": _connection_string_marker}
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -191,7 +206,8 @@ def scan_tool_output(content: str | None) -> ScanResult:
     for label, pattern in _PATTERNS:
         if pattern.search(redacted):
             findings.append(f"{label} detected")
-            redacted = pattern.sub(f"[REDACTED-{label}]", redacted)
+            replace = _REPLACEMENTS.get(label, lambda _m, label=label: f"[REDACTED-{label}]")
+            redacted = pattern.sub(replace, redacted)
 
     elapsed_ms = (time.monotonic() - start) * 1000
     return ScanResult(

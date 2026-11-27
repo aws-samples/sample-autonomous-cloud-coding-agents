@@ -450,7 +450,8 @@ class TestSelfRecloneGuard:
         result = _run(pre_tool_use_hook(hook_input, "t", {}, engine=engine, repo_url="owner/repo"))
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
         logged = capfd.readouterr().out
-        assert "DENIED self-reclone of owner/repo: cd /workspace && git clone [REDACTED-" in logged
+        denied = "DENIED self-reclone of owner/repo: cd /workspace && git clone https://[REDACTED-"
+        assert denied in logged
         assert not _pieces_in(_URL_VALUE, logged)
 
     def test_hook_allows_dependency_clone(self):
@@ -1577,7 +1578,8 @@ class TestPostToolUseFailure:
         event = _failed_bash(command, "Exit code 2\npsql: error: the server closed the connection")
         results = [_run(callback(event, "tu-1", {})) for _ in range(3)]
         advisory = results[2]["hookSpecificOutput"]["additionalContext"]
-        assert "You have run `cd /workspace/repo/services/api && psql [REDACTED-" in advisory
+        quoted = "You have run `cd /workspace/repo/services/api && psql postgresql://[REDACTED-"
+        assert quoted in advisory
         assert not _pieces_in(_URL_VALUE, advisory)
         milestones = [c[1] for c in progress.calls if c[0] == "write_agent_milestone"]
         assert [m["milestone"] for m in milestones] == ["stuck_steer"]

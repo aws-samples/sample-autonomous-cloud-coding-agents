@@ -80,46 +80,52 @@ class TestScanToolOutput:
 
     def test_detects_aws_key_pair_in_a_url(self):
         # s3a://<key id>:<secret>@bucket. Nearly half of all secret keys hold a
-        # "/". The pair is replaced first, and the URL that is left, with the
-        # marker of the pair for a user, is replaced as a whole.
+        # "/". The pair is replaced first, and then the user part that is left,
+        # the marker of the pair, up to the "@".
         content = "s3a://AKIAIOSFODNN7EXAMPLE:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY@bucket/path"
         result = scan_tool_output(content)
         assert result.findings == ["AWS_KEY detected", "CONNECTION_STRING detected"]
-        assert result.redacted_content == "[REDACTED-CONNECTION_STRING]"
+        assert result.redacted_content == "s3a://[REDACTED-CONNECTION_STRING]@bucket/path"
 
     @pytest.mark.parametrize(
-        "url",
+        ("url", "redacted"),
         [
             pytest.param(
                 f"mongodb+srv://{_KEY_PAIR}@cluster0.example.net/app?authMechanism=MONGODB-AWS"
                 "&authMechanismProperties=AWS_SESSION_TOKEN:" + "T0ken" * 8,
+                "mongodb+srv://[REDACTED-CONNECTION_STRING]@cluster0.example.net/app?[REDACTED-CONNECTION_STRING]",
                 id="session token in the query",
             ),
             pytest.param(
                 f"https://{_KEY_PAIR}@files.example.com/get?password=Pa55w0rdQuery",
+                "https://[REDACTED-CONNECTION_STRING]@files.example.com/get?[REDACTED-CONNECTION_STRING]",
                 id="password in the query",
             ),
             pytest.param(
                 f"postgres://{_KEY_PAIR}-TailOfPassword@db.internal/app",
+                "postgres://[REDACTED-CONNECTION_STRING]@db.internal/app",
                 id="password longer than a secret key",
             ),
             pytest.param(
                 "smtp://AKIAIOSFODNN7EXAMPLE:"
                 + "aB3/" * 11
                 + "@email-smtp.us-east-1.amazonaws.com:587",
+                "smtp://[REDACTED-CONNECTION_STRING]@email-smtp.us-east-1.amazonaws.com:587",
                 id="SES SMTP password: 44 characters, with slashes",
             ),
             pytest.param(
                 f"https://{_KEY_PAIR}:" + "aB3/" * 150 + "@s3.amazonaws.com",
+                "https://[REDACTED-CONNECTION_STRING]@s3.amazonaws.com",
                 id="session token after the secret key (MC_HOST of the MinIO client)",
             ),
         ],
     )
-    def test_url_with_an_aws_key_id_as_user_is_replaced_as_a_whole(self, url):
+    def test_url_with_an_aws_key_id_as_user_loses_its_user_part_and_query(self, url, redacted):
         # AWS_KEY runs first and leaves scheme://[REDACTED-AWS_KEY]...@host, which
-        # is no user:password@host any more. The rest of the URL (the rest of a
-        # password, a secret in the query) must not stay readable for that.
-        assert scan_tool_output(url).redacted_content == "[REDACTED-CONNECTION_STRING]"
+        # is no user:password@host any more. The rest of the user part (the rest
+        # of a password) and the query (a secret in it) must not stay readable
+        # for that; the host and the path stay.
+        assert scan_tool_output(url).redacted_content == redacted
 
     def test_longer_run_after_an_aws_key_id_is_not_its_secret(self):
         # A secret access key has exactly 40 characters.
@@ -229,9 +235,9 @@ class TestScanToolOutput:
             ),
             pytest.param(
                 f"https://x-access-token:{_APP_TOKEN}:x-oauth-basic@github.com/o/r.git?t=QuerySecret7",
-                "[REDACTED-CONNECTION_STRING]",
+                "https://[REDACTED-CONNECTION_STRING]@github.com/o/r.git?[REDACTED-CONNECTION_STRING]",
                 "CONNECTION_STRING detected",
-                id="in a URL that is replaced as a whole",
+                id="in the user part of a URL",
             ),
         ],
     )
@@ -399,9 +405,11 @@ class TestScanToolOutput:
         # The entry for the rest of a bearer token runs last. Directly behind
         # the Bearer pattern it would take the marker of the key id, and the
         # pattern for connection strings needs that marker to replace this URL
-        # as a whole: the password would stay.
+        # up to the "@": the password would stay.
         content = "s3://Bearer " + "x" * 24 + "-AKIAIOSFODNN7EXAMPLE:pa/ss@host"
-        assert scan_tool_output(content).redacted_content == "[REDACTED-CONNECTION_STRING]"
+        assert (
+            scan_tool_output(content).redacted_content == "s3://[REDACTED-CONNECTION_STRING]@host"
+        )
 
     # ---- Connection strings ----
 
@@ -422,14 +430,20 @@ class TestScanToolOutput:
         content = "EMAIL_URL=smtp://alerts@example.com:s3cretP4ss@smtp.example.com:587"
         result = scan_tool_output(content)
         assert result.findings == ["CONNECTION_STRING detected"]
-        assert result.redacted_content == "EMAIL_URL=[REDACTED-CONNECTION_STRING]"
+        assert (
+            result.redacted_content
+            == "EMAIL_URL=smtp://[REDACTED-CONNECTION_STRING]@smtp.example.com:587"
+        )
 
     def test_detects_connection_string_with_a_slash_in_the_password(self):
         # Base64 text holds "/", and so does many a generated password.
         content = "postgres://admin:abc/def+ghiJKL@db.internal:5432/app"
         result = scan_tool_output(content)
         assert result.findings == ["CONNECTION_STRING detected"]
-        assert result.redacted_content == "[REDACTED-CONNECTION_STRING]"
+        assert (
+            result.redacted_content
+            == "postgres://[REDACTED-CONNECTION_STRING]@db.internal:5432/app"
+        )
 
     @pytest.mark.parametrize("vector", _VECTORS, ids=lambda vector: vector["note"])
     def test_url_vectors_shared_with_the_scanner_of_deny_reasons(self, vector):
@@ -472,27 +486,27 @@ class TestScanToolOutput:
         [
             (
                 'DATABASE_URL = "postgresql+psycopg2://{user}:s3cretP4ss@{host}:{port}/{db}"',
-                'DATABASE_URL = "[REDACTED-CONNECTION_STRING]"',
+                'DATABASE_URL = "postgresql+psycopg2://[REDACTED-CONNECTION_STRING]@{host}:{port}/{db}"',
             ),
             (
                 'url = f"redis://default:s3cretP4ss@{host}:6379/0"',
-                'url = f"[REDACTED-CONNECTION_STRING]"',
+                'url = f"redis://[REDACTED-CONNECTION_STRING]@{host}:6379/0"',
             ),
             (
                 'conn = "amqp://%s:s3cretP4ss@%s:5672/" % (user, host)',
-                'conn = "[REDACTED-CONNECTION_STRING]" % (user, host)',
+                'conn = "amqp://[REDACTED-CONNECTION_STRING]@%s:5672/" % (user, host)',
             ),
             (
                 'export PGURL="postgres://app:s3cretP4ss@db.internal/app"',
-                'export PGURL="[REDACTED-CONNECTION_STRING]"',
+                'export PGURL="postgres://[REDACTED-CONNECTION_STRING]@db.internal/app"',
             ),
             (
                 "# docs: mongodb://<user>:s3cretP4ss@cluster0.example.net",
-                "# docs: [REDACTED-CONNECTION_STRING]",
+                "# docs: mongodb://[REDACTED-CONNECTION_STRING]@cluster0.example.net",
             ),
             (
                 "sqlalchemy.url = postgresql://%(DB_USER)s:s3cretP4ss@%(DB_HOST)s/app",
-                "sqlalchemy.url = [REDACTED-CONNECTION_STRING]",
+                "sqlalchemy.url = postgresql://[REDACTED-CONNECTION_STRING]@%(DB_HOST)s/app",
             ),
             (
                 "run: git clone https://x-access-token:s3cretP4ss@github.com/o/r.git",
@@ -537,15 +551,21 @@ class TestScanToolOutput:
     )
     def test_password_that_is_not_one_placeholder_and_nothing_else_is_replaced(self, password):
         url = f"postgres://app:{password}@db.internal/app"
-        assert scan_tool_output(url).redacted_content == "[REDACTED-CONNECTION_STRING]"
+        assert (
+            scan_tool_output(url).redacted_content
+            == "postgres://[REDACTED-CONNECTION_STRING]@db.internal/app"
+        )
         git_url = f"https://x-access-token:{password}@github.com/o/r.git"
         redacted = "https://[REDACTED-GITHUB_URL_TOKEN]github.com/o/r.git"
         assert scan_tool_output(git_url).redacted_content == redacted
 
     def test_placeholder_password_after_an_aws_key_id_is_no_template(self):
-        # The key id is real and is replaced: the URL goes as a whole, as before.
+        # The key id is real and is replaced: the user part goes, as before.
         content = "https://AKIAIOSFODNN7EXAMPLE:{secret}@files.example.com/x"
-        assert scan_tool_output(content).redacted_content == "[REDACTED-CONNECTION_STRING]"
+        assert (
+            scan_tool_output(content).redacted_content
+            == "https://[REDACTED-CONNECTION_STRING]@files.example.com/x"
+        )
 
     def test_connection_string_no_catastrophic_backtracking(self):
         """Protocol-name cap prevents pathological regex time."""

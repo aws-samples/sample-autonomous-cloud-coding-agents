@@ -55,7 +55,10 @@ class TestErrorScanning:
     def test_connection_string_redacted(self) -> None:
         err = "connect error: postgres://app_user:s3cretPW@db.example.com/prod"
         out = _metrics_payload_for_logging({"error": err})
-        assert out["error"] == "connect error: [REDACTED-CONNECTION_STRING]"
+        assert (
+            out["error"]
+            == "connect error: postgres://[REDACTED-CONNECTION_STRING]@db.example.com/prod"
+        )
 
 
 class TestNonErrorFieldsUntouched:
