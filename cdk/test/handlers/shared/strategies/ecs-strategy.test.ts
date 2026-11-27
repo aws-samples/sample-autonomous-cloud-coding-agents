@@ -151,21 +151,31 @@ describe('EcsComputeStrategy', () => {
       ).rejects.toThrow('ECS RunTask returned no task: arn:test: RESOURCE:ENI');
     });
 
-    test('includes model_id and system_prompt_overrides from blueprintConfig', async () => {
+    test('passes model_id, and leaves prompt overrides to the payload the agent reads them from', async () => {
       mockSend.mockResolvedValueOnce({
         tasks: [{ taskArn: TASK_ARN }],
       });
+      // A presigned payload URL carries a session token: a reference of about 2 KB.
+      mockPrepare.mockImplementationOnce(async ({ taskId }: { taskId: string }) => ({
+        version: 2,
+        task_id: taskId,
+        bootstrap_s3_uri: 's3://b/bootstrap/example.json',
+        payload_url: `https://signed.example/task?X-Amz-Security-Token=${'t'.repeat(2000)}`,
+        expires_at: Date.now() + 900000,
+      }));
+      // 6 KB of overrides plus that reference would pass the 8192-byte override limit.
+      const overrides = 'Be concise. '.repeat(500);
 
       const strategy = new EcsComputeStrategy();
       await strategy.startSession({
         taskId: 'TASK001',
         userId: 'cognito-test',
-        payload: { repo_url: 'org/repo' },
+        payload: { repo_url: 'org/repo', system_prompt_overrides: overrides },
         blueprintConfig: {
           compute_type: 'ecs',
           runtime_arn: '',
           model_id: 'anthropic.claude-sonnet-4-6',
-          system_prompt_overrides: 'Be concise',
+          system_prompt_overrides: overrides,
         },
       });
 
@@ -173,8 +183,11 @@ describe('EcsComputeStrategy', () => {
       const envVars = call.input.overrides.containerOverrides[0].environment;
       expect(envVars).toEqual(expect.arrayContaining([
         { name: 'ANTHROPIC_MODEL', value: 'anthropic.claude-sonnet-4-6' },
-        { name: 'SYSTEM_PROMPT_OVERRIDES', value: 'Be concise' },
       ]));
+      expect(envVars.map((e: { name: string }) => e.name)).not.toContain('SYSTEM_PROMPT_OVERRIDES');
+      expect(mockPrepare).toHaveBeenCalledWith(expect.objectContaining({
+        payload: expect.objectContaining({ system_prompt_overrides: overrides }),
+      }));
     });
   });
 
@@ -390,8 +403,8 @@ describe('ECS v2 bootstrap integration', () => {
     await expect(new EcsComputeStrategy().startSession({
       taskId: 'TASK001',
       userId: 'u1',
-      payload: { task_id: 'TASK001' },
-      blueprintConfig: { compute_type: 'ecs', runtime_arn: '', system_prompt_overrides: '🌍'.repeat(2100) },
+      payload: { task_id: 'TASK001', repo_url: '🌍'.repeat(2100) },
+      blueprintConfig: { compute_type: 'ecs', runtime_arn: '' },
     })).rejects.toThrow('ECS container overrides exceed 8192 bytes');
     expect(mockSend).not.toHaveBeenCalled();
   });
