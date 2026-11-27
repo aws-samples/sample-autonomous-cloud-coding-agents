@@ -80,6 +80,23 @@ describe('probeLinearGrants', () => {
     expect(send.mock.calls[1][0].input.ExclusiveStartKey).toEqual({ linear_workspace_id: 'ws-2' });
   });
 
+  test('a row latched only on the vault asking for consent is re-probed, so the resolver can clear the latch', async () => {
+    const { client, send } = fakeDdb([{
+      Items: [
+        { linear_workspace_id: 'ws-1', workspace_slug: 'alpha', status: 'revoked', revoked_reason: 'vault_consent_required' },
+        { linear_workspace_id: 'ws-2', workspace_slug: 'beta', status: 'revoked', revoked_reason: 'vault_consent_required' },
+        { linear_workspace_id: 'ws-3', workspace_slug: 'gamma', status: 'revoked', revoked_reason: 'refresh_token_rejected' },
+      ],
+    }]);
+    const resolve = jest.fn(async (id: string) => (id === 'ws-1' ? { access_token: 't' } : null));
+
+    const report = await probeLinearGrants(client, 'Registry', resolve);
+
+    expect(send.mock.calls[0][0].input.ProjectionExpression).toContain('revoked_reason');
+    expect(resolve.mock.calls.map(([id]) => id)).toEqual(['ws-1', 'ws-2']);
+    expect(report).toEqual({ checked: 2, healthy: 1, unhealthy: [], revoked: ['beta', 'gamma'] });
+  });
+
   test('one workspace throwing does not hide the others', async () => {
     const { client } = fakeDdb([{
       Items: [

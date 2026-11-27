@@ -26,11 +26,13 @@
  * live, a workspace sat with an expired refresh token for months with one ERROR log
  * line. Linear refresh tokens also expire when unused, so the outage was preventable.
  *
- * The probe resolves a token for every active workspace on a schedule. That does two
- * jobs with the existing code path:
+ * The probe resolves a token for every active workspace on a schedule. That does
+ * three jobs with the existing code path:
  *  - it refreshes expiring access tokens, which keeps an idle refresh token alive;
  *  - a grant Linear rejects goes through the resolver's revocation recorder, which
- *    latches the workspace and announces it on OperationalAlerts (once).
+ *    latches the workspace and announces it on OperationalAlerts (once);
+ *  - a workspace latched because the vault asked for consent is asked again, and the
+ *    resolver clears the latch when the vault returns a token.
  */
 
 import { ScanCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
@@ -72,7 +74,11 @@ export interface GrantHealthReport {
   readonly healthy: number;
   /** Slugs (or ids when a row has no slug) whose token could not be resolved. */
   readonly unhealthy: readonly string[];
-  /** Rows already latched `revoked`; not re-probed, they were already announced. */
+  /**
+   * Rows latched `revoked`, which were already announced. Only a row latched because
+   * the vault asked for consent is probed again, and it leaves this list when the
+   * probe gets a token (the resolver then clears the latch).
+   */
   readonly revoked: readonly string[];
 }
 
@@ -80,10 +86,19 @@ interface RegistryRow {
   readonly linear_workspace_id?: string;
   readonly workspace_slug?: string;
   readonly status?: string;
+  readonly revoked_reason?: string;
 }
 
 /**
- * Resolve a token for every active registry row, sequentially (a handful of
+ * The latch the resolver re-tests itself (see `resolveLinearOauthToken`). Its other
+ * entry point is a Linear event, and the webhook receiver rejects the events of a
+ * revoked workspace, so without the probe such a row stays down until setup runs again.
+ */
+const VAULT_CONSENT_REVOCATION_REASON = 'vault_consent_required';
+
+/**
+ * Resolve a token for every active registry row and every row latched on the vault's
+ * consent answer, sequentially (a handful of
  * workspaces; sequential keeps the probe gentle on Linear's token endpoint).
  */
 export async function probeLinearGrants(
@@ -96,7 +111,7 @@ export async function probeLinearGrants(
   do {
     const page = await ddb.send(new ScanCommand({
       TableName: registryTableName,
-      ProjectionExpression: 'linear_workspace_id, workspace_slug, #status',
+      ProjectionExpression: 'linear_workspace_id, workspace_slug, #status, revoked_reason',
       ExpressionAttributeNames: { '#status': 'status' },
       ExclusiveStartKey: startKey,
     }));
@@ -111,18 +126,20 @@ export async function probeLinearGrants(
   for (const row of rows) {
     if (!row.linear_workspace_id) continue;
     const label = row.workspace_slug ?? row.linear_workspace_id;
-    if (row.status !== 'active') {
+    const active = row.status === 'active';
+    if (!active && row.revoked_reason !== VAULT_CONSENT_REVOCATION_REASON) {
       revoked.push(label);
       continue;
     }
     checked++;
+    let ok = false;
     try {
-      if (await resolve(row.linear_workspace_id)) healthy++;
-      else unhealthy.push(label);
+      ok = Boolean(await resolve(row.linear_workspace_id));
     } catch {
       // One workspace's failure must not hide the others.
-      unhealthy.push(label);
     }
+    if (ok) healthy++;
+    else (active ? unhealthy : revoked).push(label);
   }
   return { checked, healthy, unhealthy, revoked };
 }

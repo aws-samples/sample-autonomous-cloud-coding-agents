@@ -337,7 +337,7 @@ If the app has been edited repeatedly through failed saves, creating a fresh app
 
 ### Linear stops responding and an "authorization revoked" alert arrives
 
-ABCA probes every registered workspace's grant every 12 hours, as well as whenever an event needs a token. The probe refreshes tokens that are about to expire, which keeps a grant alive even when nobody uses Linear for a while. If Linear rejects a grant, the workspace is marked `revoked` and one alert goes to the **OperationalAlerts** SNS topic (stack output `OperationalAlertsTopicArn`). Subscribe an email or chat endpoint to it, or deploy with `-c alertEmail=…`, because it ships with no subscribers.
+ABCA probes every registered workspace's grant every 12 hours, as well as whenever an event needs a token. The probe refreshes tokens that are about to expire, which keeps a grant alive even when nobody uses Linear for a while. If Linear rejects a grant, the workspace is marked `revoked` and one alert goes to the **OperationalAlerts** SNS topic (stack output `OperationalAlertsTopicArn`). Subscribe an email or chat endpoint to it, or deploy with `-c alertEmail=…`, because it ships with no subscribers. A workspace marked `revoked` because the identity vault asked for consent is probed again on each run, and turns active by itself once the vault returns a token.
 
 To recover, re-authorize the workspace:
 
