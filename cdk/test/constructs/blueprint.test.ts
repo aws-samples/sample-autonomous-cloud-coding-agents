@@ -303,7 +303,7 @@ describe('Blueprint construct', () => {
 
   test('onUpdate does NOT remove model_id — the CLI is a sanctioned co-writer of it', () => {
     // Regression guard for a fix that was WRONG. Clearing `model_id` when a Blueprint
-    // declares none looked symmetric with the asset refs, but onUpdate runs on every
+    // declares none looked harmless, but onUpdate runs on every
     // deploy (its parameters embed a synth-time timestamp) and `bgagent repo onboard
     // --model` deliberately carries the value forward (ADR-017 sanctions both writers).
     // The clear therefore deleted an operator's CLI pin on every unrelated redeploy,
@@ -318,22 +318,34 @@ describe('Blueprint construct', () => {
     expect(withModel).toContain('#model_id = :model_id');
   });
 
-  test('onUpdate REMOVEs asset columns that are now empty (detach on redeploy)', () => {
-    // Only mcpServers pinned: cedar_policy_modules + skills must be REMOVEd so a
-    // redeploy that cleared them detaches the stale DDB refs (#246).
-    const { template } = createStack({
-      assets: { mcpServers: ['registry://mcp_server/acme/pdf-tools@^1.4.1'] },
-    });
-    expect(updateCall(template).parameters.UpdateExpression).toBe(
+  test('removes an asset list declared as [] and does not name one that is not declared', () => {
+    // A list that is not declared stays, as model_id does above: the CLI writes the same row, and every deploy makes this call.
+    const { UpdateExpression, ExpressionAttributeNames } = updateCall(createStack({
+      assets: { mcpServers: ['registry://mcp_server/acme/pdf-tools@^1.4.1'], skills: [] },
+    }).template).parameters;
+    expect(UpdateExpression).toBe(
       'SET #status = :active, #updated_at = :now, #onboarded_at = if_not_exists(#onboarded_at, :now), #mcp_servers = :mcp_servers'
-      + ' REMOVE #ttl, #cedar_policy_modules, #skills',
+      + ' REMOVE #ttl, #skills',
     );
+    expect(ExpressionAttributeNames).toEqual({
+      '#status': 'status',
+      '#updated_at': 'updated_at',
+      '#onboarded_at': 'onboarded_at',
+      '#mcp_servers': 'mcp_servers',
+      '#ttl': 'ttl',
+      '#skills': 'skills',
+    });
   });
 
-  test('onUpdate REMOVEs all three asset columns when none are pinned', () => {
-    const { template } = createStack();
-    const serialized = getUpdateJoinParts(template).join('');
-    expect(serialized).toContain('REMOVE #ttl, #mcp_servers, #cedar_policy_modules, #skills');
+  test.each<[string, NonNullable<BlueprintProps['assets']>]>([
+    ['#mcp_servers', { mcpServers: [] }],
+    ['#cedar_policy_modules', { cedarPolicyModules: [] }],
+    ['#skills', { skills: [] }],
+    ['#mcp_servers, #cedar_policy_modules, #skills', { mcpServers: [], cedarPolicyModules: [], skills: [] }],
+  ])('removes %s when the Blueprint declares %j', (columns, assets) => {
+    expect(updateCall(createStack({ assets }).template).parameters.UpdateExpression).toBe(
+      `SET #status = :active, #updated_at = :now, #onboarded_at = if_not_exists(#onboarded_at, :now) REMOVE #ttl, ${columns}`,
+    );
   });
 
   test('rejects a floating asset ref at synth', () => {
@@ -594,23 +606,19 @@ describe('Blueprint construct', () => {
     expect(() => Template.fromStack(stackMax)).not.toThrow();
   });
 
-  test('a Blueprint with no override activates the row, keeps onboarded_at and removes ttl and the asset lists', () => {
+  test('a Blueprint with no override activates the row, keeps onboarded_at and removes ttl alone', () => {
     expect(updateCall(createStack().template)).toEqual({
       service: 'DynamoDB',
       action: 'updateItem',
       parameters: {
         TableName: 'table-name',
         Key: { repo: { S: 'org/my-repo' } },
-        UpdateExpression: 'SET #status = :active, #updated_at = :now, #onboarded_at = if_not_exists(#onboarded_at, :now)'
-          + ' REMOVE #ttl, #mcp_servers, #cedar_policy_modules, #skills',
+        UpdateExpression: 'SET #status = :active, #updated_at = :now, #onboarded_at = if_not_exists(#onboarded_at, :now) REMOVE #ttl',
         ExpressionAttributeNames: {
           '#status': 'status',
           '#updated_at': 'updated_at',
           '#onboarded_at': 'onboarded_at',
           '#ttl': 'ttl',
-          '#mcp_servers': 'mcp_servers',
-          '#cedar_policy_modules': 'cedar_policy_modules',
-          '#skills': 'skills',
         },
         ExpressionAttributeValues: { ':active': { S: 'active' }, ':now': { S: expect.any(String) } },
       },
@@ -640,11 +648,12 @@ describe('Blueprint construct', () => {
     [['cedar_policy_modules'], { assets: { cedarPolicyModules: ['registry://cedar_policy_module/acme/force-push@~2.0.0'] } }],
     [['skills'], { assets: { skills: ['registry://skill/acme/research@1.0.0'] } }],
     [['compute_type', 'model_id', 'max_turns'], { compute: { type: 'ecs' }, agent: { modelId: 'us.anthropic.claude-sonnet-4-6', maxTurns: 50 } }],
-  ])('the update call sets %j and declares exactly the placeholders its expression uses', (columns, props) => {
+  ])('the update call sets %j, removes ttl alone and declares exactly the placeholders its expression uses', (columns, props) => {
     const { UpdateExpression, ExpressionAttributeNames, ExpressionAttributeValues } = updateCall(createStack(props).template).parameters;
     expect([...new Set(UpdateExpression.match(/#\w+/g))].sort()).toEqual(Object.keys(ExpressionAttributeNames).sort());
     expect([...new Set(UpdateExpression.match(/:\w+/g))].sort()).toEqual(Object.keys(ExpressionAttributeValues).sort());
     expect(Object.keys(ExpressionAttributeValues)).toEqual([':active', ':now', ...columns.map(column => `:${column}`)]);
+    expect(UpdateExpression).toMatch(/ REMOVE #ttl$/);
   });
 
   test('grants DynamoDB UpdateItem alone', () => {

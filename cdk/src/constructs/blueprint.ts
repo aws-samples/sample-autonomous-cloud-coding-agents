@@ -229,6 +229,9 @@ export interface BlueprintProps {
    * ``registry://kind/namespace/name@constraint`` ref, validated at synth. The
    * orchestrator resolves the refs at task start and threads the resolved bundle
    * into the agent payload; an unresolvable ref fails the task (fail-closed).
+   *
+   * A list that is left out keeps the value the repository's record holds; a
+   * list declared as ``[]`` is removed from the record.
    */
   readonly assets?: {
     /** MCP servers merged into the agent's ``.mcp.json`` (PR 2). */
@@ -246,7 +249,7 @@ export interface BlueprintProps {
  *
  * Create and Update: one UpdateItem that sets status='active', updated_at, onboarded_at
  * (only if the row has none) and the fields the Blueprint declares, removes ttl and each
- * asset list the Blueprint does not declare, and leaves every other attribute as it is,
+ * asset list the Blueprint declares as empty, and leaves every other attribute as it is,
  * because `bgagent repo onboard` writes the same row (ADR-017).
  * Delete: UpdateItem to set status='removed' and TTL for eventual cleanup.
  *
@@ -263,9 +266,10 @@ export class Blueprint extends Construct {
     const cedarPolicies = [...(props.security?.cedarPolicies ?? [])];
     const approvalGateCap = props.security?.approvalGateCap;
     const { maxBudgetUsd, memoryTokenBudget } = props.agent ?? {};
-    const mcpServerRefs = [...(props.assets?.mcpServers ?? [])];
-    const cedarPolicyModuleRefs = [...(props.assets?.cedarPolicyModules ?? [])];
-    const skillRefs = [...(props.assets?.skills ?? [])];
+    const assets = props.assets ?? {};
+    const mcpServerRefs = [...(assets.mcpServers ?? [])];
+    const cedarPolicyModuleRefs = [...(assets.cedarPolicyModules ?? [])];
+    const skillRefs = [...(assets.skills ?? [])];
 
     // Validate repo format at construct time
     this.node.addValidation(new RepoFormatValidation(props.repo));
@@ -342,8 +346,12 @@ export class Blueprint extends Construct {
     }
 
     const declared = Object.keys(overrides);
-    // ttl, so that a row an offboard left does not expire; an asset list that is not declared, so that its pins are detached.
-    const removed = ['ttl', ...['mcp_servers', 'cedar_policy_modules', 'skills'].filter(column => !declared.includes(column))];
+    // ttl, so that a row an offboard left does not expire; an asset list declared as [], so that its pins are detached.
+    const removed = ['ttl', ...Object.entries({
+      mcp_servers: assets.mcpServers,
+      cedar_policy_modules: assets.cedarPolicyModules,
+      skills: assets.skills,
+    }).filter(([, refs]) => refs?.length === 0).map(([column]) => column)];
 
     new cr.AwsCustomResource(this, 'RepoConfigCR', {
       timeout: Duration.minutes(REPO_CONFIG_CR_TIMEOUT_MINUTES),
