@@ -256,3 +256,21 @@ test('a failed checklist write never blocks the final response', async () => {
   expect(outcome.infraRejections).toEqual([]);
   expect(mockEmitAgentActivity).toHaveBeenCalledWith('lin_tok', 'session-1', expect.objectContaining({ type: 'response' }));
 });
+
+test('a follow-up on a pull request that pushed nothing reads as no change: no review ask, no finished checklist, no move', async () => {
+  mockTask({
+    ...SESSION_TASK,
+    status: 'COMPLETED',
+    pr_url: PR_URL,
+    code_changed: false,
+    resolved_workflow: { id: 'coding/pr-iteration-v1', version: '1' },
+    linear_checklist_stage: 3,
+  });
+  await routeEvent(ev('task_completed'), LINEAR_ONLY);
+  const final = mockEmitAgentActivity.mock.calls.at(-1)?.[2] as { type: string; body: string };
+  expect(final.type).toBe('response');
+  expect(final.body).not.toMatch(/review the pull request/);
+  expect(final.body).toMatch(/_Nothing needed from you\. Reply here if you want a change after all\._$/);
+  expect(planStatuses()).toEqual(['completed', 'completed', 'completed', 'canceled', 'canceled']);
+  expect(mockTransitionIssueState).not.toHaveBeenCalled();
+});

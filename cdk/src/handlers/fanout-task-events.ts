@@ -1634,12 +1634,16 @@ async function dispatchToLinearAgentSession(
 /**
  * How a finished task reads in its session: a pull request to review (also one shipped
  * by a run that then stopped early), a question back, no change, a stop, or a failure.
+ * A follow-up on an existing pull request carries its ``pr_url`` whether or not it
+ * pushed, so ``code_changed === false`` is what says it changed nothing.
  */
 function sessionOutcome(task: TaskRecord, event: FanOutEvent): SessionOutcome {
   if (event.event_type === 'task_completed') {
-    if (task.pr_url) return 'pr';
-    // Same shape as the elicitation: no PR and no code change means the run asked a question.
-    return task.code_changed === false ? 'question' : 'no_change';
+    if (task.code_changed === false) {
+      // Same shape as the elicitation: no PR and no code change means the run asked a question.
+      return task.pr_url ? 'no_change' : 'question';
+    }
+    return task.pr_url ? 'pr' : 'no_change';
   }
   if (event.event_type === 'task_cancelled') return 'cancelled';
   return task.pr_url ? 'pr' : 'failed';
