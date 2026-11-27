@@ -21,8 +21,8 @@ One of two places, chosen automatically at setup time:
 
 | | When it's used | What's stored |
 |---|---|---|
-| **AgentCore Identity vault** | **Default** whenever the stack deploys AgentCore (the standard deployment). A deployment without AgentCore (for example `compute_types=ecs`) can opt in with `--context enableLinearIdentityVault=true`, provided its region has AgentCore Identity | Nothing long-lived. AgentCore holds the refresh token and mints short-lived access tokens on demand. |
-| **Secrets Manager** | Deployments without AgentCore, or `--context enableLinearIdentityVault=false` | An OAuth token bundle in `bgagent-linear-oauth-<slug>`, refreshed and rotated by ABCA only when ABCA uses Linear. |
+| **AgentCore Identity vault** | **Default** whenever the stack deploys AgentCore and not Lambda MicroVMs (the standard deployment). A deployment without AgentCore (for example `compute_types=ecs`), or with MicroVMs, can opt in with `--context enableLinearIdentityVault=true`, provided its region has AgentCore Identity | Nothing long-lived. AgentCore holds the refresh token and mints short-lived access tokens on demand. |
+| **Secrets Manager** | Deployments without AgentCore, deployments with MicroVMs, or `--context enableLinearIdentityVault=false` | An OAuth token bundle in `bgagent-linear-oauth-<slug>`, refreshed and rotated by ABCA only when ABCA uses Linear. |
 
 Prefer the vault. With Secrets Manager, a workspace that ABCA does not use for long enough can be left with an expired refresh token, and re-authorizing needs a browser that can reach the CLI's `localhost` callback. The vault's hosted consent page works from any machine.
 
@@ -38,13 +38,15 @@ AgentCore Identity not available in us-east-1 — using Secrets Manager.
 
 A workspace that started on Secrets Manager and later moves to the vault **keeps** its Secrets Manager token as a fallback. A workspace onboarded straight onto the vault has no such token by design — it needs the vault to be reachable.
 
+**Keep the vault on once a workspace was set up through it.** A deploy that resolves the vault to off (AgentCore or MicroVMs added to or removed from `compute_types`, `--context enableLinearIdentityVault=false`, a rollback to a version without the vault default) deletes the workload identity. A workspace onboarded straight onto the vault then has no token anywhere. ABCA raises no alert for it; each event logs `LINEAR_VAULT_OFF_FOR_VAULT_WORKSPACE` in the webhook processor's log, and `bgagent linear setup` refuses to move the workspace to Secrets Manager while its registry row exists. Redeploy with `--context enableLinearIdentityVault=true`, or delete the registry row and run setup again.
+
 When a workspace's authorization dies, ABCA records it on the registry row and publishes to the `OperationalAlerts` topic. That topic has **no subscribers unless you deployed with `alertEmail`**, so set it if you want to hear about a dead workspace rather than discover it from `bgagent platform doctor`.
 
 A vault call that fails is not such a death. When the vault answers with an error (a throttle, a missing permission, a deleted credential provider) rather than saying that a new consent is needed, ABCA records and announces nothing. That event uses the Secrets Manager token if the workspace has a usable one and is otherwise dropped, with `Vault token resolution failed` in the function's log. The next event asks the vault again.
 
 #### Using the vault with Lambda MicroVMs
 
-Use split networking when the full MicroVM-plus-vault configuration exceeds the 490-resource budget. `compute_types` can include MicroVM alongside AgentCore or ECS, or select MicroVM alone; an unchanged legacy `compute_type=lambda-microvm` keeps AgentCore. The guest execution role receives the mint grant, and the `/run` configuration carries `LINEAR_VAULT_ENABLED` and `LINEAR_WORKLOAD_IDENTITY_NAME`. Rebuild the MicroVM image from this checkout before enabling the vault. Verify consent and token minting in a live rehearsal; synthesis alone does not qualify this experimental backend.
+Use split networking when the full MicroVM-plus-vault configuration exceeds the 490-resource budget. `compute_types` can include MicroVM alongside AgentCore or ECS, or select MicroVM alone; an unchanged legacy `compute_type=lambda-microvm` keeps AgentCore. The guest execution role receives the mint grant, and the `/run` configuration carries `LINEAR_VAULT_ENABLED` and `LINEAR_WORKLOAD_IDENTITY_NAME`. Rebuild the MicroVM image from this checkout before enabling the vault: a guest image built before those two keys were in the contract rejects every run that carries them, and a deploy does not rebuild the image. That is why a stack with MicroVMs keeps the vault off unless `--context enableLinearIdentityVault=true` is given. Verify consent and token minting in a live rehearsal; synthesis alone does not qualify this experimental backend.
 
 #### One workload identity per stack
 

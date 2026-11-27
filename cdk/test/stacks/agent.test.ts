@@ -2303,6 +2303,9 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
   test.each([
     ['explicit opt-out', { enableLinearIdentityVault: 'false' }],
     ['a deployment without AgentCore', { compute_types: 'ecs' }],
+    // A MicroVM guest image built before the vault keys rejects every run that carries
+    // them, and a deploy does not rebuild the image: there the vault stays opt-in.
+    ['a deployment with AgentCore and MicroVMs', { compute_types: 'agentcore,lambda-microvm', microvm_nested_stack: true }],
   ])('%s omits the vault: no workload identity, no token grant, no agent env', (_label, context) => {
     const app = new App({ context });
     const stack = new AgentStack(app, 'LinearVaultOffStack', {

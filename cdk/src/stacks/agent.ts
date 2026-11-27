@@ -298,13 +298,16 @@ function linearAgentSessionsProps(
 
 /**
  * Whether the Linear OAuth token vault is deployed. An explicit context value wins;
- * otherwise `byDefault` (on when Linear and AgentCore are both deployed: see the call site).
+ * otherwise on when Linear and AgentCore are both deployed and MicroVMs are not
+ * (see the call site).
  */
-function resolveLinearIdentityVault(context: unknown, byDefault: boolean): boolean {
+function resolveLinearIdentityVault(
+  context: unknown, deployed: { readonly linear: boolean; readonly agentCore: boolean; readonly microvm: boolean },
+): boolean {
   if (context === true || context === 'true') return true;
   if (context === false || context === 'false') return false;
   if (context !== undefined) throw new Error('enableLinearIdentityVault must be true or false');
-  return byDefault;
+  return deployed.linear && deployed.agentCore && !deployed.microvm;
 }
 
 export class AgentStack extends Stack {
@@ -322,7 +325,7 @@ export class AgentStack extends Stack {
   /** Set when deployed with the Linear identity vault; the console then mints tokens through it. */
   public readonly linearIdentityVault?: LinearIdentityVault;
 
-  // eslint-disable-next-line complexity -- predates the ceiling (120; 108 when it landed); must not grow
+  // eslint-disable-next-line complexity -- predates the ceiling (119, down from 120; 108 when it landed); must not grow
   constructor(scope: Construct, id: string, props: AgentStackProps = {}) {
     super(scope, id, props);
 
@@ -506,12 +509,16 @@ export class AgentStack extends Stack {
     // has it, and the vault refreshes the Linear grant itself, so an idle workspace
     // cannot strand an expired refresh token in Secrets Manager. Deployments without
     // AgentCore default to Secrets Manager, and without Linear there is no grant to
-    // vault. `--context enableLinearIdentityVault=true|false` overrides the default
-    // (an explicit true without Linear still fails below). Resolved early so the
+    // vault. With the MicroVM backend it stays opt-in: the orchestrator then sends
+    // the vault keys to MicroVM runs, a guest image built before those keys were in
+    // the contract rejects every run, and a deploy does not rebuild the image.
+    // `--context enableLinearIdentityVault=true|false` overrides the default (an
+    // explicit true without Linear still fails below). Resolved early so the
     // runtime env map, the LinearIdentityVault construct and the token grants share
     // one predicate.
     const linearIdentityVaultEnabled = resolveLinearIdentityVault(
-      this.node.tryGetContext('enableLinearIdentityVault'), agentCoreEnabled && features.linear);
+      this.node.tryGetContext('enableLinearIdentityVault'),
+      { linear: features.linear, agentCore: agentCoreEnabled, microvm: lambdaMicrovmEnabled });
     if (linearIdentityVaultEnabled && !features.linear) {
       throw new Error('enableLinearIdentityVault requires the linear feature; enable Linear or drop the vault switch');
     }

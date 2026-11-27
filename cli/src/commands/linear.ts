@@ -1232,7 +1232,8 @@ export function makeLinearCommand(): Command {
               ? '  `--code` resumes the Secrets Manager authorization-code flow. A vault workspace '
                 + 'finishes its consent in one run — re-run without `--code`.'
               : `  The stack '${stackName}' publishes no LinearVaultConsentUrl, so its last deploy `
-                + 'had no Identity vault (no AgentCore, or `--context enableLinearIdentityVault=false`). '
+                + 'had no Identity vault (no AgentCore, MicroVMs without `--context enableLinearIdentityVault=true`, '
+                + 'or `--context enableLinearIdentityVault=false`). '
                 + 'Re-deploy with `--context enableLinearIdentityVault=true`, or move '
                 + 'this workspace off the vault deliberately by deleting its registry row first.'),
           );
@@ -1242,8 +1243,9 @@ export function makeLinearCommand(): Command {
           // availability, only this stack's outputs. Naming the real cause is what lets
           // an operator fix it, and the wrong cause sends them to the AWS region table.
           console.log(
-            `  Stack '${stackName}' has no Identity vault (deployed without AgentCore, or with `
-            + '`--context enableLinearIdentityVault=false`) — using Secrets Manager.',
+            `  Stack '${stackName}' has no Identity vault (deployed without AgentCore, with MicroVMs and without `
+            + '`--context enableLinearIdentityVault=true`, or with `--context enableLinearIdentityVault=false`) '
+            + '— using Secrets Manager.',
           );
         }
 
