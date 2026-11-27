@@ -34,7 +34,8 @@ describe('makeRegistryClient', () => {
     delete process.env.AGENT_REGISTRY_ID;
 
     expect(() => makeRegistryClient()).toThrow(
-      'remove registry:// refs or deploy with enableAgentRegistry=true',
+      'remove the registry:// refs from the repository record (declare the asset list as [] in the Blueprint, '
+      + 'or bgagent repo onboard <repo> --unset <column>) or deploy with enableAgentRegistry=true',
     );
   });
 });
