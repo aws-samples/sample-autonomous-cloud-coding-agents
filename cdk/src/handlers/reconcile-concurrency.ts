@@ -19,6 +19,7 @@
 
 import { DynamoDBClient, ScanCommand, QueryCommand, UpdateItemCommand } from '@aws-sdk/client-dynamodb';
 import { InvocationType, InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
+import { ACTIVE_STATUSES } from '../constructs/task-status';
 import { GRANT_HEALTH_PROBE_EVENT, isProbeTick } from './shared/linear-grant-health';
 import { logger } from './shared/logger';
 import { makeClient } from './shared/ua';
@@ -39,14 +40,13 @@ async function countActiveTasks(userId: string): Promise<number> {
       TableName: TASK_TABLE,
       IndexName: 'UserStatusIndex',
       KeyConditionExpression: 'user_id = :uid',
-      FilterExpression: '#s IN (:s1, :s2, :s3, :s4)',
+      // Every status that holds a seat, AWAITING_APPROVAL among them: a paused task
+      // keeps its seat, and leaving it out lets admission start a task over the cap.
+      FilterExpression: `#s IN (${ACTIVE_STATUSES.map((_, i) => `:s${i}`).join(', ')})`,
       ExpressionAttributeNames: { '#s': 'status' },
       ExpressionAttributeValues: {
         ':uid': { S: userId },
-        ':s1': { S: 'SUBMITTED' },
-        ':s2': { S: 'HYDRATING' },
-        ':s3': { S: 'RUNNING' },
-        ':s4': { S: 'FINALIZING' },
+        ...Object.fromEntries(ACTIVE_STATUSES.map((status, i) => [`:s${i}`, { S: status }])),
       },
       Select: 'COUNT',
       ExclusiveStartKey: lastKey,
