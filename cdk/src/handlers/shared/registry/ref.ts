@@ -26,9 +26,7 @@
 //     constraint = [^~]?MAJOR.MINOR.PATCH[-prerelease]   exact / caret / tilde only
 //
 // The `@<constraint>` pin is MANDATORY (fail-closed: no implicit "latest").
-// This grammar is mirrored byte-for-byte by `parse_ref` in
-// agent/src/registry/ref.py and exercised by the contracts/registry-resolution/
-// parity corpus. Keep the two in lockstep.
+// contracts/registry-resolution/ holds the golden vectors of this grammar.
 
 /** MVP asset kinds the registry loads end-to-end or stages. */
 export const REGISTRY_KINDS = [
@@ -86,9 +84,9 @@ export function parseConstraint(raw: string): ParsedConstraint | null {
   const major = Number(m[2]);
   const minor = Number(m[3]);
   const patch = Number(m[4]);
-  // Reject components beyond MAX_SAFE_INTEGER: `Number()` rounds them, so TS
-  // would silently compare a different value than Python's arbitrary-precision
-  // int — a cross-language parity break in version selection (#246 review).
+  // Reject components beyond MAX_SAFE_INTEGER: `Number()` rounds them, so
+  // version selection would silently compare a different value than the one
+  // written (#246 review).
   if (!Number.isSafeInteger(major) || !Number.isSafeInteger(minor) || !Number.isSafeInteger(patch)) {
     return null;
   }

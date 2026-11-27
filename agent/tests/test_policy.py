@@ -90,9 +90,8 @@ class TestReadOnlyPermissions:
 class TestReadOnlyMissingAttributeFailsClosed:
     """The read-only forbid rules are ``when { context.read_only == true }``.
     If ``read_only`` is ABSENT from the context, Cedar errors on the attribute
-    access, SKIPS the forbid rule, and the base permit wins → native Allow
-    (proven by contracts/cedar-parity/read-only-missing-attribute.json on both
-    engines). Production safety on this path therefore does NOT rest on Cedar's
+    access, SKIPS the forbid rule, and the base permit wins → native Allow.
+    Production safety on this path therefore does NOT rest on Cedar's
     native decision — it rests on ``_eval_tier`` re-raising on
     ``diagnostics.errors`` so the outer handler maps to a fail-closed DENY.
     These tests pin that re-raise + injection discipline (#248).

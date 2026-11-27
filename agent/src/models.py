@@ -213,7 +213,7 @@ class TaskConfig(BaseModel):
     task_id: str = ""
     # Inbound channel the task was submitted from (mirrors ChannelSource in
     # cdk/src/handlers/shared/types.ts: api | webhook | slack | linear | jira).
-    # Gates channel-specific MCP wiring and prompt additions. Empty string means
+    # Gates channel-specific reactions and prompt additions. Empty string means
     # "no channel context" (legacy / local).
     channel_source: str = ""
     channel_metadata: dict[str, str] = Field(default_factory=dict)

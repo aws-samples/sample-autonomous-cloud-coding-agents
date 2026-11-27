@@ -340,18 +340,13 @@ def _execute_agent_step(
         hydrated=hydrated,
         progress=progress,
         trajectory=trajectory,
-        # Pre-populate the products the pipeline already built so the
-        # clone_repo/hydrate_context handlers reuse them idempotently rather
-        # than redo setup or rebuild the prompt the pipeline already injected
-        # attachment context into.
+        # The products the pipeline already built, for the run_agent handler.
         setup=setup,
         system_prompt=system_prompt,
         user_prompt=prompt,
     )
     # Drive only the agentic step through the runner; clone, context assembly,
-    # and post-hooks stay on the inline path. only_kinds keeps the runner from
-    # re-running the deterministic steps the pipeline already owns (double clone
-    # / double PR).
+    # and post-hooks stay on the inline path.
     result = run_workflow(wf, ctx, only_kinds={"run_agent"})
 
     if ctx.agent_result is None:
@@ -596,7 +591,7 @@ def _apply_post_hook_gates(
     Decision (issue #301 acceptance criteria): the inline post-hook path
     CONSULTS each declared ``verify_build`` / ``verify_lint`` step's ``gate``
     through the runner's ``gate_status`` — the single place gate semantics live —
-    rather than routing the post-hooks through the runner's step handlers.
+    rather than routing the post-hooks through the runner.
     Routing through the runner would also change failure-path side effects (a
     gating ``verify_build`` with ``on_failure: fail`` stops the runner *before*
     ``ensure_pr``, stranding committed work with no PR), which is the broader
@@ -1520,11 +1515,9 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
             # declared gates (#301) the workflow declares.
             #
             # ``read_only`` comes from ``config`` — build_config already computed
-            # it and it drove Cedar during the run, so reusing it keeps the
-            # post-hook on the SAME verdict rather than re-deriving a
-            # possibly-divergent one. The ensure_pr STRATEGY and the verify-step
-            # GATES come from the workflow: the loader is memoized, so this is
-            # the object build_config loaded.
+            # it and it drove Cedar during the run. The ensure_pr STRATEGY and the
+            # verify-step GATES come from the workflow: the loader is memoized, so
+            # this is the object build_config loaded.
             from workflow import load_workflow
 
             workflow_read_only = config.read_only
@@ -2034,7 +2027,7 @@ def run_task_from_payload(payload: dict) -> dict:
     orchestrator payload (via the #502 S3 pointer). Previously the ECS boot
     command hand-listed a subset of ``run_task`` kwargs and silently dropped the
     rest — most visibly ``channel_source``/``channel_metadata``, whose absence
-    meant no Linear/Jira reactions and no channel MCP on ECS, plus ``build_command``,
+    meant no Linear/Jira reactions on ECS, plus ``build_command``,
     ``cedar_policies``, ``base_branch``/``merge_branches``, ``attachments``, etc.
 
     This maps the payload to ``run_task``'s real signature so no field can be

@@ -1424,8 +1424,7 @@ export type ApprovalStatus =
  * Cedar HITL severity, surfaced in the CLI approval prompt and used
  * for severity-gated channel routing (§11.2: high-severity rules
  * skip Slack-button auto-approval). Shared alias so the same literal
- * union is not redefined inline in `PendingApprovalSummary`,
- * `PolicyRuleSummary`, etc.
+ * union is not redefined inline in `PendingApprovalSummary`.
  */
 export type Severity = 'low' | 'medium' | 'high';
 
@@ -1574,9 +1573,9 @@ export const MICROVM_SLEEP_AFTER_S_DEFAULT = sharedConstants.microvm_sleep_after
  *
  * Sourced from ``contracts/constants.json`` (S9 — see
  * ``contracts/constants.md``). The same JSON is read by
- * ``agent/src/policy.py`` at import; the drift check
- * (``scripts/check-types-sync.ts``) verifies no other site declares
- * these constants as literals.
+ * ``agent/src/policy.py`` at import; the CLI mirrors the two bounds as
+ * literals, and the drift check (``scripts/check-types-sync.ts``)
+ * compares them with these.
  */
 export const APPROVAL_GATE_CAP_MIN = sharedConstants.approval_gate_cap.min;
 export const APPROVAL_GATE_CAP_MAX = sharedConstants.approval_gate_cap.max;

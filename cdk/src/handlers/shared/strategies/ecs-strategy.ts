@@ -246,7 +246,7 @@ export class EcsComputeStrategy implements ComputeStrategy {
     //    model_id→anthropic_model, filter to accepted params, coerce str/int).
     //    This replaces an older hand-listed kwarg subset that silently dropped
     //    fields such as channel_source/channel_metadata (which meant no
-    //    Linear/Jira reactions or channel MCP on ECS), build_command,
+    //    Linear/Jira reactions on ECS), build_command,
     //    cedar_policies, base_branch/merge_branches, attachments, trace, user_id,
     //    etc. Single source of truth in the agent, unit-tested (see
     //    test_run_task_from_payload).

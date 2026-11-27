@@ -48,7 +48,7 @@ const FANOUT_MEMORY_MB = 256;
  * Properties for `FanOutConsumer` — the Phase 1b §8.9 fan-out plane
  * consumer that reads `TaskEventsTable` via DynamoDB Streams and
  * dispatches interesting events to non-interactive channels (Slack,
- * GitHub PR comments, email).
+ * GitHub PR comments).
  */
 export interface FanOutConsumerProps {
   /** The TaskEventsTable whose stream this consumer reads from. Must
@@ -59,8 +59,7 @@ export interface FanOutConsumerProps {
    * TaskTable — the GitHub dispatcher needs read access to resolve
    * repo + pr_number + existing github_comment_id for a task, and
    * write access to persist the comment_id + etag after an upsert.
-   * Optional: if omitted, the GitHub dispatcher skips (log-only) and
-   * Slack / Email continue to run as stubs.
+   * Optional: if omitted, the GitHub dispatcher skips (log-only).
    */
   readonly taskTable?: dynamodb.ITable;
 

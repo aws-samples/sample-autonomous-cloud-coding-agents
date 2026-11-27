@@ -43,7 +43,7 @@ export function parseVersion(raw: string): SemVer | null {
   const minor = Number(m[2]);
   const patch = Number(m[3]);
   // Match parseConstraint: reject components `Number()` would round past
-  // MAX_SAFE_INTEGER, so a candidate version compares identically in TS and Py.
+  // MAX_SAFE_INTEGER.
   if (!Number.isSafeInteger(major) || !Number.isSafeInteger(minor) || !Number.isSafeInteger(patch)) {
     return null;
   }
@@ -77,7 +77,7 @@ function comparePrerelease(a: readonly string[], b: readonly string[]): number {
     const an = isNumeric(ai);
     const bn = isNumeric(bi);
     // BigInt, not Number: above 2^53 two different identifiers are the same double and
-    // would tie here, where the Python resolver (exact integers) tells them apart.
+    // would tie here.
     if (an && bn) return Number(BigInt(ai) - BigInt(bi));
     if (an) return -1; // numeric identifiers have lower precedence than alphanumeric
     if (bn) return 1;

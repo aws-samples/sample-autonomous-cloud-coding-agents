@@ -76,13 +76,13 @@ export class TaskEventsTable extends Construct {
       pointInTimeRecoverySpecification: {
         pointInTimeRecoveryEnabled: props.pointInTimeRecovery ?? true,
       },
-      // DynamoDB Streams feed the Phase 1b fan-out plane (Slack, GitHub comments,
-      // email) via a Lambda subscriber. NEW_IMAGE is sufficient — consumers only
+      // DynamoDB Streams feed the Phase 1b fan-out plane (Slack, GitHub comments)
+      // via a Lambda subscriber. NEW_IMAGE is sufficient — consumers only
       // need the event payload, not old/new diffs. Enabling Streams on an existing
       // table is an in-place CloudFormation update (no table replacement).
       //
       // CONSUMER BUDGET (Chunk 8 architectural note): this stream currently
-      // has TWO consumers: `FanOutConsumer` (Slack / GitHub / email dispatch)
+      // has TWO consumers: `FanOutConsumer` (Slack / GitHub dispatch)
       // and `ApprovalMetricsPublisherConsumer` (Cedar-HITL EMF emission for
       // the CloudWatch dashboard widgets in §11.3). DynamoDB Streams are
       // designed for up to 2 concurrent consumers per shard before throughput

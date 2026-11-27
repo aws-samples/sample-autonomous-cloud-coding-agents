@@ -3,8 +3,7 @@
 Loads every ``contracts/workflow-validation/*.json`` fixture and asserts that
 ``workflow.validate_workflow(fixture.workflow)`` returns exactly the fixture's
 ``expected`` violation set. This is the golden contract that a Phase-4 (#246)
-second validator implementation must also reproduce — mirroring the
-cross-engine pattern in ``test_cedar_parity.py``.
+second validator implementation must also reproduce.
 
 If the validator and a fixture disagree, CI fails before the change ships:
 either the validator regressed, or the fixture must be updated as a recorded

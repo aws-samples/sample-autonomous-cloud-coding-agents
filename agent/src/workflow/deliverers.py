@@ -219,7 +219,7 @@ def _post_comment(ctx: StepContext) -> bool:
 def deliver(target: str, ctx: StepContext) -> DeliveryResult:
     """Run the named deliverer against the step context.
 
-    Raises ``ValueError`` for an unknown target (the validator's handler-coverage
+    Raises ``ValueError`` for an unknown target (the validator's rule 8 target
     check should prevent this reaching runtime, but fail loud rather than
     silently no-op).
     """

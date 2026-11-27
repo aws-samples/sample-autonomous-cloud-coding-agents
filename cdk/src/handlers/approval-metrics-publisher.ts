@@ -22,7 +22,7 @@
  *
  * DynamoDB Streams on ``TaskEventsTable`` deliver NEW_IMAGE records to
  * this Lambda as consumer #2 alongside ``FanOutConsumer`` (consumer #1,
- * Slack/GitHub/email dispatch). We filter to Cedar-HITL approval
+ * Slack/GitHub dispatch). We filter to Cedar-HITL approval
  * milestones (``approval_requested`` / ``approval_granted`` /
  * ``approval_denied`` / ``approval_timed_out`` /
  * ``approval_timeout_capped``) and emit EMF log lines from which

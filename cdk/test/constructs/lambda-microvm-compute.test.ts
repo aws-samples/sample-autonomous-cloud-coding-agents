@@ -843,8 +843,8 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
   test('execution role gets the channel-OAuth PREFIX grant, GetSecretValue only', () => {
     // Per-workspace secrets are created by the CLI at setup, so the name is
     // unknown at synth and a prefix is the only expressible scope (mirroring
-    // ecs-agent-cluster). Without it a Linear/Jira task's 👀→✅ reaction and the
-    // channel MCP silently no-op.
+    // ecs-agent-cluster). Without it a Linear/Jira task's 👀→✅ reaction
+    // silently no-ops.
     const prefixStatement = executionRoleStatements().find(
       statement => JSON.stringify(statement.Resource ?? '').includes('bgagent-linear-oauth-*'),
     )!;

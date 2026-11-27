@@ -861,10 +861,9 @@ describe('AgentRegistryClient', () => {
       status: 'APPROVED',
     });
 
-  // A block that holds no YAML document is a record without frontmatter, as it is for
-  // the agent's reader (`yaml.safe_load` gives None there). It is not corrupt, so it must
-  // not be reported as MALFORMED; with no runtime it still cannot resolve. js-yaml 4
-  // returned undefined for such a block and js-yaml 5 throws on it.
+  // A block that holds no YAML document is a record without frontmatter. It is not
+  // corrupt, so it must not be reported as MALFORMED; with no runtime it still cannot
+  // resolve. js-yaml 4 returned undefined for such a block and js-yaml 5 throws on it.
   test.each([
     ['is empty', '---\n\n---\n# body'],
     ['has only blank lines', '---\n  \n\n---\n# body'],
@@ -926,7 +925,7 @@ describe('AgentRegistryClient', () => {
 
   // --- an absent payload is an empty record, not a corrupt one ----------------
 
-  // The agent's reader gives every row the same answer, so both adapters reject a pin of such a record as REMOVED (#781).
+  // A pin of such a record is rejected as REMOVED (#781).
   test.each([
     ['CUSTOM', 'descriptors is null', null],
     ['CUSTOM', 'custom is null', { custom: null }],
@@ -963,7 +962,7 @@ describe('AgentRegistryClient', () => {
   });
 
   // `??` stands in for null and undefined only, so an empty string, 0 and false reach JSON.parse.
-  // JSON.parse rejects NaN and Infinity, which the agent's reader has to be told to refuse.
+  // JSON.parse rejects NaN and Infinity.
   test.each([
     ['CUSTOM', 'is an empty string', { custom: { data: '' } }],
     ['MCP', 'is an empty string', { mcpServer: { data: '' } }],

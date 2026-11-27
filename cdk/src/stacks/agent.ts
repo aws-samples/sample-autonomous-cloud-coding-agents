@@ -2012,12 +2012,11 @@ export class AgentStack extends Stack {
 
     // --- Fan-out plane consumer ---
     // Consumes TaskEventsTable DynamoDB Streams and dispatches events to
-    // Slack / GitHub / Linear / email per per-channel default filters.
+    // Slack / GitHub / Linear / Jira per per-channel default filters.
     // GitHub dispatcher edits a single issue comment in place; Slack
     // dispatcher reads per-workspace bot tokens from
     // ``bgagent/slack/*``; Linear dispatcher posts a single
     // deterministic final-status comment with cost/turns/duration.
-    // Email remains a log-only stub until SES wires.
     const trackers = [linearIntegration, jiraIntegration].filter(tracker => tracker !== undefined);
     const fanOutConsumer = new FanOutConsumer(this, 'FanOutConsumer', {
       taskEventsTable: taskEventsTable.table,

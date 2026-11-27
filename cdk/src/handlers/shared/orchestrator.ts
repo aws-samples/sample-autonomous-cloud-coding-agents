@@ -801,8 +801,8 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
 
   // Registry cedar_policy_module assets (#246, PR 3) reach the agent through the
   // SAME cedar_policies payload field as inline blueprint policies, so they are
-  // byte-identical from the PolicyEngine's view (the cedar-parity contract holds
-  // by construction). Inline blueprint policies come first, then resolved modules.
+  // byte-identical from the PolicyEngine's view. Inline blueprint policies come
+  // first, then resolved modules.
   //
   // Fail-closed: a pinned module whose cedar_text is empty/whitespace must fail
   // the task, not be silently dropped — a dropped policy is usually a *deny* rule,

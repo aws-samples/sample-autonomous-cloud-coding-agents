@@ -1,6 +1,6 @@
 """Reproduce and verify the subprocess-in-background-thread issue.
 
-Simulates the exact server.py → entrypoint.py architecture:
+Simulates the exact server.py → pipeline.py architecture:
   - Main thread runs an asyncio event loop (like uvicorn)
   - Background thread runs sync work, then async subprocess I/O
 

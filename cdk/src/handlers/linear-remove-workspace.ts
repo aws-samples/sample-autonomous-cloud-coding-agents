@@ -87,7 +87,7 @@ const REMOVABLE_ROW = '#status = :active OR (#status = :revoked AND (attribute_n
  * different package), `cdk/src/constructs/linear-identity-vault.ts:51`
  * (`LINEAR_CREDENTIAL_PROVIDER_PREFIX`, would drag `aws-cdk-lib` into the
  * function bundle), and the IAM resource pattern
- * `bgagent-linear-oauth-*` at `linear-integration.ts:519`, which is what
+ * `bgagent-linear-oauth-*` in `linear-integration.ts`, which is what
  * makes the by-name delete permitted. Changing the convention means changing
  * all four.
  */

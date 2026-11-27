@@ -1,10 +1,10 @@
 """Shared base prompt — identity, environment, and rules.
 
-Placeholders replaced at runtime by entrypoint.py:
+Placeholders replaced at runtime by prompt_builder.py:
   {repo_url}          — GitHub repo (owner/repo)
   {task_id}           — Unique task identifier
   {workspace}         — Workspace root (AGENT_WORKSPACE env var, default /workspace)
-  {branch_name}       — Git branch created by the entrypoint
+  {branch_name}       — Git branch created by repo.setup_repo
   {default_branch}    — Repository default branch (e.g. main, master)
   {max_turns}         — Maximum agent turns for this task
   {build_command}     — Build command of the repository (the Blueprint's, else mise run build)

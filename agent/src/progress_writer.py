@@ -3,7 +3,7 @@
 
 """Write structured progress events to DynamoDB TaskEventsTable.
 
-Follows the same patterns as ``_TrajectoryWriter`` in ``entrypoint.py``:
+Follows the same patterns as ``_TrajectoryWriter`` in ``telemetry.py``:
   - Lazy boto3 client initialization
   - Best-effort, fail-open (never crash the agent)
   - Circuit breaker: disable after 3 consecutive *transient* DDB write

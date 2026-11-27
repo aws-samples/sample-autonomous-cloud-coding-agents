@@ -206,8 +206,7 @@ class TestApplyPostHookGates:
         )
 
     def test_workflow_none_falls_back_to_legacy(self):
-        # Post-hook reload failed: build keeps legacy regression-only gating,
-        # lint never gates — a corrupt file cannot strand the agent's work.
+        # No workflow: build keeps legacy regression-only gating, lint never gates.
         assert not _apply_post_hook_gates(
             None,
             read_only=False,

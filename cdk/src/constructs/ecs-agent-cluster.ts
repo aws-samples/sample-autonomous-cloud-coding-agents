@@ -645,11 +645,11 @@ export class EcsAgentCluster extends Construct {
     // `bgagent-linear-oauth-*` (written by the CLI at setup). For a
     // Linear/Jira-channel task the agent resolves that token at startup
     // (config.resolve_linear_api_token / resolve_jira_oauth_token) to fire the
-    // 👀→✅ reaction and drive the channel MCP. The AgentCore runtime role +
+    // 👀→✅ reaction. The AgentCore runtime role +
     // orchestrator/fanout/screenshot roles all have this prefix grant; the ECS
     // task role did NOT, so on ECS the token fetch hit AccessDenied and
-    // reactions/MCP no-op'd — logged by config.py's token resolver, not silent,
-    // but the channel effect (no 👀→✅, no MCP) is invisible to the user.
+    // reactions no-op'd — logged by config.py's token resolver, not silent,
+    // but the channel effect (no 👀→✅) is invisible to the user.
     // GetSecretValue only — the container reads the token; the orchestrator owns
     // refresh/PutSecretValue.
     const channelOauthSecretPatterns = props.channelOauthSecretPatterns ?? CHANNEL_OAUTH_SECRET_PATTERNS;

@@ -39,8 +39,6 @@ describe('registry resolver — parseVersion', () => {
     expect(parseVersion('latest')).toBeNull();
   });
   test('rejects a digit outside ASCII and a component too long to be a safe integer', () => {
-    // The reference for the Python mirror, where \d and int() accept U+0662 (ARABIC-INDIC
-    // DIGIT TWO) and int() refuses more than 4300 digits (agent/tests/test_registry_resolver.py).
     expect(parseVersion('1.1\u0662.0')).toBeNull();
     expect(parseVersion(`1.${'9'.repeat(4301)}.0`)).toBeNull();
   });
@@ -59,7 +57,7 @@ describe('registry resolver — compareVersions', () => {
   });
   test('numeric prerelease identifiers above 2^53 are compared exactly', () => {
     // As JavaScript numbers 9007199254740993 and ...992 are the same value, so the two
-    // tied and the first one seen won. The Python resolver compares exact integers.
+    // tied and the first one seen won.
     expect(compareVersions(V('1.0.0-9007199254740993'), V('1.0.0-9007199254740992'))).toBeGreaterThan(0);
     expect(compareVersions(V('1.0.0-9007199254740992'), V('1.0.0-9007199254740993'))).toBeLessThan(0);
   });
@@ -108,7 +106,6 @@ describe('registry resolver — selectHighest', () => {
   test('skips unparseable candidate strings', () => {
     expect(selectHighest(['garbage', '1.0.0', 'also-bad'], C('^1.0.0'))).toBe('1.0.0');
   });
-  // The Python resolver has to pick the same winners: agent/tests/test_registry_resolver.py.
   test('an exact pin returns the pinned version, whatever the order of the candidates', () => {
     expect(selectHighest(['1.0.0-rc.01', '1.0.0-rc.1'], C('1.0.0-rc.1'))).toBe('1.0.0-rc.1');
     expect(selectHighest(['1.0.0-rc.1', '1.0.0-rc.01'], C('1.0.0-rc.01'))).toBe('1.0.0-rc.01');
