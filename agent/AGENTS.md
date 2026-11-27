@@ -9,8 +9,8 @@ You maintain the **Python agent runtime** bundled into the CDK-deployed image: p
 ```bash
 mise //agent:quality         # lint, format, type-check, dead code, pytest
 mise //agent:security        # agent-scoped security checks
-cd agent && uv run pytest -v # verbose single run
-cd agent && uv run pytest tests/test_progress_writer.py -v
+mise //agent:testf -- -v     # pytest without coverage: the whole suite, verbose
+mise //agent:testf -- tests/test_progress_writer.py -v
 ```
 
 Root `mise run build` includes `//agent:quality` in parallel with `//cdk:build`. Its test step (`mise //agent:test`) writes a JUnit report to `agent/test-reports/junit.xml`, which git and the image build ignore; `build.yml` uploads it when the build job fails.
@@ -20,8 +20,8 @@ The lint step of `//agent:quality` (`lint:fix`) applies ruff's automatic fixes a
 ## Testing
 
 - **Full quality gate:** `mise //agent:quality`
-- **Verbose pytest:** `cd agent && uv run pytest -v`
-- **Single file:** `cd agent && uv run pytest tests/test_hooks.py -k test_name`
+- **Verbose pytest:** `mise //agent:testf -- -v`
+- **Single file:** `mise //agent:testf -- tests/test_hooks.py -k test_name`
 - **With coverage:** see `agent/mise.toml` / `pyproject.toml` for project defaults
 
 | Code | Test location |

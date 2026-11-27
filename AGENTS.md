@@ -38,7 +38,7 @@ The date is the first day on which the entry no longer applies. From that day th
 
 Package commands: [cdk/AGENTS.md](./cdk/AGENTS.md), [cli/AGENTS.md](./cli/AGENTS.md), [web/AGENTS.md](./web/AGENTS.md), [agent/AGENTS.md](./agent/AGENTS.md), [docs/AGENTS.md](./docs/AGENTS.md).
 
-Run `mise tasks --all` for the full list. Prefer mise tasks over raw `jest`, `tsc`, or `cdk` for full suites; package guides show targeted `npx jest` / `uv run pytest` for single files.
+Run `mise tasks --all` for the full list. Prefer mise tasks over raw `jest`, `tsc`, or `cdk`. For one file, cdk, cli, web and agent each have a focused test task: `mise //<package>:testf -- <path>`, with the path relative to the package directory (the package guides show examples).
 
 ## Git workflow
 
