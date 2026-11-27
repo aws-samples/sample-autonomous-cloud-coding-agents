@@ -17,13 +17,14 @@
  *  SOFTWARE.
  */
 
-import { createWriteStream, existsSync } from 'node:fs';
+import { lstatSync } from 'node:fs';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 import { createGunzip } from 'node:zlib';
 import { Command } from 'commander';
 import { ApiClient } from '../api-client';
+import { prepareSecretFile } from '../config';
 import { ApiError, CliError } from '../errors';
 
 /**
@@ -64,9 +65,6 @@ function isZlibError(err: unknown): boolean {
  * Output contract:
  *   * Default (stdout):       gunzipped JSONL (pipe-friendly for ``jq -s .``)
  *   * ``-o <file>`` (file):   raw gzipped bytes (preserves the artifact as-is)
- *
- * The server returns a 15-minute presigned URL; we stream from S3
- * directly so multi-MB artifacts don't buffer in CLI memory.
  */
 export function makeTraceCommand(): Command {
   const trace = new Command('trace').description('--trace artifact commands (design §10.1)');
@@ -88,11 +86,12 @@ export function makeTraceCommand(): Command {
       // away an earlier artifact they wanted to keep. Check is done
       // BEFORE the presigned-URL fetch so we also skip the S3 round
       // trip on the refusal path.
-      if (opts.output && !opts.force && existsSync(opts.output)) {
+      if (opts.output && !opts.force && lstatSync(opts.output, { throwIfNoEntry: false })) {
         throw new CliError(
           `Refusing to overwrite existing file ${opts.output}. Pass --force to overwrite.`,
         );
       }
+      const writeOutput = opts.output ? prepareSecretFile(opts.output) : undefined;
 
       const client = new ApiClient();
 
@@ -154,11 +153,11 @@ export function makeTraceCommand(): Command {
         // fetch response body matches.
         const nodeReadable = Readable.fromWeb(s3Response.body as unknown as WebReadableStream);
 
-        if (opts.output) {
+        if (writeOutput) {
           // -o <file>: write raw gzipped bytes as-is. Preserves the
           // artifact for archival / re-inspection with standard tools
           // (``zcat file | jq -s .``). No gunzip → no zlib errors to wrap.
-          await pipeline(nodeReadable, createWriteStream(opts.output));
+          writeOutput(Buffer.concat(await nodeReadable.toArray()));
           // Status line on stderr so it does not pollute stdout (which
           // users may be piping through other tools).
           console.error(`Wrote ${opts.output}`);
