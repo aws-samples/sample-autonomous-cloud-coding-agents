@@ -1052,6 +1052,8 @@ def _authenticated_test_transport(monkeypatch):
     import payload_bootstrap
 
     _run_documents.clear()
+    # The signed URLs below are for this worker Region.
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
     monkeypatch.setattr(
         payload_bootstrap,
         "_manifest",

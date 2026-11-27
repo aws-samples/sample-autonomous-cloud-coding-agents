@@ -42,6 +42,7 @@ def signed_url(task_id="task-1", bucket="payload-bucket", region="us-east-1"):
 
 @pytest.fixture
 def transport(monkeypatch):
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
     config = {
         "task_table_name": "Tasks",
         "task_events_table_name": "Events",
@@ -227,6 +228,39 @@ def test_download_reference_rejects_wrong_task_hosts_redirect_coordinates_and_am
     transport, url
 ):
     transport["reference"]["payload_url"] = url
+    with pytest.raises(ValueError, match="exact S3 object"):
+        bootstrap.resolve_payload_reference(transport["reference"], "lambda-microvm")
+    transport["opener"].open.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        # Bucket names are unique only inside one partition.
+        signed_url(region="us-gov-west-1"),
+        signed_url(region="cn-north-1"),
+        signed_url(region="us-west-2"),
+        signed_url().replace("amazonaws.com/", "amazonaws.com.cn/"),
+    ],
+    ids=["govcloud", "china", "other-region", "china-suffix"],
+)
+def test_download_reference_must_sign_for_the_workers_own_region(transport, url):
+    transport["reference"]["payload_url"] = url
+    with pytest.raises(ValueError, match="exact S3 object"):
+        bootstrap.resolve_payload_reference(transport["reference"], "lambda-microvm")
+    transport["opener"].open.assert_not_called()
+
+
+def test_a_china_region_worker_reads_its_amazonaws_com_cn_endpoint(transport, monkeypatch):
+    monkeypatch.setenv("AWS_REGION", "cn-north-1")
+    transport["reference"]["payload_url"] = signed_url(region="cn-north-1")
+    payload, _ = bootstrap.resolve_payload_reference(transport["reference"], "lambda-microvm")
+    assert payload == transport["payload"]
+
+
+def test_a_worker_without_a_region_reads_no_payload(transport, monkeypatch):
+    monkeypatch.delenv("AWS_REGION")
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
     with pytest.raises(ValueError, match="exact S3 object"):
         bootstrap.resolve_payload_reference(transport["reference"], "lambda-microvm")
     transport["opener"].open.assert_not_called()

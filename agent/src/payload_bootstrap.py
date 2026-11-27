@@ -93,7 +93,12 @@ def _manifest(uri: str, backend: str) -> tuple[str, dict]:
 
 
 def _payload_url(url: str, bucket: str, task_id: str) -> None:
-    """Permit only the exact object's regional S3 HTTPS endpoint, without redirects."""
+    """Permit only the exact object's S3 HTTPS endpoint in this worker's Region.
+
+    Bucket names are unique only inside one partition, so the Region comes from
+    the worker's environment, never from the URL alone.
+    """
+    worker_region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
     try:
         parsed = urlsplit(url)
         query = parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True)
@@ -103,7 +108,8 @@ def _payload_url(url: str, bucket: str, task_id: str) -> None:
         if (
             service != "s3"
             or terminator != "aws4_request"
-            or not re.fullmatch(r"[a-z]{2}(?:-[a-z]+)+-\d", region)
+            or not worker_region
+            or region != worker_region
             or query["X-Amz-Algorithm"] != ["AWS4-HMAC-SHA256"]
             or query["X-Amz-SignedHeaders"] != ["host"]
             or not re.fullmatch(r"[a-f0-9]{64}", query["X-Amz-Signature"][0])
