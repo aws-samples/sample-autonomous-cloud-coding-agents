@@ -39,7 +39,6 @@ const secretCache = cachedSecrets({
  */
 export const getGitHubWebhookSecret = secretCache.get;
 
-/** Drop a cached webhook secret — used on suspected rotation. */
 export const invalidateGitHubWebhookSecretCache = secretCache.invalidate;
 
 /**

@@ -53,11 +53,6 @@ const MAX_TIMESTAMP_AGE_S = MAX_TIMESTAMP_AGE_MINUTES * 60;
  */
 export const getSlackSecret = secretCache.get;
 
-/**
- * Explicitly drop a cached secret. Called when rotation is suspected —
- * e.g. signature verification fails with an otherwise valid-looking request.
- * @param secretId - the Secrets Manager secret ID or ARN to evict.
- */
 export const invalidateSlackSecretCache = secretCache.invalidate;
 
 /**

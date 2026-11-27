@@ -133,7 +133,6 @@ export async function verifyWithRefetch(
     return true;
   }
 
-  secrets.invalidate(secretId);
   const fresh = await secrets.get(secretId, true);
   if (!fresh) return false;
   if (fresh === cached) return false;
