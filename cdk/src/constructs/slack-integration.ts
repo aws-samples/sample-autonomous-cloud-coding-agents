@@ -51,8 +51,11 @@ export interface SlackIntegrationProps {
   /** The existing REST API to add Slack routes to. */
   readonly api: apigw.RestApi;
 
-  /** Cognito user pool for the /slack/link endpoint (Cognito-authenticated). */
+  /** Cognito user pool in which the budget check looks up the groups of a user. */
   readonly userPool: cognito.IUserPool;
+
+  /** Cognito authorizer of `api`, for the /slack/link route. */
+  readonly linkAuthorizer: apigw.IAuthorizer;
 
   /** The DynamoDB task table. */
   readonly taskTable: dynamodb.ITable;
@@ -191,13 +194,8 @@ export class SlackIntegration extends Construct {
       resources: [slackSecretArnPrefix],
     });
 
-    // --- Cognito Authorizer (for /slack/link endpoint) ---
-    const cognitoAuthorizer = new apigw.CognitoUserPoolsAuthorizer(this, 'SlackCognitoAuthorizer', {
-      cognitoUserPools: [props.userPool],
-    });
-
     const cognitoAuthOptions: apigw.MethodOptions = {
-      authorizer: cognitoAuthorizer,
+      authorizer: props.linkAuthorizer,
       authorizationType: apigw.AuthorizationType.COGNITO,
     };
 

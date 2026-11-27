@@ -723,6 +723,15 @@ describe('AgentStack', () => {
     template.resourceCountIs('AWS::Cognito::UserPool', 1);
   });
 
+  test('the Cognito routes of Slack, Linear and Jira are behind the authorizer of TaskApi, the only Cognito authorizer of the root stack', () => {
+    const authorizers = Object.keys(template.findResources('AWS::ApiGateway::Authorizer', { Properties: { Type: 'COGNITO_USER_POOLS' } }));
+    expect(authorizers).toEqual([expect.stringMatching(/^TaskApiAuthorizer/)]);
+    const routes = Object.entries(template.findResources('AWS::ApiGateway::Method'))
+      .filter(([logicalId]) => /^TaskApi(slacklinkPOST|linearlinkPOST|linearworkspacesslugDELETE|jiralinkPOST)/.test(logicalId));
+    expect(routes).toHaveLength(4);
+    for (const [, route] of routes) expect(route.Properties.AuthorizerId).toEqual({ Ref: authorizers[0] });
+  });
+
   test('sets 90-day retention on runtime log groups', () => {
     template.hasResourceProperties('AWS::Logs::LogGroup', {
       LogGroupName: Match.stringLikeRegexp('APPLICATION_LOGS'),

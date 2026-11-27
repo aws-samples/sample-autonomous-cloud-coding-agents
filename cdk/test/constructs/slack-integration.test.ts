@@ -45,6 +45,7 @@ describe('SlackIntegration construct', () => {
     new SlackIntegration(stack, 'SlackIntegration', {
       api,
       userPool,
+      linkAuthorizer: new apigw.CognitoUserPoolsAuthorizer(stack, 'TestAuthorizer', { cognitoUserPools: [userPool] }),
       taskTable,
       taskEventsTable,
     });
@@ -102,6 +103,19 @@ describe('SlackIntegration construct', () => {
     });
     template.hasResourceProperties('AWS::ApiGateway::Resource', {
       PathPart: 'interactions',
+    });
+  });
+
+  test('POST on link is behind the authorizer handed to the construct, the only one in the stack', () => {
+    const authorizers = Object.keys(template.findResources('AWS::ApiGateway::Authorizer'));
+    expect(authorizers).toEqual([expect.stringMatching(/^TestAuthorizer/)]);
+    const resources = Object.keys(template.findResources('AWS::ApiGateway::Resource', { Properties: { PathPart: 'link' } }));
+    expect(resources).toHaveLength(1);
+    template.hasResourceProperties('AWS::ApiGateway::Method', {
+      HttpMethod: 'POST',
+      ResourceId: { Ref: resources[0] },
+      AuthorizationType: 'COGNITO_USER_POOLS',
+      AuthorizerId: { Ref: authorizers[0] },
     });
   });
 

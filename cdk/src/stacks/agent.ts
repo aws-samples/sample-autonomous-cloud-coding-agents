@@ -311,7 +311,7 @@ export class AgentStack extends Stack {
   /** Set when deployed with the Linear identity vault; the console then mints tokens through it. */
   public readonly linearIdentityVault?: LinearIdentityVault;
 
-  // eslint-disable-next-line complexity -- predates the ceiling (120; 108 when it landed); must not grow
+  // eslint-disable-next-line complexity -- predates the ceiling (116; 108 when it landed); must not grow
   constructor(scope: Construct, id: string, props: AgentStackProps = {}) {
     super(scope, id, props);
 
@@ -1639,6 +1639,7 @@ export class AgentStack extends Stack {
       const slackIntegration = new SlackIntegration(this, 'SlackIntegration', {
         api: taskApi.api,
         userPool: taskApi.userPool,
+        linkAuthorizer: taskApi.cognitoAuthorizer,
         taskTable: taskTable.table,
         taskEventsTable: taskEventsTable.table,
         budgetTable: budgetTable.table,
@@ -1733,6 +1734,7 @@ export class AgentStack extends Stack {
       identityVault: linearIdentityVault,
       api: taskApi.api,
       userPool: taskApi.userPool,
+      linkAuthorizer: taskApi.cognitoAuthorizer,
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
       budgetTable: budgetTable.table,
@@ -1938,6 +1940,7 @@ export class AgentStack extends Stack {
     const jiraIntegration = features.jira ? new JiraIntegration(this, 'JiraIntegration', {
       api: taskApi.api,
       userPool: taskApi.userPool,
+      linkAuthorizer: taskApi.cognitoAuthorizer,
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
       budgetTable: budgetTable.table,

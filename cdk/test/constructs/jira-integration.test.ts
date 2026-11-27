@@ -52,6 +52,7 @@ describe('JiraIntegration construct', () => {
     new JiraIntegration(stack, 'JiraIntegration', {
       api,
       userPool,
+      linkAuthorizer: new apigw.CognitoUserPoolsAuthorizer(stack, 'TestAuthorizer', { cognitoUserPools: [userPool] }),
       taskTable,
       taskEventsTable,
       orchestrationTable,
@@ -75,6 +76,19 @@ describe('JiraIntegration construct', () => {
     expect(table.Properties.KeySchema).toEqual([{ AttributeName: partitionKey, KeyType: 'HASH' }]);
     expect(table.Properties.TimeToLiveSpecification?.AttributeName).toBe(ttlAttribute);
     expect((table.Properties.GlobalSecondaryIndexes ?? []).map((index: { IndexName: string }) => index.IndexName)).toEqual(indexNames);
+  });
+
+  test('POST on link is behind the authorizer handed to the construct, the only one in the stack', () => {
+    const authorizers = Object.keys(template.findResources('AWS::ApiGateway::Authorizer'));
+    expect(authorizers).toEqual([expect.stringMatching(/^TestAuthorizer/)]);
+    const resources = Object.keys(template.findResources('AWS::ApiGateway::Resource', { Properties: { PathPart: 'link' } }));
+    expect(resources).toHaveLength(1);
+    template.hasResourceProperties('AWS::ApiGateway::Method', {
+      HttpMethod: 'POST',
+      ResourceId: { Ref: resources[0] },
+      AuthorizationType: 'COGNITO_USER_POOLS',
+      AuthorizerId: { Ref: authorizers[0] },
+    });
   });
 
   test('creates one Secrets Manager secret (webhook signing) — OAuth tokens are CLI-created at runtime', () => {

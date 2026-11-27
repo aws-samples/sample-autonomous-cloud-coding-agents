@@ -68,8 +68,11 @@ export interface JiraIntegrationProps {
   /** The existing REST API to add Jira routes to. */
   readonly api: apigw.RestApi;
 
-  /** Cognito user pool for the /jira/link endpoint (Cognito-authenticated). */
+  /** Cognito user pool in which the budget check looks up the groups of a user. */
   readonly userPool: cognito.IUserPool;
+
+  /** Cognito authorizer of `api`, for the /jira/link route. */
+  readonly linkAuthorizer: apigw.IAuthorizer;
 
   /** The DynamoDB task table. */
   readonly taskTable: dynamodb.ITable;
@@ -275,12 +278,8 @@ export class JiraIntegration extends Construct implements FeedbackTracker {
       );
     }
 
-    // --- Cognito Authorizer (for /jira/link) ---
-    const cognitoAuthorizer = new apigw.CognitoUserPoolsAuthorizer(this, 'JiraCognitoAuthorizer', {
-      cognitoUserPools: [props.userPool],
-    });
     const cognitoAuthOptions: apigw.MethodOptions = {
-      authorizer: cognitoAuthorizer,
+      authorizer: props.linkAuthorizer,
       authorizationType: apigw.AuthorizationType.COGNITO,
     };
     const noneAuthOptions: apigw.MethodOptions = {

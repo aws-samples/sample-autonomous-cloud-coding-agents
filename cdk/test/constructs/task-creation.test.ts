@@ -153,7 +153,8 @@ test.each([
 ] as const)('%s gives its %s the environment and the access of task creation', (id, processor, Integration) => {
   const stack = new Stack(new App(), 'TestStack');
   const inputs = inputsWithoutBucket(stack);
-  new Integration(stack, id, { api: new apigw.RestApi(stack, 'Api'), ...inputs });
+  const linkAuthorizer = new apigw.CognitoUserPoolsAuthorizer(stack, 'Authorizer', { cognitoUserPools: [inputs.userPool] });
+  new Integration(stack, id, { api: new apigw.RestApi(stack, 'Api'), linkAuthorizer, ...inputs });
   const template = Template.fromStack(stack);
   const ofProcessor = (type: string) => {
     const found = Object.entries(template.findResources(type)).filter(([logicalId]) => logicalId.startsWith(id + processor));
@@ -167,7 +168,9 @@ test.each([
 
 test('SlackIntegration hands on no bucket, whatever its props object carries', () => {
   const stack = new Stack(new App(), 'TestStack');
-  new SlackIntegration(stack, 'SlackIntegration', { api: new apigw.RestApi(stack, 'Api'), ...allInputs(stack) });
+  const inputs = allInputs(stack);
+  const linkAuthorizer = new apigw.CognitoUserPoolsAuthorizer(stack, 'Authorizer', { cognitoUserPools: [inputs.userPool] });
+  new SlackIntegration(stack, 'SlackIntegration', { api: new apigw.RestApi(stack, 'Api'), linkAuthorizer, ...inputs });
   const template = JSON.stringify(Template.fromStack(stack).toJSON());
 
   expect(template).not.toContain('ATTACHMENTS_BUCKET_NAME');

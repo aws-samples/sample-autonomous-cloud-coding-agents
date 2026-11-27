@@ -45,6 +45,7 @@ describe('LinearIntegration construct', () => {
     new LinearIntegration(stack, 'LinearIntegration', {
       api,
       userPool,
+      linkAuthorizer: new apigw.CognitoUserPoolsAuthorizer(stack, 'TestAuthorizer', { cognitoUserPools: [userPool] }),
       taskTable,
       taskEventsTable,
     });
@@ -109,6 +110,22 @@ describe('LinearIntegration construct', () => {
     );
     expect(onSlug).toHaveLength(1);
     expect((onSlug[0].Properties as { AuthorizationType?: string }).AuthorizationType).toBe('COGNITO_USER_POOLS');
+  });
+
+  test.each([
+    ['POST', 'link'],
+    ['DELETE', '{slug}'],
+  ])('%s on %s is behind the authorizer handed to the construct, the only one in the stack', (httpMethod, pathPart) => {
+    const authorizers = Object.keys(template.findResources('AWS::ApiGateway::Authorizer'));
+    expect(authorizers).toEqual([expect.stringMatching(/^TestAuthorizer/)]);
+    const resources = Object.keys(template.findResources('AWS::ApiGateway::Resource', { Properties: { PathPart: pathPart } }));
+    expect(resources).toHaveLength(1);
+    template.hasResourceProperties('AWS::ApiGateway::Method', {
+      HttpMethod: httpMethod,
+      ResourceId: { Ref: resources[0] },
+      AuthorizationType: 'COGNITO_USER_POOLS',
+      AuthorizerId: { Ref: authorizers[0] },
+    });
   });
 
   // Locate the RemoveWorkspaceFn INDEPENDENTLY of any IAM policy: it is the
@@ -279,6 +296,7 @@ describe('LinearIntegration construct — seed-time root release throttle', () =
     new LinearIntegration(stack, 'LinearIntegration', {
       api,
       userPool,
+      linkAuthorizer: new apigw.CognitoUserPoolsAuthorizer(stack, 'TestAuthorizer', { cognitoUserPools: [userPool] }),
       taskTable,
       taskEventsTable,
       orchestrationTable,
@@ -338,6 +356,7 @@ describe('LinearIntegration construct — attachmentsBucket wiring', () => {
     new LinearIntegration(stack, 'LinearIntegration', {
       api,
       userPool,
+      linkAuthorizer: new apigw.CognitoUserPoolsAuthorizer(stack, 'TestAuthorizer', { cognitoUserPools: [userPool] }),
       taskTable,
       taskEventsTable,
       attachmentsBucket,
@@ -393,7 +412,8 @@ describe('revoked-authorization recording (#812)', () => {
       partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'event_id', type: dynamodb.AttributeType.STRING },
     });
-    new LinearIntegration(stack, 'LinearIntegration', { api, userPool, taskTable, taskEventsTable });
+    const linkAuthorizer = new apigw.CognitoUserPoolsAuthorizer(stack, 'TestAuthorizer', { cognitoUserPools: [userPool] });
+    new LinearIntegration(stack, 'LinearIntegration', { api, userPool, linkAuthorizer, taskTable, taskEventsTable });
     const template = Template.fromStack(stack);
 
     const processorPolicy = Object.values(template.findResources('AWS::IAM::Policy')).find((p) =>
@@ -433,9 +453,11 @@ describe('LinearIntegration construct — agent sessions (ADR-018 Phase 2)', () 
       partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'nudge_id', type: dynamodb.AttributeType.STRING },
     });
+    const userPool = new cognito.UserPool(stack, 'TestUserPool');
     new LinearIntegration(stack, 'LinearIntegration', {
       api: new apigw.RestApi(stack, 'TestApi'),
-      userPool: new cognito.UserPool(stack, 'TestUserPool'),
+      userPool,
+      linkAuthorizer: new apigw.CognitoUserPoolsAuthorizer(stack, 'TestAuthorizer', { cognitoUserPools: [userPool] }),
       taskTable,
       taskEventsTable,
       ...(agentSessions && {

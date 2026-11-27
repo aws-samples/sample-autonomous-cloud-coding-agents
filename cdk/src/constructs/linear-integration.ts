@@ -66,8 +66,11 @@ export interface LinearIntegrationProps {
   /** The existing REST API to add Linear routes to. */
   readonly api: apigw.RestApi;
 
-  /** Cognito user pool for the /linear/link endpoint (Cognito-authenticated). */
+  /** Cognito user pool in which the budget check looks up the groups of a user. */
   readonly userPool: cognito.IUserPool;
+
+  /** Cognito authorizer of `api`, for the /linear/link and /linear/workspaces/{slug} routes. */
+  readonly linkAuthorizer: apigw.IAuthorizer;
 
   /** The DynamoDB task table. */
   readonly taskTable: dynamodb.ITable;
@@ -308,12 +311,8 @@ export class LinearIntegration extends Construct implements FeedbackTracker {
 
     const createTaskEnv = taskCreationEnvironment(props);
 
-    // --- Cognito Authorizer (for /linear/link) ---
-    const cognitoAuthorizer = new apigw.CognitoUserPoolsAuthorizer(this, 'LinearCognitoAuthorizer', {
-      cognitoUserPools: [props.userPool],
-    });
     const cognitoAuthOptions: apigw.MethodOptions = {
-      authorizer: cognitoAuthorizer,
+      authorizer: props.linkAuthorizer,
       authorizationType: apigw.AuthorizationType.COGNITO,
     };
     const noneAuthOptions: apigw.MethodOptions = {

@@ -205,9 +205,11 @@ describe.each([
     const table = (tableId: string) => new dynamodb.Table(stack, tableId, {
       partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
     });
+    const userPool = new cognito.UserPool(stack, 'UserPool');
     tracker = new Integration(stack, id, {
       api: new apigw.RestApi(stack, 'Api'),
-      userPool: new cognito.UserPool(stack, 'UserPool'),
+      userPool,
+      linkAuthorizer: new apigw.CognitoUserPoolsAuthorizer(stack, 'Authorizer', { cognitoUserPools: [userPool] }),
       taskTable: table('TaskTable'),
       taskEventsTable: table('TaskEventsTable'),
     });

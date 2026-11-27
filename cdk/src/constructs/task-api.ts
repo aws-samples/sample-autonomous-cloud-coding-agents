@@ -405,6 +405,11 @@ export class TaskApi extends Construct {
   public readonly appClientId: string;
 
   /**
+   * The Cognito authorizer of this API, for the constructs that add a Cognito route to it.
+   */
+  public readonly cognitoAuthorizer: apigw.IAuthorizer;
+
+  /**
    * Raised when many XSS-shaped bodies reach the signed webhook routes, where
    * the WAF counts rather than blocks them. Undefined when no webhook route is
    * deployed.
@@ -586,7 +591,7 @@ export class TaskApi extends Construct {
     });
 
     // --- Cognito Authorizer ---
-    const cognitoAuthorizer = new apigw.CognitoUserPoolsAuthorizer(this, 'Authorizer', {
+    this.cognitoAuthorizer = new apigw.CognitoUserPoolsAuthorizer(this, 'Authorizer', {
       cognitoUserPools: [this.userPool],
     });
 
@@ -597,7 +602,7 @@ export class TaskApi extends Construct {
     });
 
     const cognitoAuthOptions: apigw.MethodOptions = {
-      authorizer: cognitoAuthorizer,
+      authorizer: this.cognitoAuthorizer,
       authorizationType: apigw.AuthorizationType.COGNITO,
       requestValidator,
     };
