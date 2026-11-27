@@ -383,12 +383,10 @@ export class JiraIntegration extends Construct {
         ],
       }));
     }
-    // The processor downloads Jira `media` attachments, screens them, and
-    // writes the cleaned bytes to the attachments bucket before creating the
-    // task (#577). ReadWrite mirrors the confirm-uploads path (Put + Get for
-    // multipart/versioned writes).
+    // The processor stores the screened bytes and deletes them when the task is not created.
     if (props.attachmentsBucket) {
-      props.attachmentsBucket.grantReadWrite(webhookProcessorFn);
+      props.attachmentsBucket.grantPut(webhookProcessorFn);
+      props.attachmentsBucket.grantDelete(webhookProcessorFn);
     }
 
     // --- Webhook receiver (verifies HMAC, dedups, invokes processor) ---

@@ -22,6 +22,7 @@ import { Template, Match } from 'aws-cdk-lib/assertions';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import * as s3 from 'aws-cdk-lib/aws-s3';
 import { JiraIntegration } from '../../src/constructs/jira-integration';
 
 describe('JiraIntegration construct', () => {
@@ -56,6 +57,7 @@ describe('JiraIntegration construct', () => {
       orchestrationTable,
       userConcurrencyTable,
       maxConcurrentTasksPerUser: 7,
+      attachmentsBucket: new s3.Bucket(stack, 'AttachmentsBucket'),
     });
 
     template = Template.fromStack(stack);
@@ -126,5 +128,15 @@ describe('JiraIntegration construct', () => {
         }),
       },
     });
+  });
+
+  test('the webhook processor may put and delete attachment objects and holds no other S3 access', () => {
+    const statements = Object.entries(template.findResources('AWS::IAM::Policy'))
+      .filter(([logicalId]) => logicalId.startsWith('JiraIntegrationWebhookProcessorFn'))
+      .flatMap(([, policy]) => policy.Properties.PolicyDocument.Statement as Array<{ Action: string | string[]; Resource: unknown }>);
+    const onTheBucket = statements.filter(statement => JSON.stringify(statement.Resource).includes('AttachmentsBucket'));
+    expect(onTheBucket.flatMap(statement => statement.Action)).toEqual(expect.arrayContaining(['s3:PutObject', 's3:DeleteObject*']));
+    const s3Actions = statements.flatMap(statement => statement.Action).filter(action => action.startsWith('s3:'));
+    expect(s3Actions.filter(action => !/^s3:(PutObject|Abort|DeleteObject)/.test(action))).toEqual([]);
   });
 });
