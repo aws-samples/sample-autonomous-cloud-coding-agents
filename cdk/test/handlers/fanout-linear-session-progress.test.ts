@@ -274,3 +274,10 @@ test('a follow-up on a pull request that pushed nothing reads as no change: no r
   expect(planStatuses()).toEqual(['completed', 'completed', 'completed', 'canceled', 'canceled']);
   expect(mockTransitionIssueState).not.toHaveBeenCalled();
 });
+
+test('a failed task that left a pull request stays where it is: only a completed task moves the issue to In Review', async () => {
+  mockTask({ ...SESSION_TASK, status: 'FAILED', pr_url: PR_URL, linear_checklist_stage: 4, error_message: 'build failed' });
+  await routeEvent(ev('task_failed'), LINEAR_ONLY);
+  expect(mockEmitAgentActivity).toHaveBeenCalledWith('lin_tok', 'session-1', expect.objectContaining({ type: 'error' }));
+  expect(mockTransitionIssueState).not.toHaveBeenCalled();
+});

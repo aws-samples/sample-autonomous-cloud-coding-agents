@@ -1611,7 +1611,8 @@ async function dispatchToLinearAgentSession(
     result = await emitAgentActivity(token, agentSessionId, linearSessionTerminalActivity(task, event));
     if (result.ok) {
       await saveLinearCommentState(task.task_id, event.event_id);
-      if (sessionOutcome(task, event) === 'pr') await moveSessionIssueToReview(task, ctx);
+      // Only on success, as the agent's own move: a failed run's pull request is not ready for review.
+      if (event.event_type === 'task_completed' && sessionOutcome(task, event) === 'pr') await moveSessionIssueToReview(task, ctx);
     }
   }
 
@@ -1718,7 +1719,7 @@ async function claimChecklistStage(taskId: string, stage: number): Promise<boole
 }
 
 /**
- * A session task that ends with a pull request moves its issue to "In Review" (a
+ * A session task that completes with a pull request moves its issue to "In Review" (a
  * ``started`` state, so a person's later move to Done is never undone). Best effort.
  */
 async function moveSessionIssueToReview(task: TaskRecord, ctx: LinearFeedbackContext): Promise<void> {
