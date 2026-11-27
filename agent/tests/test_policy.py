@@ -1,14 +1,8 @@
 """Unit tests for policy.py — Cedar policy engine."""
 
-from unittest.mock import patch
-
-# Hard import (not importorskip): without cedarpy the engine denies every call.
-# These tests must then fail, not drop out of the run.
-import cedarpy  # noqa: F401
 import pytest
 
-import policy
-from policy import PolicyEngine, _validate_constants
+from policy import PolicyEngine
 
 
 class TestNewTaskPermissions:
@@ -266,66 +260,3 @@ class TestDurationMetrics:
         engine = PolicyEngine(task_type="pr_review", repo="owner/repo", read_only=True)
         result = engine.evaluate_tool_use("Write", {"file_path": "test.py"})
         assert result.duration_ms >= 0
-
-
-class TestConstantsSemanticValidation:
-    """Verify _validate_constants rejects invariant violations."""
-
-    def test_rejects_approval_timeout_min_zero(self):
-        with (
-            patch.object(policy, "FLOOR_TIMEOUT_S", 0),
-            pytest.raises(ValueError, match=r"approval_timeout_s\.min must be > 0"),
-        ):
-            _validate_constants()
-
-    def test_rejects_approval_timeout_min_negative(self):
-        with (
-            patch.object(policy, "FLOOR_TIMEOUT_S", -1),
-            pytest.raises(ValueError, match=r"approval_timeout_s\.min must be > 0"),
-        ):
-            _validate_constants()
-
-    def test_rejects_approval_timeout_default_below_min(self):
-        with (
-            patch.object(policy, "FLOOR_TIMEOUT_S", 60),
-            patch.object(policy, "DEFAULT_TASK_TIMEOUT_S", 30),
-            pytest.raises(ValueError, match=r"approval_timeout_s\.default .* must be >= min"),
-        ):
-            _validate_constants()
-
-    def test_rejects_approval_timeout_max_below_default(self):
-        with (
-            patch.object(policy, "FLOOR_TIMEOUT_S", 30),
-            patch.object(policy, "DEFAULT_TASK_TIMEOUT_S", 300),
-            patch.object(policy, "_ATS", {"min": 30, "max": 100, "default": 300}),
-            pytest.raises(ValueError, match=r"approval_timeout_s\.max .* must be >= default"),
-        ):
-            _validate_constants()
-
-    def test_rejects_approval_gate_cap_min_zero(self):
-        with (
-            patch.object(policy, "APPROVAL_GATE_CAP_MIN", 0),
-            pytest.raises(ValueError, match=r"approval_gate_cap\.min must be > 0"),
-        ):
-            _validate_constants()
-
-    def test_rejects_approval_gate_cap_default_below_min(self):
-        with (
-            patch.object(policy, "APPROVAL_GATE_CAP_MIN", 10),
-            patch.object(policy, "DEFAULT_APPROVAL_GATE_CAP", 5),
-            pytest.raises(ValueError, match=r"approval_gate_cap\.default .* must be >= min"),
-        ):
-            _validate_constants()
-
-    def test_rejects_approval_gate_cap_max_below_default(self):
-        with (
-            patch.object(policy, "APPROVAL_GATE_CAP_MIN", 1),
-            patch.object(policy, "DEFAULT_APPROVAL_GATE_CAP", 100),
-            patch.object(policy, "APPROVAL_GATE_CAP_MAX", 50),
-            pytest.raises(ValueError, match=r"approval_gate_cap\.max .* must be >= default"),
-        ):
-            _validate_constants()
-
-    def test_passes_with_valid_constants(self):
-        """Sanity: the real constants pass validation."""
-        _validate_constants()

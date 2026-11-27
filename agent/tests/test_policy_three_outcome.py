@@ -29,7 +29,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 # Hard import — the policy engine requires cedarpy; skipping would hide drift.
-import cedarpy
+import cedarpy  # noqa: F401  (sanity import)
 import pytest
 
 from policy import (
@@ -166,16 +166,8 @@ class TestPolicyDecisionConstruction:
 
 
 class TestEvaluateToolUseFailClosed:
-    """The fail_closed flag must be True at engine-error/unavailable sites and
+    """The fail_closed flag must be True at engine-error sites and
     False for intentional hard-deny + cache-deny (§13.16, decision E)."""
-
-    def test_engine_unavailable_is_fail_closed(self):
-        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
-        # Force the "policy engine unavailable" guard.
-        engine._cedarpy = None
-        d = engine.evaluate_tool_use("Bash", {"command": "echo hi"})
-        assert d.outcome == Outcome.DENY
-        assert d.fail_closed is True
 
     def test_unhashable_tool_input_is_fail_closed(self):
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
@@ -821,7 +813,7 @@ class TestLoadTimeValidation:
         # the tier it declares.
         hard = '@tier("hard") @rule_id("h") forbid (principal, action, resource);'
         with pytest.raises(ValueError, match="lives in the 'soft' file"):
-            _validate_tier(_parse_policy_annotations(cedarpy, hard), "soft", "soft_deny")
+            _validate_tier(_parse_policy_annotations(hard), "soft", "soft_deny")
 
     @pytest.mark.parametrize(
         ("rule", "attribute"),
@@ -902,14 +894,7 @@ class TestFailClosedPosture:
         d = engine.evaluate_tool_use("Write", {"file_path": "a.py"})
         assert d.outcome == Outcome.DENY
         assert "fail-closed" in d.reason
-
-    def test_engine_disabled_returns_deny(self):
-        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
-        engine._disabled = True
-        engine._cedarpy = None
-        d = engine.evaluate_tool_use("Read", {"file_path": "a.py"})
-        assert d.outcome == Outcome.DENY
-        assert "unavailable" in d.reason
+        assert d.fail_closed is True
 
     def test_unhashable_tool_input_surfaces_distinct_reason(self):
         # Review finding #5: a non-JSON-serializable tool_input should be
@@ -952,7 +937,7 @@ class TestReviewRegressions:
             'when { context.command like "*foo*" };'
         )
         with pytest.raises(ValueError, match="missing @tier"):
-            _validate_tier(_parse_policy_annotations(cedarpy, bad), "soft", "soft_deny")
+            _validate_tier(_parse_policy_annotations(bad), "soft", "soft_deny")
 
 
 # ---------------------------------------------------------------------------

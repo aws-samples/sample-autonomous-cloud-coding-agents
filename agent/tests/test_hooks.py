@@ -1644,7 +1644,7 @@ class TestPreToolUsePolicyFailClosed:
 
     def test_fail_closed_deny_emits_blocker(self, progress):
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
-        engine._cedarpy = None  # force "policy engine unavailable" fail-closed
+        engine._hard_policies = "THIS IS NOT VALID CEDAR"  # force a fail-closed deny
         result = _run(
             pre_tool_use_hook(self._deny_input(), "t-fc", {}, engine=engine, progress=progress)
         )
@@ -1672,7 +1672,7 @@ class TestPreToolUsePolicyFailClosed:
         # No-fail-closed-regression (cross-cutting AC): the deny is unchanged
         # whether or not the blocker emit is wired.
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
-        engine._cedarpy = None
+        engine._hard_policies = "THIS IS NOT VALID CEDAR"
         result = _run(pre_tool_use_hook(self._deny_input(), "t-fc2", {}, engine=engine))
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
 

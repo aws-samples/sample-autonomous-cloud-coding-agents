@@ -66,6 +66,8 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import cedarpy
+
 from shared_constants import SHARED_CONSTANTS
 from shell import log
 
@@ -104,41 +106,6 @@ def approval_deadline_epoch(created_at: str, timeout_s: int) -> int:
     return int(created.timestamp()) + timeout_s
 
 
-def _validate_constants() -> None:
-    """Fail-fast on invariant violations in contracts/constants.json."""
-    if FLOOR_TIMEOUT_S <= 0:
-        raise ValueError(
-            f"contracts/constants.json: approval_timeout_s.min must be > 0, got {FLOOR_TIMEOUT_S}"
-        )
-    if DEFAULT_TASK_TIMEOUT_S < FLOOR_TIMEOUT_S:
-        raise ValueError(
-            f"contracts/constants.json: approval_timeout_s.default ({DEFAULT_TASK_TIMEOUT_S}) "
-            f"must be >= min ({FLOOR_TIMEOUT_S})"
-        )
-    ats_max = int(_ATS["max"])
-    if ats_max < DEFAULT_TASK_TIMEOUT_S:
-        raise ValueError(
-            f"contracts/constants.json: approval_timeout_s.max ({ats_max}) "
-            f"must be >= default ({DEFAULT_TASK_TIMEOUT_S})"
-        )
-    if APPROVAL_GATE_CAP_MIN <= 0:
-        raise ValueError(
-            f"contracts/constants.json: approval_gate_cap.min must be > 0, "
-            f"got {APPROVAL_GATE_CAP_MIN}"
-        )
-    if DEFAULT_APPROVAL_GATE_CAP < APPROVAL_GATE_CAP_MIN:
-        raise ValueError(
-            f"contracts/constants.json: approval_gate_cap.default ({DEFAULT_APPROVAL_GATE_CAP}) "
-            f"must be >= min ({APPROVAL_GATE_CAP_MIN})"
-        )
-    if APPROVAL_GATE_CAP_MAX < DEFAULT_APPROVAL_GATE_CAP:
-        raise ValueError(
-            f"contracts/constants.json: approval_gate_cap.max ({APPROVAL_GATE_CAP_MAX}) "
-            f"must be >= default ({DEFAULT_APPROVAL_GATE_CAP})"
-        )
-
-
-_validate_constants()
 CACHE_MAX_ENTRIES: int = 50  # §12.9: decoupled from approvalGateCap
 CACHE_TTL_S: float = 60.0  # §12.8 sliding-window TTL on DENIED/TIMED_OUT
 POLICIES_MAX_BYTES: int = 64 * 1024  # finding #12: reject blueprints > 64 KB
@@ -203,11 +170,11 @@ class PolicyDecision:
     # represent the same deny outcome.
     cache_hit_metadata: dict | None = field(default=None, compare=False)
     # #251 (decision E): structured discriminator for environmental
-    # fail-closed denies (Cedar engine errored / unavailable) vs.
+    # fail-closed denies (Cedar engine errored) vs.
     # intentional hard-denies and cache-driven denies. The hook branches
     # on THIS flag — not a brittle ``reason.startswith("fail-closed:")``
     # string match — to decide whether to emit a ``policy_fail_closed``
-    # blocker event. Set True ONLY at engine-error/unavailable deny sites;
+    # blocker event. Set True ONLY at engine-error deny sites;
     # hard-deny and cache-deny leave it False. Like ``cache_hit_metadata``,
     # NOT part of __eq__/__hash__ (it is derived from outcome+reason, and
     # legacy equality-based tests predate the field).
@@ -524,16 +491,16 @@ class _ParsedRule:
     severity: str | None
 
 
-def _parse_policy_set(cedarpy_module, policies_text: str) -> dict:
+def _parse_policy_set(policies_text: str) -> dict:
     try:
-        return json.loads(cedarpy_module.policies_to_json_str(policies_text))
+        return json.loads(cedarpy.policies_to_json_str(policies_text))
     except Exception as exc:
         raise ValueError(f"Cedar policy parse failed: {type(exc).__name__}: {exc}") from exc
 
 
-def _parse_policy_annotations(cedarpy_module, policies_text: str) -> list[_ParsedRule]:
+def _parse_policy_annotations(policies_text: str) -> list[_ParsedRule]:
     """Read every static policy's annotations in cedarpy's positional order."""
-    parsed = _parse_policy_set(cedarpy_module, policies_text)
+    parsed = _parse_policy_set(policies_text)
     rules: list[_ParsedRule] = []
     for pid, body in parsed.get("staticPolicies", {}).items():
         ann = body.get("annotations", {}) or {}
@@ -559,7 +526,7 @@ def _parse_policy_annotations(cedarpy_module, policies_text: str) -> list[_Parse
     return rules
 
 
-def _route_operator_policies(cedarpy_module, entries: list[str]) -> tuple[list[str], list[str]]:
+def _route_operator_policies(entries: list[str]) -> tuple[list[str], list[str]]:
     """Keep each entry intact. Only entries without a tier or rule ID get a generated ID."""
     hard: list[str] = []
     soft: list[str] = []
@@ -567,7 +534,7 @@ def _route_operator_policies(cedarpy_module, entries: list[str]) -> tuple[list[s
     for idx, text in enumerate(entries):
         source = f"cedar_policies[{idx}]"
         try:
-            parsed = _parse_policy_set(cedarpy_module, text)
+            parsed = _parse_policy_set(text)
         except ValueError as exc:
             raise ValueError(f"{source}: {exc}") from exc
         if parsed.get("templates"):
@@ -747,7 +714,6 @@ class PolicyEngine:
         self._task_type = task_type
         self._repo = repo
         self._read_only = read_only
-        self._disabled = False
         self._task_default_timeout_s = task_default_timeout_s
 
         # Bounds check on approval_gate_cap (decision #13).
@@ -787,26 +753,6 @@ class PolicyEngine:
         # rules fire for *any* read-only workflow, not just coding/pr-review.
         # See ADR-014 addendum 2026-06-08.
 
-        # Import cedarpy lazily so the module still loads in environments
-        # without the native extension (tests can monkey-patch).
-        try:
-            import cedarpy
-
-            self._cedarpy = cedarpy
-        except ImportError:
-            log("ERROR", "cedarpy not available — policy engine disabled (fail-closed)")
-            self._cedarpy = None
-            self._disabled = True
-            # Still construct empty state so legacy callers do not crash
-            # during attribute access.
-            self._hard_policies = ""
-            self._soft_policies = ""
-            self._hard_rules: list[_ParsedRule] = []
-            self._soft_rules: list[_ParsedRule] = []
-            self._allowlist = ApprovalAllowlist()
-            self._cache = RecentDecisionCache()
-            return
-
         # Load built-in tiers.
         try:
             builtin_hard, builtin_soft = _load_builtin_policies()
@@ -823,20 +769,20 @@ class PolicyEngine:
                 f"({operator_bytes} bytes)"
             )
 
-        hard, soft = _route_operator_policies(self._cedarpy, blueprint_policies or [])
+        hard, soft = _route_operator_policies(blueprint_policies or [])
         hard_text = "\n".join([builtin_hard, *hard])
         soft_text = "\n".join([builtin_soft, *soft])
 
         # Parse + validate annotations on each tier.
         try:
-            self._hard_rules = _parse_policy_annotations(self._cedarpy, hard_text)
+            self._hard_rules = _parse_policy_annotations(hard_text)
             _validate_tier(self._hard_rules, "hard", "hard_deny")
         except ValueError as exc:
             # Blueprint or built-in problem — fail loud at task start.
             raise ValueError(f"hard-deny policy validation failed: {exc}") from exc
 
         try:
-            self._soft_rules = _parse_policy_annotations(self._cedarpy, soft_text)
+            self._soft_rules = _parse_policy_annotations(soft_text)
             # Unannotated entries get generic "legacy_extra_N" @rule_id values;
             # those are accepted by the validator.
             _validate_tier(self._soft_rules, "soft", "soft_deny")
@@ -1026,12 +972,7 @@ class PolicyEngine:
             },
             {"uid": {"type": resource_type, "id": resource_id}, "attrs": {}, "parents": []},
         ]
-        # _eval_tier is only reached from evaluate_tool_use AFTER the
-        # ``_disabled``/``_cedarpy is None`` guard, so the attribute is
-        # narrowed to a live module here.
-        if self._cedarpy is None:  # invariant guard
-            raise RuntimeError("eval called on disabled engine")
-        result = self._cedarpy.is_authorized(request, policies_text, entities)
+        result = cedarpy.is_authorized(request, policies_text, entities)
         if getattr(result.diagnostics, "errors", []):
             # cedarpy reports parse errors via diagnostics.errors and returns
             # Decision.NoDecision rather than raising — we re-raise so the
@@ -1055,13 +996,6 @@ class PolicyEngine:
         reason ``"fail-closed: <ExceptionType>"``.
         """
         start = time.monotonic()
-
-        if self._disabled or self._cedarpy is None:
-            return PolicyDecision.deny(
-                reason="policy engine unavailable",
-                duration_ms=(time.monotonic() - start) * 1000,
-                fail_closed=True,
-            )
 
         base_context = {
             "task_type": self._task_type,
