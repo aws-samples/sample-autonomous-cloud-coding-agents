@@ -62,7 +62,7 @@ import {
   type SessionApprovalAnswer,
 } from './linear-session-approval';
 import { fetchIssueParentId } from './linear-subissue-fetch';
-import { lookupTaskByLinearIssue, type LinearIssueTask } from './linear-task-by-issue';
+import { lookupRunningTaskInSession, lookupTaskByLinearIssue, type LinearIssueTask } from './linear-task-by-issue';
 import { logger } from './logger';
 import { isLookupFailure, lookupValueOr } from './lookup-result';
 import { submitNudge } from './nudge-core';
@@ -621,7 +621,8 @@ type PriorTask = LinearIssueTask & ClarifyHoldRow
   };
 
 /**
- * The issue's newest ABCA task, scoped to this workspace. Throws on a lookup
+ * For a prompt or a stop, the running task of its session; otherwise, and when the
+ * session has none, the issue's newest ABCA task, scoped to this workspace. Throws on a lookup
  * failure: guessing "no task" would start a duplicate run beside a live one.
  *
  * Two sources, because neither is enough alone. The ``LinearIssueIndex`` GSI
@@ -631,6 +632,12 @@ type PriorTask = LinearIssueTask & ClarifyHoldRow
  * from the base table, and the newer one wins.
  */
 async function findPriorTask(request: AgentSessionRequest): Promise<PriorTask | null> {
+  // A prompt or a stop in a session is meant for the task that session reports into.
+  if (request.action === 'prompted') {
+    const sessionTaskId = await lookupRunningTaskInSession(ddb, TASK_TABLE_NAME, request.issueId, request.sessionId);
+    const sessionTask = sessionTaskId ? await readTaskForIssue(sessionTaskId, request) : null;
+    if (sessionTask && !isTerminal(sessionTask.status)) return sessionTask;
+  }
   const lookup = await lookupTaskByLinearIssue(ddb, TASK_TABLE_NAME, request.issueId);
   if (lookup.kind === 'error') {
     throw new Error(`Task lookup for Linear issue ${request.issueId} failed: ${lookup.message}`);

@@ -55,9 +55,14 @@ jest.mock('../../../src/handlers/shared/linear-agent-session', () => {
 });
 
 const lookupTaskByLinearIssueMock = jest.fn();
+const lookupRunningTaskInSessionMock = jest.fn();
 jest.mock('../../../src/handlers/shared/linear-task-by-issue', () => {
   const actual = jest.requireActual('../../../src/handlers/shared/linear-task-by-issue');
-  return { ...actual, lookupTaskByLinearIssue: (...args: unknown[]) => lookupTaskByLinearIssueMock(...args) };
+  return {
+    ...actual,
+    lookupTaskByLinearIssue: (...args: unknown[]) => lookupTaskByLinearIssueMock(...args),
+    lookupRunningTaskInSession: (...args: unknown[]) => lookupRunningTaskInSessionMock(...args),
+  };
 });
 
 const fetchIssueParentIdMock = jest.fn();
@@ -233,6 +238,7 @@ beforeEach(() => {
   emitAgentActivityMock.mockResolvedValue({ ok: true });
   fetchAgentSessionIssueMock.mockResolvedValue({ ok: true, value: ISSUE });
   lookupTaskByLinearIssueMock.mockResolvedValue({ kind: 'none' });
+  lookupRunningTaskInSessionMock.mockResolvedValue(null);
   fetchIssueParentIdMock.mockResolvedValue({ ok: false, absent: true });
   loadOrchestrationMock.mockResolvedValue(null);
   createTaskCoreMock.mockResolvedValue({ statusCode: 201, body: '{}' });
@@ -906,6 +912,25 @@ describe('handleAgentSessionEvent — approval requests in the session (#1066)',
     await answer('approve');
     expect(recordApprovalMock).not.toHaveBeenCalled();
     expect(String(lastEmit()[2].body)).toMatch(/^This request has high severity/);
+  });
+
+  test('an answer in this session decides this session\'s task, also when a newer task runs on the issue', async () => {
+    waiting();
+    // A second task, started by the trigger label, is the issue's newest.
+    priorTask({ task_id: 't-2', status: 'RUNNING', user_id: 'platform-user-1', linear_workspace_id: 'org-1' });
+    lookupRunningTaskInSessionMock.mockResolvedValue('t-1');
+    await answer('approve');
+    expect(lookupRunningTaskInSessionMock).toHaveBeenCalledWith(expect.anything(), 'Tasks', 'issue-1', 'session-1');
+    expect(recordApprovalMock).toHaveBeenCalledWith(expect.objectContaining({ taskId: 't-1' }));
+  });
+
+  test('a stop in this session stops this session\'s task, not a newer one on the issue', async () => {
+    waiting();
+    priorTask({ task_id: 't-2', status: 'RUNNING', user_id: 'platform-user-1', linear_workspace_id: 'org-1' });
+    lookupRunningTaskInSessionMock.mockResolvedValue('t-1');
+    cancelTaskMock.mockResolvedValue('cancelled');
+    await handleAgentSessionEvent(prompted({ signal: 'stop', content: { body: 'Stop' } }));
+    expect(cancelTaskMock).toHaveBeenCalledWith(expect.anything(), 't-1', 'platform-user-1', expect.any(String), expect.anything());
   });
 
   test('a typed "approve for this task" is not an answer: nothing is decided and the choice comes back', async () => {

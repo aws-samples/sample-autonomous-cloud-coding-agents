@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { lookupTaskByLinearIssue } from '../../../src/handlers/shared/linear-task-by-issue';
+import { lookupRunningTaskInSession, lookupTaskByLinearIssue } from '../../../src/handlers/shared/linear-task-by-issue';
 
 jest.mock('../../../src/handlers/shared/logger', () => ({
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
@@ -64,5 +64,30 @@ describe('lookupTaskByLinearIssue', () => {
   test('omits absent optional fields', async () => {
     send.mockResolvedValueOnce({ Items: [{ task_id: 'T1' }] });
     expect(await lookupTaskByLinearIssue(ddb, 'TaskTable', 'x')).toEqual({ kind: 'found', task: { task_id: 'T1' } });
+  });
+});
+
+describe('lookupRunningTaskInSession', () => {
+  const send = jest.fn();
+  const ddb = { send } as never;
+  const row = (taskId: string, status: string, session?: string) => ({
+    task_id: taskId, status, channel_metadata: { linear_workspace_id: 'org-1', ...(session && { linear_agent_session_id: session }) },
+  });
+
+  beforeEach(() => send.mockReset());
+
+  test('finds the running task of this session, not the newest task on the issue', async () => {
+    send.mockResolvedValueOnce({ Items: [row('t-new', 'RUNNING'), row('t-old', 'AWAITING_APPROVAL', 'session-1'), row('t-done', 'COMPLETED', 'session-1')] });
+    await expect(lookupRunningTaskInSession(ddb, 'TaskTable', 'issue-1', 'session-1')).resolves.toBe('t-old');
+    const input = send.mock.calls[0][0].input;
+    expect(input.IndexName).toBe('LinearIssueIndex');
+    expect(input.ExpressionAttributeValues[':iid']).toBe('issue-1');
+  });
+
+  test('null when the session has no running task, and the query error is thrown', async () => {
+    send.mockResolvedValueOnce({ Items: [row('t-done', 'COMPLETED', 'session-1'), row('t-other', 'RUNNING', 'session-2')] });
+    await expect(lookupRunningTaskInSession(ddb, 'TaskTable', 'issue-1', 'session-1')).resolves.toBeNull();
+    send.mockRejectedValueOnce(new Error('Throttled'));
+    await expect(lookupRunningTaskInSession(ddb, 'TaskTable', 'issue-1', 'session-1')).rejects.toThrow('Throttled');
   });
 });
