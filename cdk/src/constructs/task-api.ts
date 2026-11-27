@@ -126,10 +126,10 @@ export interface TaskApiProps {
   readonly nudgeRateLimitPerMinute?: number;
 
   /**
-   * The DynamoDB repo config table. When provided, task creation checks
-   * that the target repository is onboarded before accepting the task.
+   * The DynamoDB repo config table. Task creation checks that the target
+   * repository is onboarded before accepting the task.
    */
-  readonly repoTable?: dynamodb.ITable;
+  readonly repoTable: dynamodb.ITable;
 
   /**
    * The DynamoDB webhook table. When provided, webhook endpoints are created.
@@ -181,12 +181,12 @@ export interface TaskApiProps {
   /**
    * Bedrock Guardrail ID for screening task input.
    */
-  readonly guardrailId?: string;
+  readonly guardrailId: string;
 
   /**
    * Bedrock Guardrail version for screening task input.
    */
-  readonly guardrailVersion?: string;
+  readonly guardrailVersion: string;
 
   /**
    * Number of days to retain completed task and event records before DynamoDB TTL deletes them.
@@ -411,7 +411,6 @@ export class TaskApi extends Construct {
    */
   public readonly webhookXssCountedAlarm?: cloudwatch.Alarm;
 
-  // eslint-disable-next-line complexity -- predates the ceiling (51, down from 53 when it landed); must not grow
   constructor(scope: Construct, id: string, props: TaskApiProps) {
     super(scope, id);
 
@@ -642,16 +641,12 @@ export class TaskApi extends Construct {
 
     // --- Lambda handlers ---
     const createTaskEnv: Record<string, string> = { ...commonEnv };
-    if (props.repoTable) {
-      createTaskEnv.REPO_TABLE_NAME = props.repoTable.tableName;
-    }
+    createTaskEnv.REPO_TABLE_NAME = props.repoTable.tableName;
     if (props.orchestratorFunctionArn) {
       createTaskEnv.ORCHESTRATOR_FUNCTION_ARN = props.orchestratorFunctionArn;
     }
-    if (props.guardrailId && props.guardrailVersion) {
-      createTaskEnv.GUARDRAIL_ID = props.guardrailId;
-      createTaskEnv.GUARDRAIL_VERSION = props.guardrailVersion;
-    }
+    createTaskEnv.GUARDRAIL_ID = props.guardrailId;
+    createTaskEnv.GUARDRAIL_VERSION = props.guardrailVersion;
     if (props.attachmentsBucket) {
       createTaskEnv.ATTACHMENTS_BUCKET_NAME = props.attachmentsBucket.bucketName;
     }
@@ -814,9 +809,7 @@ export class TaskApi extends Construct {
     }
 
     // Repo table read for onboarding gate
-    if (props.repoTable) {
-      props.repoTable.grantReadData(createTaskFn);
-    }
+    props.repoTable.grantReadData(createTaskFn);
     if (props.budgetTable) {
       props.budgetTable.grantReadData(createTaskFn);
       props.budgetTable.grantReadData(listTasksFn);
@@ -840,18 +833,16 @@ export class TaskApi extends Construct {
     }
 
     // Grant createTask permission to apply the guardrail
-    if (props.guardrailId) {
-      createTaskFn.addToRolePolicy(new iam.PolicyStatement({
-        actions: ['bedrock:ApplyGuardrail'],
-        resources: [
-          Stack.of(this).formatArn({
-            service: 'bedrock',
-            resource: 'guardrail',
-            resourceName: props.guardrailId,
-          }),
-        ],
-      }));
-    }
+    createTaskFn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['bedrock:ApplyGuardrail'],
+      resources: [
+        Stack.of(this).formatArn({
+          service: 'bedrock',
+          resource: 'guardrail',
+          resourceName: props.guardrailId,
+        }),
+      ],
+    }));
 
     grantInlineAttachmentStorage(createTaskFn, props.attachmentsBucket);
 
@@ -866,10 +857,8 @@ export class TaskApi extends Construct {
       if (props.orchestratorFunctionArn) {
         confirmUploadsEnv.ORCHESTRATOR_FUNCTION_ARN = props.orchestratorFunctionArn;
       }
-      if (props.guardrailId && props.guardrailVersion) {
-        confirmUploadsEnv.GUARDRAIL_ID = props.guardrailId;
-        confirmUploadsEnv.GUARDRAIL_VERSION = props.guardrailVersion;
-      }
+      confirmUploadsEnv.GUARDRAIL_ID = props.guardrailId;
+      confirmUploadsEnv.GUARDRAIL_VERSION = props.guardrailVersion;
 
       confirmUploadsFn = new lambda.NodejsFunction(this, 'ConfirmUploadsFn', {
         entry: path.join(handlersDir, 'confirm-uploads.ts'),
@@ -896,18 +885,16 @@ export class TaskApi extends Construct {
         }));
       }
 
-      if (props.guardrailId) {
-        confirmUploadsFn.addToRolePolicy(new iam.PolicyStatement({
-          actions: ['bedrock:ApplyGuardrail'],
-          resources: [
-            Stack.of(this).formatArn({
-              service: 'bedrock',
-              resource: 'guardrail',
-              resourceName: props.guardrailId,
-            }),
-          ],
-        }));
-      }
+      confirmUploadsFn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['bedrock:ApplyGuardrail'],
+        resources: [
+          Stack.of(this).formatArn({
+            service: 'bedrock',
+            resource: 'guardrail',
+            resourceName: props.guardrailId,
+          }),
+        ],
+      }));
     }
 
     // Collect all Lambda functions for cdk-nag suppressions
@@ -1003,10 +990,8 @@ export class TaskApi extends Construct {
         NUDGES_TABLE_NAME: props.taskNudgesTable.tableName,
         NUDGE_RATE_LIMIT_PER_MINUTE: String(props.nudgeRateLimitPerMinute ?? 10),
       };
-      if (props.guardrailId && props.guardrailVersion) {
-        nudgeTaskEnv.GUARDRAIL_ID = props.guardrailId;
-        nudgeTaskEnv.GUARDRAIL_VERSION = props.guardrailVersion;
-      }
+      nudgeTaskEnv.GUARDRAIL_ID = props.guardrailId;
+      nudgeTaskEnv.GUARDRAIL_VERSION = props.guardrailVersion;
 
       const nudgeTaskFn = new lambda.NodejsFunction(this, 'NudgeTaskFn', {
         entry: path.join(handlersDir, 'nudge-task.ts'),
@@ -1021,18 +1006,16 @@ export class TaskApi extends Construct {
       props.taskTable.grantReadData(nudgeTaskFn);
       props.taskNudgesTable.grantReadWriteData(nudgeTaskFn);
 
-      if (props.guardrailId) {
-        nudgeTaskFn.addToRolePolicy(new iam.PolicyStatement({
-          actions: ['bedrock:ApplyGuardrail'],
-          resources: [
-            Stack.of(this).formatArn({
-              service: 'bedrock',
-              resource: 'guardrail',
-              resourceName: props.guardrailId,
-            }),
-          ],
-        }));
-      }
+      nudgeTaskFn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['bedrock:ApplyGuardrail'],
+        resources: [
+          Stack.of(this).formatArn({
+            service: 'bedrock',
+            resource: 'guardrail',
+            resourceName: props.guardrailId,
+          }),
+        ],
+      }));
 
       const nudge = taskById.addResource('nudge');
       nudge.addMethod('POST', new apigw.LambdaIntegration(nudgeTaskFn, { allowTestInvoke: false }), cognitoAuthOptions);
@@ -1310,9 +1293,7 @@ export class TaskApi extends Construct {
       // Webhook task creation needs same grants as createTask
       props.taskTable.grantReadWriteData(webhookCreateTaskFn);
       props.taskEventsTable.grantReadWriteData(webhookCreateTaskFn);
-      if (props.repoTable) {
-        props.repoTable.grantReadData(webhookCreateTaskFn);
-      }
+      props.repoTable.grantReadData(webhookCreateTaskFn);
       if (props.budgetTable) {
         props.budgetTable.grantReadData(webhookCreateTaskFn);
         webhookCreateTaskFn.addToRolePolicy(new iam.PolicyStatement({
@@ -1328,18 +1309,16 @@ export class TaskApi extends Construct {
         }));
       }
 
-      if (props.guardrailId) {
-        webhookCreateTaskFn.addToRolePolicy(new iam.PolicyStatement({
-          actions: ['bedrock:ApplyGuardrail'],
-          resources: [
-            Stack.of(this).formatArn({
-              service: 'bedrock',
-              resource: 'guardrail',
-              resourceName: props.guardrailId,
-            }),
-          ],
-        }));
-      }
+      webhookCreateTaskFn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['bedrock:ApplyGuardrail'],
+        resources: [
+          Stack.of(this).formatArn({
+            service: 'bedrock',
+            resource: 'guardrail',
+            resourceName: props.guardrailId,
+          }),
+        ],
+      }));
 
       grantInlineAttachmentStorage(webhookCreateTaskFn, props.attachmentsBucket);
 
