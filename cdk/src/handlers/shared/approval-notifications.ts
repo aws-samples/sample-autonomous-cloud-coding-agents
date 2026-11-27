@@ -49,6 +49,23 @@ export interface ApprovalNotification {
   readonly marker: string;
   /** When a pending request is denied unanswered (ISO), if it has a timeout. */
   readonly deadline?: string;
+  /** Why a pending request can be denied in Linear but not approved there ({@link linearApprovalRefusal}). */
+  readonly linearRefusal?: string;
+}
+
+/**
+ * Why a request can be denied in Linear but not approved there, or null when it can
+ * be both. When the scan changed the saved arguments, the notice hides part of the
+ * action, and an approval would be given for something the owner could not read.
+ * @param row - the approval row.
+ */
+export function linearApprovalRefusal(row: Record<string, unknown>): string | null {
+  const preview = typeof row.tool_input_preview === 'string' ? row.tool_input_preview : '';
+  if (scanDenyReason(preview) !== preview) {
+    return 'Part of this action looks like a credential, so it is hidden here, and a request you cannot read in full '
+      + 'cannot be approved in Linear. Run bgagent pending to see it, then approve it with bgagent approve.';
+  }
+  return null;
 }
 
 /** Where a notice goes. A Linear agent session answers with buttons, not a comment reply. */
@@ -149,7 +166,12 @@ function pendingLines(
   if (Number.isFinite(deadline) && Number(row.timeout_s) > 0) {
     lines.push(`Decision deadline: ${new Date(deadline).toISOString()}`);
   }
-  if (channel === 'linear') {
+  const refusal = linearApprovalRefusal(row);
+  if (refusal && channel !== 'slack') {
+    lines.push('', refusal, channel === 'linear'
+      ? 'You can deny it here: reply deny, with an optional reason, to this comment while signed in as the task owner.'
+      : 'You can deny it here: reply deny, with an optional reason. Only the task owner can decide.');
+  } else if (channel === 'linear') {
     lines.push('', 'Reply approve, or deny with an optional reason (for example "deny use the staging config"),',
       'to this comment while signed in as the task owner.');
   } else if (channel === 'linear_session') {
@@ -264,6 +286,7 @@ export async function loadApprovalNotification(
     userId: task.user_id,
     marker,
     ...(deadline && { deadline }),
+    ...(status === 'PENDING' && linearApprovalRefusal(row) && { linearRefusal: linearApprovalRefusal(row)! }),
   };
 }
 

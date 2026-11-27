@@ -107,3 +107,13 @@ test('a button value carries its request; typed answers do not', () => {
   expect(parseSessionApprovalAnswer(`deny request ${REQ}`)).toEqual({ decision: 'deny', requestId: REQ });
   expect(parseSessionApprovalAnswer('deny request a refund')).toEqual({ decision: 'deny', reason: 'request a refund' });
 });
+
+test('a request that cannot be approved in Linear is asked without buttons', () => {
+  const refusal = 'Part of this action looks like a credential, so it is hidden here.';
+  const a = sessionApprovalActivity('approval_requested', { ...notice('2026-11-25T21:40:00Z'), linearRefusal: refusal }, NOW);
+  expect(a.content.type).toBe('elicitation');
+  expect(a.signal).toBeUndefined();
+  const again = repeatedApprovalChoice('That isn\'t an answer.', REQ, refusal);
+  expect(again.signal).toBeUndefined();
+  expect((again.content as { body: string }).body).toContain(refusal);
+});

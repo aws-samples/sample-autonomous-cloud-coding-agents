@@ -18,9 +18,10 @@
  */
 
 import { GetCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { linearApprovalRefusal } from './approval-notifications';
 import {
   closeLinearApprovalThread, linearApprovalCommentId, parseLinearApprovalReply, readLinearApprovalThread,
-  type LinearApprovalReply,
+  type LinearApprovalReply, type LinearApprovalThread,
 } from './linear-approval-thread';
 import { postIdentifiedComment, readLinearApprovalComment } from './linear-feedback';
 import { logger } from './logger';
@@ -96,39 +97,7 @@ export async function handleLinearApprovalReply(
     return true;
   }
   const source = JSON.stringify(['linear', workspaceId, event.data.id]);
-  const expectedStatus = decision === 'approve' ? 'APPROVED' : 'DENIED';
-  const readApproval = async () => (await deps.ddb.send(new GetCommand({
-    TableName: deps.approvalsTable, Key: { task_id: thread.taskId, request_id: thread.requestId }, ConsistentRead: true,
-  }))).Item;
-  const alreadyRecorded = (row: Awaited<ReturnType<typeof readApproval>>) =>
-    row?.user_id === userId && row.status === expectedStatus && row.decision_source === source;
-  let recorded = alreadyRecorded(await readApproval());
-  if (!recorded) {
-    // Loaded only for configured approval integrations; ordinary comment paths
-    // do not require the decision handlers' environment variables.
-    const record = decision === 'approve'
-      ? (await import('../approve-task.js')).recordApprovalForUser
-      : (await import('../deny-task.js')).recordDenialForUser;
-    const result = await record({
-      userId,
-      taskId: thread.taskId,
-      decisionSource: source,
-      // The verified comment body (read back from Linear), not the webhook copy.
-      body: JSON.stringify({
-        request_id: thread.requestId,
-        decision,
-        ...(decision === 'deny' && reply.reason ? { reason: reply.reason } : {}),
-      }),
-    });
-    recorded = result.statusCode === 202 || alreadyRecorded(await readApproval());
-    if (!recorded) {
-      if (result.statusCode >= 500) throw new Error(`Linear approval decision failed: HTTP ${result.statusCode}`);
-      await respond(result.statusCode === 429
-        ? 'Too many approval decisions. Wait a minute, then send a new reply.'
-        : 'This request is already closed, expired, or no longer waiting. No new decision was recorded.');
-      return true;
-    }
-  }
+  if (!await recordReply(deps, thread, userId, reply, source, respond)) return true;
   await closeLinearApprovalThread(deps.ddb, deps.approvalsTable, thread);
   await respond(decision === 'approve'
     ? 'Approved for this action once. The decision is saved and the agent continues.'
@@ -137,4 +106,54 @@ export async function handleLinearApprovalReply(
     task_id: thread.taskId, request_id: thread.requestId, comment_id: event.data.id, decision,
   });
   return true;
+}
+
+/**
+ * Record the owner's decision, unless it is recorded already (a duplicate delivery).
+ * False when nothing was recorded; the reply then says why.
+ */
+async function recordReply(
+  deps: ApprovalReplyDependencies,
+  thread: LinearApprovalThread,
+  userId: string,
+  reply: LinearApprovalReply,
+  source: string,
+  respond: (body: string) => Promise<void>,
+): Promise<boolean> {
+  const { decision } = reply;
+  const expectedStatus = decision === 'approve' ? 'APPROVED' : 'DENIED';
+  const readApproval = async () => (await deps.ddb.send(new GetCommand({
+    TableName: deps.approvalsTable, Key: { task_id: thread.taskId, request_id: thread.requestId }, ConsistentRead: true,
+  }))).Item;
+  const alreadyRecorded = (row: Awaited<ReturnType<typeof readApproval>>) =>
+    row?.user_id === userId && row.status === expectedStatus && row.decision_source === source;
+  const row = await readApproval();
+  if (alreadyRecorded(row)) return true;
+  const refusal = decision === 'approve' && row ? linearApprovalRefusal(row) : null;
+  if (refusal) {
+    await respond(`${refusal} No decision was recorded.`);
+    return false;
+  }
+  // Loaded only for configured approval integrations; ordinary comment paths
+  // do not require the decision handlers' environment variables.
+  const record = decision === 'approve'
+    ? (await import('../approve-task.js')).recordApprovalForUser
+    : (await import('../deny-task.js')).recordDenialForUser;
+  const result = await record({
+    userId,
+    taskId: thread.taskId,
+    decisionSource: source,
+    // The verified comment body (read back from Linear), not the webhook copy.
+    body: JSON.stringify({
+      request_id: thread.requestId,
+      decision,
+      ...(decision === 'deny' && reply.reason ? { reason: reply.reason } : {}),
+    }),
+  });
+  if (result.statusCode === 202 || alreadyRecorded(await readApproval())) return true;
+  if (result.statusCode >= 500) throw new Error(`Linear approval decision failed: HTTP ${result.statusCode}`);
+  await respond(result.statusCode === 429
+    ? 'Too many approval decisions. Wait a minute, then send a new reply.'
+    : 'This request is already closed, expired, or no longer waiting. No new decision was recorded.');
+  return false;
 }

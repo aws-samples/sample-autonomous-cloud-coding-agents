@@ -131,9 +131,11 @@ export function waitingOnYouLine(deadline: string | undefined, now: Date = new D
 
 /**
  * The buttons for one request, as ``emitAgentActivity`` options. Each value names the
- * request, so a click on an older choice cannot decide a later request.
+ * request, so a click on an older choice cannot decide a later request. A request
+ * that cannot be approved in Linear gets no buttons: it is denied by a typed reply.
  */
-function choice(body: string, requestId: string): SessionApprovalActivity {
+function choice(body: string, requestId: string, refusal?: string): SessionApprovalActivity {
+  if (refusal) return { content: { type: 'elicitation', body } };
   const option = (label: string, verb: string) => ({ label, value: `${verb} request ${requestId}` });
   const options = [option('Approve', 'approve'), option('Deny', 'deny')];
   return { content: { type: 'elicitation', body }, signal: 'select', signalMetadata: { options } };
@@ -151,7 +153,7 @@ export function sessionApprovalActivity(
 ): SessionApprovalActivity {
   const body = approvalNotificationMarkdown(notification);
   if (eventType === 'approval_requested') {
-    return choice(`${body}\n\n${waitingOnYouLine(notification.deadline, now)}`, notification.requestId);
+    return choice(`${body}\n\n${waitingOnYouLine(notification.deadline, now)}`, notification.requestId, notification.linearRefusal);
   }
   return { content: { type: 'thought', body } };
 }
@@ -162,9 +164,12 @@ export function sessionApprovalActivity(
  * showing the session as waiting for input.
  * @param lead - why it is shown again.
  * @param requestId - the open request.
+ * @param refusal - why it cannot be approved in Linear, if it cannot.
  */
-export function repeatedApprovalChoice(lead: string, requestId: string): SessionApprovalActivity {
-  return choice(`${lead}\n\nChoose **Approve** or **Deny**, or reply deny with a reason.`, requestId);
+export function repeatedApprovalChoice(lead: string, requestId: string, refusal?: string): SessionApprovalActivity {
+  return refusal
+    ? choice(`${lead}\n\n${refusal} You can deny it here: reply deny, with an optional reason.`, requestId, refusal)
+    : choice(`${lead}\n\nChoose **Approve** or **Deny**, or reply deny with a reason.`, requestId);
 }
 
 /** What the decision handlers return. */

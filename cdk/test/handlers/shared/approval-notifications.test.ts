@@ -235,3 +235,24 @@ test('redacts known credential shapes before posting a preview to a shared chann
   // eslint-disable-next-line no-control-regex -- asserts the escape character was stripped
   expect(message.text).not.toMatch(/[\u001b\u202e]/);
 });
+
+describe('a request the scan changed cannot be approved in Linear', () => {
+  const hidden = { ...row, severity: 'medium', tool_input_preview: JSON.stringify({ command: 'git push --force https://u:p@github.com/org/repo.git HEAD:main' }) };
+
+  test.each(['linear', 'linear_session'] as const)('the %s notice says what was hidden and offers only deny', async (channel) => {
+    send.mockResolvedValue({ Item: hidden });
+    const message = (await loadApprovalNotification(ddb, task, 'approval_requested', { request_id: 'gate' }, channel))!;
+    expect(message.text).toContain('Command: "git push --force https://[REDACTED-CONNECTION_STRING]@github.com/org/repo.git HEAD:main"');
+    expect(message.text).toContain('Part of this action looks like a credential, so it is hidden here');
+    expect(message.text).toContain('Run bgagent pending to see it');
+    expect(message.text).not.toMatch(/Reply approve|Choose Approve/);
+    expect(message.linearRefusal).toMatch(/^Part of this action looks like a credential/);
+  });
+
+  test('a request the scan left alone can be approved in Linear', async () => {
+    send.mockResolvedValue({ Item: { ...row, severity: 'medium' } });
+    const message = (await loadApprovalNotification(ddb, task, 'approval_requested', { request_id: 'gate' }, 'linear'))!;
+    expect(message.linearRefusal).toBeUndefined();
+    expect(message.text).toContain('Reply approve');
+  });
+});

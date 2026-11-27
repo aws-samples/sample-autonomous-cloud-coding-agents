@@ -887,6 +887,19 @@ describe('handleAgentSessionEvent — approval requests in the session (#1066)',
     expect(lastEmit()[2].type).toBe('elicitation');
   });
 
+  test('a request the scan changed is not approved in the session; the answer says why, without buttons', async () => {
+    waiting();
+    approvalRow = { ...approvalRow, tool_input_preview: JSON.stringify({ command: 'curl https://u:p@h/x' }) };
+    await answer('approve');
+    expect(recordApprovalMock).not.toHaveBeenCalled();
+    const [, , content, options] = lastEmit();
+    expect(content.type).toBe('elicitation');
+    expect(String(content.body)).toMatch(/^Part of this action looks like a credential/);
+    expect(options).not.toEqual(expect.objectContaining({ signal: 'select' }));
+    await answer('deny');
+    expect(recordDenialMock).toHaveBeenCalled();
+  });
+
   test('a typed "approve for this task" is not an answer: nothing is decided and the choice comes back', async () => {
     waiting();
     approvalRow = { ...approvalRow, matching_rule_ids: ['write_env_files'] };

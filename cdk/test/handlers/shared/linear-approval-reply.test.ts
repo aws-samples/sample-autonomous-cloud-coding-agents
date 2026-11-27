@@ -224,3 +224,21 @@ test('retries transient decision and acknowledgement failures', async () => {
   mockPost.mockResolvedValue({ ok: false, retryable: true });
   await expect(handleLinearApprovalReply(event, deps)).rejects.toThrow('acknowledgement failure');
 });
+
+describe('a request the scan changed', () => {
+  beforeEach(() => {
+    approval = { user_id: 'owner', status: 'PENDING', tool_input_preview: JSON.stringify({ command: 'curl https://u:p@h/x' }) };
+  });
+
+  test('is not approved by a reply: the reply says why and where to approve', async () => {
+    expect(await handleLinearApprovalReply(event, deps)).toBe(true);
+    expect(mockApprove).not.toHaveBeenCalled();
+    expect(mockPost.mock.calls[0][1].body).toMatch(/^Part of this action looks like a credential.*No decision was recorded\.$/s);
+  });
+
+  test('can still be denied', async () => {
+    mockReadComment.mockResolvedValue({ id: 'reply', body: 'deny', user: { id: 'real-author' }, issue: { id: 'issue' }, parent: { id: root } });
+    expect(await handleLinearApprovalReply({ ...event, data: { ...event.data, body: 'deny' } }, deps)).toBe(true);
+    expect(mockDeny).toHaveBeenCalled();
+  });
+});

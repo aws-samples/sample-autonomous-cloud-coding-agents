@@ -20,6 +20,7 @@
 import { GetCommand } from '@aws-sdk/lib-dynamodb';
 import { ulid } from 'ulid';
 import { TERMINAL_STATUSES, type TaskStatusType } from '../../constructs/task-status';
+import { linearApprovalRefusal } from './approval-notifications';
 import { cancelTask, stopTaskCompute, type CancelTaskTables } from './cancel-task-core';
 import { buildClarifyResumeDescription, isClarifyHold, type ClarifyHoldRow } from './clarify-resume';
 import { screenWithGuardrail } from './context-hydration';
@@ -513,8 +514,9 @@ async function decideSessionApproval(
   emit: SessionEmit,
   accessToken: string,
 ): Promise<void> {
+  const notApprovableHere = await linearRefusalOf(task.task_id, requestId);
   const again = async (lead: string) => {
-    const activity = repeatedApprovalChoice(lead, requestId);
+    const activity = repeatedApprovalChoice(lead, requestId, notApprovableHere);
     await emit(activity.content, false, activity);
   };
   const answer = parseSessionApprovalAnswer(request.directive);
@@ -534,6 +536,10 @@ async function decideSessionApproval(
   }
   if (!TASK_APPROVALS_TABLE_NAME) {
     await emit({ type: 'thought', body: 'Approvals can\'t be answered in Linear on this deployment. Use `bgagent approve` / `bgagent deny`.' });
+    return;
+  }
+  if (notApprovableHere && answer.decision === 'approve') {
+    await emit({ type: 'elicitation', body: `${notApprovableHere} Nothing was decided. You can deny it here: reply deny, with an optional reason.` });
     return;
   }
   const prompt = await confirmedPrompt(request, answer, accessToken);
@@ -594,6 +600,15 @@ async function confirmedPrompt(
     && echoed?.decision === answer.decision && (echoed.reason ?? '') === (answer.reason ?? '')
     && echoed.requestId === answer.requestId;
   return same ? prompt : null;
+}
+
+/** Why the open request cannot be approved in Linear, read consistently from its row; undefined when it can. */
+async function linearRefusalOf(taskId: string, requestId: string): Promise<string | undefined> {
+  if (!TASK_APPROVALS_TABLE_NAME) return undefined;
+  const { Item } = await ddb.send(new GetCommand({
+    TableName: TASK_APPROVALS_TABLE_NAME, Key: { task_id: taskId, request_id: requestId }, ConsistentRead: true,
+  }));
+  return (Item && linearApprovalRefusal(Item)) ?? undefined;
 }
 
 /** The prior task as read from the base table (strongly consistent). */
