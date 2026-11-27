@@ -141,7 +141,11 @@ export function waitingOnYouLine(deadline: string | undefined, now: Date = new D
 function choice(body: string, requestId: string, refusal?: string): SessionApprovalActivity {
   if (refusal) return { content: { type: 'elicitation', body } };
   const option = (label: string, verb: string) => ({ label, value: `${verb} request ${requestId}` });
-  const options = [option('Approve', 'approve'), option('Deny', 'deny')];
+  // Linear does not document whether a click comes back as the option's value or its
+  // label. The value names the request. "Approve once" is no typed answer, so a label
+  // read back cannot approve a request the choice was not shown with; "Deny" reads as
+  // a typed deny, which lets nothing through.
+  const options = [option('Approve once', 'approve'), option('Deny', 'deny')];
   return { content: { type: 'elicitation', body }, signal: 'select', signalMetadata: { options } };
 }
 
@@ -173,7 +177,7 @@ export function sessionApprovalActivity(
 export function repeatedApprovalChoice(lead: string, requestId: string, refusal?: string): SessionApprovalActivity {
   return refusal
     ? choice(`${lead}\n\n${refusal} You can deny it here: reply deny, with an optional reason.`, requestId, refusal)
-    : choice(`${lead}\n\nChoose **Approve** or **Deny**, or reply deny with a reason.`, requestId);
+    : choice(`${lead}\n\nChoose **Approve once** or **Deny**, or reply deny with a reason.`, requestId);
 }
 
 /** What the decision handlers return. */

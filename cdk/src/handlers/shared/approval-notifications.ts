@@ -180,7 +180,7 @@ function pendingLines(
     lines.push('', 'Reply approve, or deny with an optional reason (for example "deny use the staging config"),',
       'to this comment while signed in as the task owner.');
   } else if (channel === 'linear_session') {
-    lines.push('', 'Choose Approve or Deny below, or reply deny with a reason (for example "deny use the staging config").',
+    lines.push('', 'Choose Approve once or Deny below, or reply deny with a reason (for example "deny use the staging config").',
       'Only the task owner can decide.');
   }
   lines.push('', 'Technical details / CLI alternative',
