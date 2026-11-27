@@ -1018,7 +1018,7 @@ describe('AgentStack', () => {
   });
 
   test('the fan-out consumer can reach BOTH surfaces\' credentials registries', () => {
-    // Its Jira and Linear props are OPTIONAL on the construct, so dropping one
+    // The construct takes any list of trackers, so dropping one
     // from the stack wiring disables that surface's final-status comment with no
     // synth error and no test failure elsewhere — a silent capability loss. Pin
     // both env vars so the omission fails here instead.
@@ -1046,6 +1046,42 @@ describe('AgentStack', () => {
     const asJson = JSON.stringify(fanoutPolicies.map(([, p]) => p));
     expect(asJson).toContain('bgagent-linear-oauth-*');
     expect(asJson).toContain('bgagent-jira-oauth-*');
+  });
+
+  test('the orchestrator and the screenshot processor can reach BOTH surfaces\' credentials registries', () => {
+    // Neither wiring fails synthesis when it is dropped: the orchestrator then loses the
+    // queued notice on that surface, the screenshot processor the preview on its issues.
+    const fns = Object.entries(template.findResources('AWS::Lambda::Function'));
+    for (const prefix of ['TaskOrchestratorOrchestratorFn', 'GitHubScreenshotIntegrationWebhookProcessorFn']) {
+      const vars = fns.find(([id]) => id.startsWith(prefix))?.[1].Properties.Environment.Variables ?? {};
+      expect([prefix, vars.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME, vars.JIRA_WORKSPACE_REGISTRY_TABLE_NAME])
+        .toEqual([prefix, expect.anything(), expect.anything()]);
+    }
+    // The processor finds the reply of an iteration through each tracker's task-table index.
+    const processorPolicies = JSON.stringify(Object.entries(template.findResources('AWS::IAM::Policy'))
+      .filter(([id]) => id.startsWith('GitHubScreenshotIntegrationWebhookProcessorFn')));
+    expect(processorPolicies).toContain('/index/LinearIssueIndex');
+    expect(processorPolicies).toContain('/index/JiraIssueIndex');
+  });
+
+  test('only these functions can store a rotated OAuth token of a tracker', () => {
+    // The write on a tracker's OAuth secrets is one argument of grantFeedback: a function that
+    // gains or loses it shows here.
+    const writers = (secrets: string) => [...new Set(
+      ['AWS::IAM::Policy', 'AWS::IAM::ManagedPolicy'].flatMap(type => Object.entries(template.findResources(type)))
+        .filter(([, policy]) => policy.Properties.PolicyDocument.Statement.some((statement: { Action: string | string[]; Resource: unknown }) =>
+          [statement.Action].flat().includes('secretsmanager:PutSecretValue') && JSON.stringify(statement.Resource).includes(secrets)))
+        .map(([id]) => id.replace(/ServiceRole(DefaultPolicy|OverflowPolicy\d+)[0-9A-F]{8}$/, '')),
+    )].sort();
+
+    expect(writers(':secret:bgagent-linear-oauth-*')).toEqual([
+      'FanOutConsumerFanOutFn', 'GitHubScreenshotIntegrationWebhookProcessorFn', 'LinearIntegrationWebhookProcessorFn',
+      'TaskOrchestratorOrchestratorFn',
+    ]);
+    expect(writers(':secret:bgagent-jira-oauth-*')).toEqual([
+      'FanOutConsumerFanOutFn', 'GitHubScreenshotIntegrationWebhookProcessorFn', 'IterationHeartbeatSweepFn',
+      'JiraIntegrationWebhookProcessorFn', 'OrchestrationReconcilerReconcilerFn', 'TaskOrchestratorOrchestratorFn',
+    ]);
   });
 
   test('the stranded-orchestration sweep gets the registry its panel refresh needs', () => {

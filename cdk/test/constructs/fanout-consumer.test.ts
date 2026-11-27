@@ -29,6 +29,7 @@ import { App, Stack } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import { FanOutConsumer } from '../../src/constructs/fanout-consumer';
+import { grantTrackerFeedback } from '../../src/constructs/integration-parts';
 
 function makeTaskEventsTable(stack: Stack): dynamodb.Table {
   return new dynamodb.Table(stack, 'TaskEventsTable', {
@@ -166,7 +167,7 @@ describe('FanOutConsumer', () => {
     });
   });
 
-  test('wires JIRA_WORKSPACE_REGISTRY_TABLE_NAME + the bgagent-jira-oauth-* grant when the Jira props are provided (#573)', () => {
+  test('wires JIRA_WORKSPACE_REGISTRY_TABLE_NAME + the bgagent-jira-oauth-* grant when the Jira tracker is provided (#573)', () => {
     const app = new App();
     const stack = new Stack(app, 'TestStack');
     const jiraRegistry = new dynamodb.Table(stack, 'JiraRegistry', {
@@ -174,9 +175,10 @@ describe('FanOutConsumer', () => {
     });
     new FanOutConsumer(stack, 'FanOut', {
       taskEventsTable: makeTaskEventsTable(stack),
-      jiraWorkspaceRegistryTable: jiraRegistry,
-      jiraOauthSecretArnPattern:
-        'arn:aws:secretsmanager:us-east-1:111122223333:secret:bgagent-jira-oauth-*',
+      trackers: [{
+        issueIndexName: 'JiraIssueIndex',
+        grantFeedback: (fn, options) => grantTrackerFeedback(fn, jiraRegistry, 'JIRA_WORKSPACE_REGISTRY_TABLE_NAME', 'bgagent-jira-oauth-*', options.writeBack),
+      }],
     });
     const template = Template.fromStack(stack);
 
@@ -195,19 +197,19 @@ describe('FanOutConsumer', () => {
           Match.objectLike({
             Action: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
             Effect: 'Allow',
-            Resource: Match.stringLikeRegexp('bgagent-jira-oauth-\\*'),
+            Resource: { 'Fn::Join': ['', Match.arrayWith([':secret:bgagent-jira-oauth-*'])] },
           }),
         ]),
       },
     });
   });
 
-  test('omits the JIRA env var + bgagent-jira-oauth-* grant when the Jira props are absent (graceful degrade)', () => {
+  test('omits the JIRA env var + bgagent-jira-oauth-* grant when the Jira tracker is absent (graceful degrade)', () => {
     const app = new App();
     const stack = new Stack(app, 'TestStack');
     new FanOutConsumer(stack, 'FanOut', {
       taskEventsTable: makeTaskEventsTable(stack),
-      // intentionally no Jira props
+      // intentionally no trackers
     });
     const template = Template.fromStack(stack);
 

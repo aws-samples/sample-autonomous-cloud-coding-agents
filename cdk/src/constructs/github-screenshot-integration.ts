@@ -29,7 +29,7 @@ import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
-import { webhookDedupTable } from './integration-parts';
+import { FeedbackTracker, webhookDedupTable } from './integration-parts';
 import { ScreenshotBucket } from './screenshot-bucket';
 import { ComponentUaAspect } from './solution-ua-aspect';
 
@@ -70,17 +70,13 @@ export interface GitHubScreenshotIntegrationProps {
   readonly githubTokenSecret: secretsmanager.ISecret;
 
   /**
-   * Optional — when provided, the processor also tries to post the
-   * screenshot to a linked Linear issue: the issue of the task that
-   * opened the PR, else the one resolved from the GitHub PR
-   * branch/title/body via a Linear-identifier regex (e.g. `ENG-42`) and
-   * looked up across all `status='active'` workspaces in the registry
-   * via Linear's `issueVcsBranchSearch` GraphQL.
+   * The trackers that also get the screenshot, on the issue of the task
+   * that opened the PR. Linear alone falls back to the issue resolved from
+   * the GitHub PR branch/title/body via a Linear-identifier regex (e.g.
+   * `ENG-42`) and looked up across all `status='active'` workspaces in the
+   * registry via Linear's `issueVcsBranchSearch` GraphQL.
    */
-  readonly linearWorkspaceRegistryTable?: dynamodb.ITable;
-
-  /** Existing Jira registry for app-authored deployment preview feedback. */
-  readonly jiraWorkspaceRegistryTable?: dynamodb.ITable;
+  readonly trackers?: readonly FeedbackTracker[];
 
   /**
    * Optional — when provided, the processor persists the captured
@@ -228,12 +224,6 @@ export class GitHubScreenshotIntegration extends Construct {
         SCREENSHOT_BUCKET_NAME: this.screenshotBucket.bucket.bucketName,
         SCREENSHOT_PUBLIC_HOST: this.screenshotBucket.distribution.domainName,
         GITHUB_TOKEN_SECRET_ARN: props.githubTokenSecret.secretArn,
-        ...(props.linearWorkspaceRegistryTable && {
-          LINEAR_WORKSPACE_REGISTRY_TABLE_NAME: props.linearWorkspaceRegistryTable.tableName,
-        }),
-        ...(props.jiraWorkspaceRegistryTable && {
-          JIRA_WORKSPACE_REGISTRY_TABLE_NAME: props.jiraWorkspaceRegistryTable.tableName,
-        }),
         ...(props.taskTable && {
           TASK_TABLE_NAME: props.taskTable.tableName,
         }),
@@ -292,46 +282,9 @@ export class GitHubScreenshotIntegration extends Construct {
     this.screenshotBucket.bucket.grantPut(this.webhookProcessorFn);
     props.githubTokenSecret.grantRead(this.webhookProcessorFn);
 
-    // Optional Linear feedback path. Wired only when a registry table
-    // is provided. The processor scans the registry for active
-    // workspaces, then per-workspace looks up the OAuth token from
-    // Secrets Manager (`bgagent-linear-oauth-*` prefix, written by
-    // `bgagent linear setup`).
-    //
-    // PutSecretValue is intentional, not a typo: resolveLinearOauthToken
-    // rotates Linear's refresh token in place when it expires (the same
-    // pattern as the orchestrator role). This is a write grant by
-    // design — see linear-oauth-resolver.ts.
-    if (props.linearWorkspaceRegistryTable) {
-      props.linearWorkspaceRegistryTable.grantReadData(this.webhookProcessorFn);
-      this.webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
-        actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
-        resources: [
-          Stack.of(this).formatArn({
-            service: 'secretsmanager',
-            resource: 'secret',
-            arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-            resourceName: 'bgagent-linear-oauth-*',
-          }),
-        ],
-      }));
-    }
-
-    if (props.jiraWorkspaceRegistryTable) {
-      // The Jira OAuth resolver rotates refresh tokens and must persist the
-      // replacement token in the existing tenant-scoped secret. PutSecretValue
-      // enables that refresh path; it does not permit creating arbitrary secrets.
-      props.jiraWorkspaceRegistryTable.grantReadData(this.webhookProcessorFn);
-      this.webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
-        actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
-        resources: [Stack.of(this).formatArn({
-          service: 'secretsmanager',
-          resource: 'secret',
-          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-          resourceName: 'bgagent-jira-oauth-*',
-        })],
-      }));
-    }
+    // To post the screenshot on a tracker's issue the processor resolves a per-workspace
+    // token, and stores the token it rotates: the write to the secret is intended.
+    for (const tracker of props.trackers ?? []) tracker.grantFeedback(this.webhookProcessorFn, { writeBack: true });
 
     // Write access so the processor can persist screenshot_url onto the
     // deploy task's TaskRecord (conditional UpdateItem). grantWriteData covers
@@ -357,10 +310,7 @@ export class GitHubScreenshotIntegration extends Construct {
       // branch and writes only onto a task of the deployment's repository.
       // Without it no screenshot is stored and no tracker gets the preview.
       // Each tracker's index only when that tracker is wired (ADR-024).
-      const issueIndexes = [
-        ...(props.linearWorkspaceRegistryTable ? ['LinearIssueIndex'] : []),
-        ...(props.jiraWorkspaceRegistryTable ? ['JiraIssueIndex'] : []),
-      ];
+      const issueIndexes = (props.trackers ?? []).map(tracker => tracker.issueIndexName);
       const taskTableName = props.taskTable.tableName;
       if (issueIndexes.length > 0) {
         this.webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({

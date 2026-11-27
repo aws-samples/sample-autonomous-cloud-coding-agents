@@ -18,20 +18,21 @@
  */
 
 import * as path from 'path';
-import { ArnFormat, Aspects, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
+import { Aspects, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
-import { Runtime, Architecture } from 'aws-cdk-lib/aws-lambda';
+import { Runtime, Architecture, Function as LambdaFunction } from 'aws-cdk-lib/aws-lambda';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
-import { integrationTable, webhookDedupTable } from './integration-parts';
+import { FeedbackTracker, grantTrackerFeedback, integrationTable, secretArnPattern, webhookDedupTable } from './integration-parts';
 import { LinearIdentityVault } from './linear-identity-vault';
 import { ComponentUaAspect } from './solution-ua-aspect';
+import { LINEAR_ISSUE_INDEX_NAME } from './task-table-indexes';
 
 /** Default task-record retention used for TTL computation (days). */
 const DEFAULT_TASK_RETENTION_DAYS = 90;
@@ -199,7 +200,9 @@ export interface LinearIntegrationProps {
  * - API Gateway routes under /linear/*
  * - Two Secrets Manager secrets (webhook signing secret + personal API token)
  */
-export class LinearIntegration extends Construct {
+export class LinearIntegration extends Construct implements FeedbackTracker {
+  public readonly issueIndexName = LINEAR_ISSUE_INDEX_NAME;
+
   /**
    * DynamoDB table mapping Linear projects to GitHub repositories.
    *
@@ -448,14 +451,7 @@ export class LinearIntegration extends Construct {
     // refresh.
     webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
       actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
-      resources: [
-        Stack.of(this).formatArn({
-          service: 'secretsmanager',
-          resource: 'secret',
-          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-          resourceName: 'bgagent-linear-oauth-*',
-        }),
-      ],
+      resources: [secretArnPattern(this, 'bgagent-linear-oauth-*')],
     }));
     // RFC #249 Phase 1: grant the vault token data-plane calls when an identity
     // vault is wired. The SM grant above stays regardless — it is the fallback
@@ -541,14 +537,7 @@ export class LinearIntegration extends Construct {
     // CLI owns the lifecycle of these secrets.
     webhookFn.addToRolePolicy(new iam.PolicyStatement({
       actions: ['secretsmanager:GetSecretValue'],
-      resources: [
-        Stack.of(this).formatArn({
-          service: 'secretsmanager',
-          resource: 'secret',
-          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-          resourceName: 'bgagent-linear-oauth-*',
-        }),
-      ],
+      resources: [secretArnPattern(this, 'bgagent-linear-oauth-*')],
     }));
     webhookProcessorFn.grantInvoke(webhookFn);
 
@@ -592,14 +581,7 @@ export class LinearIntegration extends Construct {
     // documented prefix — same wildcard the webhook Lambdas already use.
     removeWorkspaceFn.addToRolePolicy(new iam.PolicyStatement({
       actions: ['secretsmanager:DeleteSecret'],
-      resources: [
-        Stack.of(this).formatArn({
-          service: 'secretsmanager',
-          resource: 'secret',
-          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-          resourceName: 'bgagent-linear-oauth-*',
-        }),
-      ],
+      resources: [secretArnPattern(this, 'bgagent-linear-oauth-*')],
     }));
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -677,6 +659,12 @@ export class LinearIntegration extends Construct {
         },
       ], true);
     }
+  }
+
+  public grantFeedback(fn: LambdaFunction, options: { readonly writeBack: boolean }): void {
+    grantTrackerFeedback(
+      fn, this.workspaceRegistryTable, 'LINEAR_WORKSPACE_REGISTRY_TABLE_NAME', 'bgagent-linear-oauth-*', options.writeBack,
+    );
   }
 }
 

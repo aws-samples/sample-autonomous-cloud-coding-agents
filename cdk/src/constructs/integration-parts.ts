@@ -17,8 +17,10 @@
  *  SOFTWARE.
  */
 
-import { RemovalPolicy } from 'aws-cdk-lib';
+import { ArnFormat, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import * as iam from 'aws-cdk-lib/aws-iam';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { Construct } from 'constructs';
 
 /**
@@ -59,4 +61,45 @@ export function webhookDedupTable(scope: Construct, removalPolicy: RemovalPolicy
     pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
     removalPolicy,
   });
+}
+
+/** The ARN pattern of the secrets whose name matches `namePattern`, in the account and Region of `scope`. */
+export function secretArnPattern(scope: Construct, namePattern: string): string {
+  return Stack.of(scope).formatArn({
+    service: 'secretsmanager',
+    resource: 'secret',
+    arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+    resourceName: namePattern,
+  });
+}
+
+/** A tracker to whose issues Lambdas outside its construct write feedback. */
+export interface FeedbackTracker {
+  /** The task-table index that leads from an issue of this tracker to its tasks. */
+  readonly issueIndexName: string;
+
+  /**
+   * Lets `fn` resolve the token of a workspace: read access to the workspace registry, the
+   * registry's name in the environment, and access to the OAuth secrets of the workspaces.
+   */
+  grantFeedback(fn: lambda.Function, options: {
+    /** Whether `fn` may store a rotated token. Without the write it reads a workspace's token and cannot store one. */
+    readonly writeBack: boolean;
+  }): void;
+}
+
+/** What a tracker's `grantFeedback` does, with that tracker's registry and names. */
+export function grantTrackerFeedback(
+  fn: lambda.Function,
+  registryTable: dynamodb.ITable,
+  registryEnvironmentName: string,
+  oauthSecretNamePattern: string,
+  writeBack: boolean,
+): void {
+  registryTable.grantReadData(fn);
+  fn.addEnvironment(registryEnvironmentName, registryTable.tableName);
+  fn.addToRolePolicy(new iam.PolicyStatement({
+    actions: ['secretsmanager:GetSecretValue', ...(writeBack ? ['secretsmanager:PutSecretValue'] : [])],
+    resources: [secretArnPattern(fn, oauthSecretNamePattern)],
+  }));
 }

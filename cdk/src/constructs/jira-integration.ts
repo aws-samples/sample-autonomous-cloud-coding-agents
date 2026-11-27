@@ -18,19 +18,20 @@
  */
 
 import * as path from 'path';
-import { ArnFormat, Aspects, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
+import { Aspects, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
-import { Runtime, Architecture } from 'aws-cdk-lib/aws-lambda';
+import { Runtime, Architecture, Function as LambdaFunction } from 'aws-cdk-lib/aws-lambda';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
-import { integrationTable, webhookDedupTable } from './integration-parts';
+import { FeedbackTracker, grantTrackerFeedback, integrationTable, secretArnPattern, webhookDedupTable } from './integration-parts';
 import { ComponentUaAspect } from './solution-ua-aspect';
+import { JIRA_ISSUE_INDEX_NAME } from './task-table-indexes';
 
 /** Default task-record retention used for TTL computation (days). */
 const DEFAULT_TASK_RETENTION_DAYS = 90;
@@ -141,7 +142,9 @@ export interface JiraIntegrationProps {
  * - API Gateway routes under /jira/*
  * - Webhook signing-secret placeholder (populated by `bgagent jira setup`)
  */
-export class JiraIntegration extends Construct {
+export class JiraIntegration extends Construct implements FeedbackTracker {
+  public readonly issueIndexName = JIRA_ISSUE_INDEX_NAME;
+
   /**
    * DynamoDB table mapping Jira Cloud projects to GitHub repositories.
    *
@@ -338,14 +341,7 @@ export class JiraIntegration extends Construct {
     // refresh-token JSON during expiring-token refresh.
     webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
       actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
-      resources: [
-        Stack.of(this).formatArn({
-          service: 'secretsmanager',
-          resource: 'secret',
-          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-          resourceName: 'bgagent-jira-oauth-*',
-        }),
-      ],
+      resources: [secretArnPattern(this, 'bgagent-jira-oauth-*')],
     }));
     props.taskTable.grantReadWriteData(webhookProcessorFn);
     props.taskEventsTable.grantReadWriteData(webhookProcessorFn);
@@ -417,14 +413,7 @@ export class JiraIntegration extends Construct {
     // CLI owns the lifecycle of these secrets.
     webhookFn.addToRolePolicy(new iam.PolicyStatement({
       actions: ['secretsmanager:GetSecretValue'],
-      resources: [
-        Stack.of(this).formatArn({
-          service: 'secretsmanager',
-          resource: 'secret',
-          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-          resourceName: 'bgagent-jira-oauth-*',
-        }),
-      ],
+      resources: [secretArnPattern(this, 'bgagent-jira-oauth-*')],
     }));
     webhookProcessorFn.grantInvoke(webhookFn);
 
@@ -503,5 +492,11 @@ export class JiraIntegration extends Construct {
         },
       ], true);
     }
+  }
+
+  public grantFeedback(fn: LambdaFunction, options: { readonly writeBack: boolean }): void {
+    grantTrackerFeedback(
+      fn, this.workspaceRegistryTable, 'JIRA_WORKSPACE_REGISTRY_TABLE_NAME', 'bgagent-jira-oauth-*', options.writeBack,
+    );
   }
 }
