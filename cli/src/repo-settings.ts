@@ -22,7 +22,10 @@ import { CliError } from './errors';
 import type { RepoSettings } from './repo-lookup';
 import { APPROVAL_GATE_CAP_MAX, APPROVAL_GATE_CAP_MIN, MAX_BUDGET_USD_MAX, MAX_BUDGET_USD_MIN } from './types';
 
-/** The largest UTF-8 size of a setting whose text comes from a file: 64 KB. The row, a DynamoDB item, holds at most 400 KB. */
+/**
+ * The largest UTF-8 size of a setting whose text comes from files: 64 KB. The agent refuses more operator rules than that
+ * (`POLICIES_MAX_BYTES` in agent/src/policy.py), and the row, a DynamoDB item, holds at most 400 KB.
+ */
 const REPO_TEXT_MAX_BYTES = 65536;
 
 /** The flag of `bgagent repo onboard` that sets one column. */
@@ -30,7 +33,9 @@ interface RepoSettingFlag {
   /** The Commander flag with its placeholder. */
   readonly flag: string;
   readonly description: string;
-  /** The largest UTF-8 size of the value, in bytes. */
+  /** The flag is repeatable: the column holds the list of its values. */
+  readonly list?: true;
+  /** The largest UTF-8 size of the value, in bytes; of all values together for a list. */
   readonly maxBytes?: number;
   /** The value to store; `undefined` for an empty one, which the command refuses. Throws `CliError` on a value the column cannot hold. */
   parse(raw: string): unknown;
@@ -39,6 +44,38 @@ interface RepoSettingFlag {
 /** The text without surrounding whitespace; `undefined` when nothing is left. */
 function trimmed(raw: string): string | undefined {
   return raw.trim() || undefined;
+}
+
+/** The parser of a flag that names a UTF-8 text file: the file's text without surrounding whitespace. */
+function textFile(flag: string): (file: string) => string | undefined {
+  return (file) => {
+    try {
+      // fatal: a file that is not UTF-8 is refused, not stored with replacement characters.
+      const text = new TextDecoder('utf-8', { fatal: true }).decode(fs.readFileSync(file));
+      // ASCII text saved as UTF-16 without a byte order mark decodes with a NUL per character: no task can start with such a prompt or such rules.
+      if (text.includes('\0')) throw new Error('the file holds a NUL character (UTF-16 or binary?)');
+      return trimmed(text);
+    } catch (err) {
+      throw new CliError(`Cannot read ${flag} '${file}': ${(err as Error).message}`);
+    }
+  };
+}
+
+/** The repeatable flag of a column that pins registry assets of one kind. The rest of a ref is checked when a task starts. */
+function registryRefs(flag: string, kind: string, asset: string): RepoSettingFlag {
+  const prefix = `registry://${kind}/`;
+  return {
+    flag: `${flag} <ref>`,
+    description: `${asset} from the registry, ${prefix}namespace/name@constraint (repeatable). The refs given replace the stored list.`,
+    list: true,
+    parse: (raw) => {
+      const ref = trimmed(raw);
+      if (ref && !ref.startsWith(prefix)) {
+        throw new CliError(`${flag} must start with ${prefix} (got '${ref}').`);
+      }
+      return ref;
+    },
+  };
 }
 
 /**
@@ -138,20 +175,17 @@ export const REPO_SETTINGS: Readonly<Record<keyof RepoSettings, RepoSettingFlag 
     flag: '--system-prompt-file <path>',
     description: `File with additional system prompt instructions for tasks (UTF-8, at most ${REPO_TEXT_MAX_BYTES / 1024} KB)`,
     maxBytes: REPO_TEXT_MAX_BYTES,
-    parse: (file) => {
-      try {
-        // fatal: a file that is not UTF-8 is refused, not stored with replacement characters.
-        const text = new TextDecoder('utf-8', { fatal: true }).decode(fs.readFileSync(file));
-        // A task cannot start with a NUL in its prompt. ASCII text saved as UTF-16 without a byte order mark decodes with one per character.
-        if (text.includes('\0')) throw new Error('the file holds a NUL character (UTF-16 or binary?)');
-        return trimmed(text);
-      } catch (err) {
-        throw new CliError(`Cannot read --system-prompt-file '${file}': ${(err as Error).message}`);
-      }
-    },
+    parse: textFile('--system-prompt-file'),
   },
-  cedar_policies: null,
-  mcp_servers: null,
-  cedar_policy_modules: null,
-  skills: null,
+  cedar_policies: {
+    flag: '--cedar-policy-file <path>',
+    description: 'Cedar rules for this repository, one file per entry (repeatable). The files given replace the stored rules. '
+      + `One tier per file: hard and soft rules go in separate files. The files are UTF-8, at most ${REPO_TEXT_MAX_BYTES / 1024} KB together.`,
+    list: true,
+    maxBytes: REPO_TEXT_MAX_BYTES,
+    parse: textFile('--cedar-policy-file'),
+  },
+  mcp_servers: registryRefs('--mcp-server', 'mcp_server', 'MCP server'),
+  cedar_policy_modules: registryRefs('--cedar-policy-module', 'cedar_policy_module', 'Cedar policy module'),
+  skills: registryRefs('--skill', 'skill', 'Skill'),
 };

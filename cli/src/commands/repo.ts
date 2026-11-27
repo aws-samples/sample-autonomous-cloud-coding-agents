@@ -19,6 +19,7 @@
 
 import { Command, Option } from 'commander';
 import { assertComputeSubstrateDeployed, defaultComputeType } from '../compute-substrate';
+import { DEPLOYMENT_FEATURES_OUTPUT, featureNotDeployedError, publishedFeatureNames } from '../deployment-profile';
 import { CliError } from '../errors';
 import { assertModelIdUsable } from '../model-id';
 import { DEFAULT_STACK_NAME, redactSecretArn, resolveOperatorContext } from '../operator-context';
@@ -57,7 +58,7 @@ const COMPUTE_COLUMN_WIDTH = 12;
 const MODEL_COLUMN_WIDTH = 28;
 const FIELD_LABEL_WIDTH = 28;
 
-function collect(value: string, previous: readonly string[]): readonly string[] {
+function collect(value: string, previous: readonly string[] = []): readonly string[] {
   return [...previous, value];
 }
 
@@ -176,7 +177,8 @@ export function makeRepoCommand(): Command {
     .option('--region <region>', 'AWS region (defaults to configured region or AWS_REGION)')
     .option('--stack-name <name>', 'CloudFormation stack name', DEFAULT_STACK_NAME);
   for (const setting of Object.values(REPO_SETTINGS)) {
-    if (setting) onboard.option(setting.flag, setting.description);
+    if (setting?.list) onboard.option(setting.flag, setting.description, collect);
+    else if (setting) onboard.option(setting.flag, setting.description);
   }
   repo.addCommand(
     onboard
@@ -194,18 +196,19 @@ export function makeRepoCommand(): Command {
           if (!setting) continue;
           const option = new Option(setting.flag);
           const raw = opts[option.attributeName()];
-          if (raw === undefined) continue;
-          const value = setting.parse(raw);
-          if (value === undefined) {
+          const raws: readonly string[] = raw === undefined ? [] : setting.list ? raw : [raw];
+          if (raws.length === 0) continue;
+          const values = raws.map((entry) => setting.parse(entry));
+          if (values.includes(undefined)) {
             throw new CliError(`${option.long} must not be empty (use --unset ${column} to remove the setting).`);
           }
           if (setting.maxBytes !== undefined) {
-            const bytes = Buffer.byteLength(String(value));
+            const bytes = Buffer.byteLength(values.join(''));
             if (bytes > setting.maxBytes) {
               throw new CliError(`${option.long}: ${bytes} bytes exceed the limit of ${setting.maxBytes}.`);
             }
           }
-          given[column] = value;
+          given[column] = setting.list ? values : values[0];
         }
         const set = given as RepoSettings;
         for (const column of opts.unset) {
@@ -224,6 +227,7 @@ export function makeRepoCommand(): Command {
           BedrockModelIds: grantedModelIds,
           ComputeDeploymentMode: computeDeploymentMode,
           ComputeTypes: computeTypes,
+          [DEPLOYMENT_FEATURES_OUTPUT]: deployedFeatures,
         } = await getStackOutputs(region, stackName, [
           'RepoTableName',
           'RuntimeArn',
@@ -233,11 +237,17 @@ export function makeRepoCommand(): Command {
           'BedrockModelIds',
           'ComputeDeploymentMode',
           'ComputeTypes',
+          DEPLOYMENT_FEATURES_OUTPUT,
         ]);
         if (!tableName) {
           throw new CliError(
             `Stack '${stackName}' is missing output 'RepoTableName'. Re-deploy the CDK stack.`,
           );
+        }
+        // A registry pin fails every task of the repository on a stack without the registry. A stack without the output predates it.
+        if ((set.mcp_servers || set.cedar_policy_modules || set.skills)
+          && deployedFeatures !== null && !publishedFeatureNames(deployedFeatures).includes('agentRegistry')) {
+          throw featureNotDeployedError('agentRegistry', stackName);
         }
         const deployment = { stackName, computeSubstrate, computeDeploymentMode, computeTypes };
         // Check explicit input early; onboardRepo also checks any stored override.
@@ -261,12 +271,18 @@ export function makeRepoCommand(): Command {
 
         const { config, previous } = await onboardRepo(region, tableName, repoId, { deployment, set, unset: opts.unset });
         const change = !previous ? 'onboarded' : previous.status === 'removed' ? 're-activated' : 'updated';
-        const notes = buildRepoOnboardNotes({
+        const replaced = Object.entries(set).flatMap(([column, value]) => {
+          const stored = previous?.[column as keyof RepoSettings];
+          return Array.isArray(value) && Array.isArray(stored) && stored.length > 0
+            ? [`${column}: stored entries replaced (${stored.length} before, ${value.length} now).`]
+            : [];
+        });
+        const notes = [...replaced, ...buildRepoOnboardNotes({
           config,
           platformRuntimeArn,
           platformGithubTokenSecretArn,
           defaultComputeType: defaultComputeType(deployment),
-        });
+        })];
 
         if (opts.output === 'json') {
           console.log(JSON.stringify({ repo: redactRepoRow(config), change, notes }, null, 2));
