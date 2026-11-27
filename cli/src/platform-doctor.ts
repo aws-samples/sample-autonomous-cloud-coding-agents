@@ -607,7 +607,7 @@ function checkActiveRepos(
     id,
     label,
     status: 'fail',
-    detail: 'No active repos in RepoTable. Register a Blueprint and redeploy.',
+    detail: 'No active repos in RepoTable. Run `bgagent repo onboard <owner/repo>`, or register a Blueprint and redeploy.',
   };
 }
 
