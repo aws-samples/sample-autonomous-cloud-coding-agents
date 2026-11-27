@@ -19,6 +19,7 @@
 
 import { GetCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { linearApprovalRefusal } from './approval-notifications';
+import { withoutLeadingMention } from './linear-agent-session-event';
 import {
   closeLinearApprovalThread, linearApprovalCommentId, parseLinearApprovalReply, readLinearApprovalThread,
   type LinearApprovalReply, type LinearApprovalThread,
@@ -45,24 +46,34 @@ function sameReply(a: LinearApprovalReply | null, b: LinearApprovalReply): boole
   return a?.decision === b.decision && (a.reason ?? '') === (b.reason ?? '');
 }
 
-/** A verified webhook may decide only the exact gate bound to its thread. */
+/** The answer in a reply: ``approve`` or ``deny [reason]``, also after a leading mention of the app. */
+function parseReply(body: unknown): LinearApprovalReply | null {
+  return typeof body === 'string' ? parseLinearApprovalReply(withoutLeadingMention(body)) : null;
+}
+
+/**
+ * A verified webhook may decide only the exact gate bound to its thread. Any other
+ * reply under a notice whose request is still open is answered with how to decide,
+ * and kept from the comment trigger: taken as a task request, ``@bgagent approve``
+ * written some other way would start a pull-request iteration. True when handled.
+ */
 export async function handleLinearApprovalReply(
   event: ApprovalReplyEvent, deps: ApprovalReplyDependencies,
 ): Promise<boolean> {
-  const reply = parseLinearApprovalReply(event.data.body);
   const workspaceId = event.organizationId;
   const parentId = event.data.parentId;
-  if (event.action !== 'create' || !reply || !workspaceId || !parentId || !event.data.id) return false;
-  const { decision } = reply;
+  if (event.action !== 'create' || !workspaceId || !parentId || !event.data.id) return false;
   const thread = await readLinearApprovalThread(deps.ddb, deps.approvalsTable, workspaceId, parentId);
   if (!thread) return false;
+  const reply = parseReply(event.data.body);
+  if (!reply && !await isRequestOpen(deps, thread)) return false;
   const issueId = event.data.issueId ?? event.data.issue?.id;
   if (issueId !== thread.issueId) return true;
   const ctx = { linearWorkspaceId: workspaceId, registryTableName: deps.registryTable };
   const comment = await readLinearApprovalComment(ctx, event.data.id);
   if (!comment || comment.id !== event.data.id || comment.botActor || !comment.user?.id
     || comment.issue?.id !== issueId || comment.parent?.id !== parentId
-    || !sameReply(parseLinearApprovalReply(comment.body), reply)) {
+    || (reply && !sameReply(parseReply(comment.body), reply))) {
     logger.warn('Linear approval webhook does not match a human comment', {
       task_id: thread.taskId, request_id: thread.requestId, comment_id: event.data.id,
     });
@@ -82,6 +93,11 @@ export async function handleLinearApprovalReply(
       if (posted.retryable) throw new Error('Retryable Linear approval acknowledgement failure');
     }
   };
+  if (!reply) {
+    await respond(NOT_AN_ANSWER_MESSAGE);
+    return true;
+  }
+  const { decision } = reply;
   const userId = await deps.lookupUser(workspaceId, comment.user.id);
   if (!userId || userId !== thread.userId) {
     await respond('Only the task owner can decide this request. Link your Linear account to ABCA, then reply again.');
@@ -106,6 +122,17 @@ export async function handleLinearApprovalReply(
     task_id: thread.taskId, request_id: thread.requestId, comment_id: event.data.id, decision,
   });
   return true;
+}
+
+const NOT_AN_ANSWER_MESSAGE = 'This request is waiting for a decision. To decide it, reply approve, or deny with an optional reason '
+  + '(for example "deny use the staging config"). Nothing was decided, and this reply was not passed to the agent.';
+
+/** Whether the thread's request is still waiting for a decision (read consistently). */
+async function isRequestOpen(deps: ApprovalReplyDependencies, thread: LinearApprovalThread): Promise<boolean> {
+  const { Item } = await deps.ddb.send(new GetCommand({
+    TableName: deps.approvalsTable, Key: { task_id: thread.taskId, request_id: thread.requestId }, ConsistentRead: true,
+  }));
+  return Item?.status === 'PENDING';
 }
 
 /**

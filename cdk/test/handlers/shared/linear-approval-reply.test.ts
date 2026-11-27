@@ -159,9 +159,41 @@ test.each(['update', 'remove'])('ignores %s events', async action => {
   expect(send).not.toHaveBeenCalled();
 });
 
-test.each(['I approve', '> approve', 'approve and delete it', '@bgagent approve'])('ignores prose: %s', async body => {
+test.each([
+  ['the @bgagent text form', '@bgagent approve'],
+  ['the @bgagent text form with a comma', '@bgagent, approve'],
+  ['the profile link Linear stores', '[@bgagent](https://linear.app/acme/profiles/bgagent) approve'],
+])('reads an answer after a leading mention in %s', async (_form, body) => {
+  mockReadComment.mockResolvedValue({ id: 'reply', body, user: { id: 'real-author' }, issue: { id: 'issue' }, parent: { id: root } });
+  expect(await handleLinearApprovalReply({ ...event, data: { ...event.data, body } }, deps)).toBe(true);
+  expect(mockApprove).toHaveBeenCalledWith(expect.objectContaining({ body: JSON.stringify({ request_id: 'gate', decision: 'approve' }) }));
+});
+
+test.each(['I approve', '> approve', 'approve and delete it', 'approve @bgagent', '@bgagent please fix the tests'])(
+  'answers any other reply under an open notice, and keeps it from the comment trigger: %s',
+  async body => {
+    mockReadComment.mockResolvedValue({ id: 'reply', body, user: { id: 'real-author' }, issue: { id: 'issue' }, parent: { id: root } });
+    expect(await handleLinearApprovalReply({ ...event, data: { ...event.data, body } }, deps)).toBe(true);
+    expect(mockApprove).not.toHaveBeenCalled();
+    expect(mockDeny).not.toHaveBeenCalled();
+    expect(mockPost.mock.calls[0][1]).toEqual(expect.objectContaining({
+      parentId: root, body: expect.stringContaining('reply approve, or deny with an optional reason'),
+    }));
+  },
+);
+
+test('leaves any other reply under a closed notice to the comment trigger', async () => {
+  approval = { user_id: 'owner', status: 'APPROVED' };
+  const body = '@bgagent please fix the tests';
   expect(await handleLinearApprovalReply({ ...event, data: { ...event.data, body } }, deps)).toBe(false);
-  expect(send).not.toHaveBeenCalled();
+  expect(mockPost).not.toHaveBeenCalled();
+});
+
+test('does not answer its own reply under an open notice', async () => {
+  const body = 'Only the task owner can decide this request.';
+  mockReadComment.mockResolvedValue({ id: 'reply', body, botActor: { id: 'app' }, user: null, issue: { id: 'issue' }, parent: { id: root } });
+  expect(await handleLinearApprovalReply({ ...event, data: { ...event.data, body } }, deps)).toBe(true);
+  expect(mockPost).not.toHaveBeenCalled();
 });
 
 test('ignores top-level replies and unknown threads', async () => {

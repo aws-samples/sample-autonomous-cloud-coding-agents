@@ -153,6 +153,19 @@ export const SESSION_STOP_CANCELLED_VIA = 'linear_session_stop';
  */
 const LEADING_PROFILE_MENTION = /^(?:\[[^\]\n]*\]\(\s*https:\/\/linear\.app\/[^\s)]+\/profiles\/[^\s)]+\s*\)|<?https:\/\/linear\.app\/\S+\/profiles\/[^\s>]+>?)[,:]?\s*/i;
 
+/** The ``@bgagent`` text form of a leading mention, with the same boundary as the comment trigger. */
+const LEADING_TEXT_MENTION = /^@bgagent(?!\w|\.\w)\.*[,:]?\s*/i;
+
+/**
+ * ``body`` without a leading mention of the app (its profile link, or ``@bgagent``),
+ * trimmed. People start every message to the bot with the mention, also an answer
+ * (``@bgagent approve``).
+ * @param body - a comment or prompt body.
+ */
+export function withoutLeadingMention(body: string | undefined): string {
+  return (body ?? '').trim().replace(LEADING_PROFILE_MENTION, '').replace(LEADING_TEXT_MENTION, '').trim();
+}
+
 /**
  * The comment Linear itself writes when an issue is delegated to an agent: it opens
  * the session's thread and carries no instruction.
@@ -167,7 +180,7 @@ const DELEGATION_THREAD_PLACEHOLDER = /^This thread is for an agent session with
  * way.
  */
 function mentionDirective(body: string | undefined): string {
-  const trimmed = (body ?? '').trim().replace(LEADING_PROFILE_MENTION, '').trim();
+  const trimmed = withoutLeadingMention(body);
   if (DELEGATION_THREAD_PLACEHOLDER.test(trimmed)) return '';
   const trigger = parseCommentTrigger(trimmed);
   return trigger.triggered ? trigger.instruction : trimmed;
