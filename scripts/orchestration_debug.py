@@ -60,6 +60,8 @@ def main():
     for m in meta:
         n = m.get("child_count", {}).get("N", "?")
         # Presence only (``in``): the secret ARN is never read, and only yes or no is printed.
+        # The name avoids "oauth": CodeQL's py/clear-text-logging-sensitive-data classifies a
+        # value by its variable name and reported ``has_oauth`` as a logged password (#1095).
         linked = "yes" if "linear_oauth_secret_arn" in m else "no"
         issue = renamed(m, "parent_issue_ref", "parent_linear_issue_id")
         print(f"  PARENT  issue={issue}  repo={s(m, 'repo')}  children={n}")
