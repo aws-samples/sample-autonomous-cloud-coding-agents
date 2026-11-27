@@ -49,7 +49,8 @@ export interface UserConcurrencyTableProps {
  *
  * Schema: user_id (PK). Each item holds an atomic counter (active_count)
  * representing the number of currently running tasks for the user.
- * The application layer uses conditional updates for increment/decrement.
+ * The application layer changes the counter and its reservation_version in
+ * transactions with per-task reservation markers.
  */
 export class UserConcurrencyTable extends Construct {
   /**

@@ -279,7 +279,7 @@ describe('reconcile-admission-queue — races and failures', () => {
     expect(updates[0].input.ConditionExpression).toBe('#s = :queued');
     expect(updates[0].input.ExpressionAttributeValues[':submitted']).toEqual({ S: 'SUBMITTED' });
     // Restore: guarded on SUBMITTED, sets QUEUED with a fresh QUEUED#<ts> status key.
-    expect(updates[1].input.ConditionExpression).toBe('#s = :submitted');
+    expect(updates[1].input.ConditionExpression).toBe('#s = :submitted AND attribute_not_exists(concurrency_slot)');
     expect(updates[1].input.ExpressionAttributeValues[':queued']).toEqual({ S: 'QUEUED' });
     expect(updates[1].input.ExpressionAttributeValues[':sca'].S).toMatch(/^QUEUED#/);
   });

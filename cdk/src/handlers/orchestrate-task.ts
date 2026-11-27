@@ -46,6 +46,7 @@ import { runPreflightChecks } from './shared/preflight';
 import { isAutoRetried, startSessionWithRetry } from './shared/session-start-retry';
 import { deleteEcsPayload } from './shared/strategies/ecs-strategy';
 import { deleteMicrovmPayload } from './shared/strategies/lambda-microvm-strategy';
+import { releaseTaskSlot } from './shared/task-concurrency';
 import type { TaskRecord } from './shared/types';
 import { workflowIsReadOnly, workflowRequiresRepo } from './shared/workflows';
 
@@ -149,6 +150,9 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
   });
 
   if (!admitted) {
+    // A task cancelled after its seat was taken returns it here; the marker
+    // makes this a no-op for a queued or never-admitted task.
+    await context.step('release-before-admission', () => releaseTaskSlot(taskId, task.user_id));
     return;
   }
 
@@ -184,6 +188,7 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
   });
 
   if (!preflightPassed) {
+    await context.step('release-before-work', () => releaseTaskSlot(taskId, task.user_id));
     return;
   }
 

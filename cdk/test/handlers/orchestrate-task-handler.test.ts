@@ -94,6 +94,11 @@ jest.mock('../../src/handlers/shared/compute-strategy', () => ({
   }),
 }));
 jest.mock('../../src/handlers/shared/strategies/ecs-strategy', () => ({ deleteEcsPayload: jest.fn() }));
+// Seat accounting has its own suite (task-concurrency*.test.ts); here the handler's steps only.
+jest.mock('../../src/handlers/shared/task-concurrency', () => ({
+  acquireTaskSlot: jest.fn(),
+  releaseTaskSlot: jest.fn().mockResolvedValue(undefined),
+}));
 jest.mock('../../src/handlers/shared/strategies/lambda-microvm-strategy', () => ({ deleteMicrovmPayload: jest.fn() }));
 
 process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME = 'LinearWorkspaceRegistry';
