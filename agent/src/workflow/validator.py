@@ -51,7 +51,7 @@ _REPO_ONLY_KINDS = frozenset(
 # both the legacy 2-segment illustrative form (``registry://prompt/name``, still
 # used by the workflow-validation corpus) and the strict #246 3-segment form
 # (``registry://mcp_server/ns/name@^1.4.1``). The authoritative #246 grammar is
-# ``registry.ref.parse_ref`` (mirrored in registry/ref.ts); resolution enforces
+# ``parseRef`` in ``cdk/src/handlers/shared/registry/ref.ts``; resolution enforces
 # the strict form. The kind segment gains ``_`` (snake_case kinds) and an optional
 # ``@<constraint>`` suffix so a valid strict ref never fails this check.
 _BUILTIN_REF = re.compile(r"^builtin/[a-z][a-z0-9_]*$")

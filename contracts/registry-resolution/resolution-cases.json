@@ -1,5 +1,5 @@
 {
-  "description": "Semver RESOLUTION parity corpus for the registry (#246). Each case is a set of candidate version strings plus a constraint; the expected `winner` is the highest candidate satisfying the constraint (or null for no match). Run against BOTH the TypeScript selectHighest (cdk/src/handlers/shared/registry/resolver.ts) and the Python select_highest (agent/src/registry/resolver.py). Both must agree. This complements cases.json (which covers grammar parsing only) by locking the RANKING semantics — caret/tilde ranges, prerelease exclusion, and near-MAX_SAFE_INTEGER comparisons — in lockstep across the two languages. See README.md.",
+  "description": "Semver RESOLUTION corpus for the registry (#246). Each case is a set of candidate version strings plus a constraint; the expected `winner` is the highest candidate satisfying the constraint (or null for no match). Run against the TypeScript selectHighest (cdk/src/handlers/shared/registry/resolver.ts). This complements cases.json (which covers grammar parsing only) by locking the RANKING semantics — caret/tilde ranges, prerelease exclusion, and near-MAX_SAFE_INTEGER comparisons. See README.md.",
   "cases": [
     {
       "name": "exact-match",

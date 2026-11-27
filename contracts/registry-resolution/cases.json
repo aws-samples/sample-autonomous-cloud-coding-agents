@@ -1,5 +1,5 @@
 {
-  "description": "Grammar parity corpus for the registry:// reference syntax (#246). Each case is run against BOTH the Python parser (agent/src/registry/ref.py::parse_ref) and the TypeScript parser (cdk/src/handlers/shared/registry/ref.ts::parseRef). Both must agree on ok/reason and, when ok, on the parsed fields. See README.md.",
+  "description": "Grammar corpus for the registry:// reference syntax (#246). Each case is run against the TypeScript parser (cdk/src/handlers/shared/registry/ref.ts::parseRef), which must return the expected ok/reason and, when ok, the parsed fields. See README.md.",
   "cases": [
     {
       "name": "exact-pin",

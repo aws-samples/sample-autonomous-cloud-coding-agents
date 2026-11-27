@@ -1,38 +1,17 @@
-# registry:// grammar parity fixtures (#246)
+# registry:// grammar and resolution fixtures (#246)
 
-Golden vectors shared by the two `registry://` implementations. There are two
-corpora, each run by a dual TS/Python runner:
+Golden vectors of the TypeScript `registry://` parser and resolver
+(`cdk/src/handlers/shared/registry/`). There is no second implementation: the
+agent receives the assets the orchestrator resolved. Two corpora, each with one
+runner:
 
 **1. Grammar** — `cases.json`, golden `(ref) → verdict`:
-
-- **Agent (Python):** [`agent/tests/test_registry_resolution_corpus.py`](../../agent/tests/test_registry_resolution_corpus.py)
-  runs each `ref` through `registry.ref.parse_ref`.
-- **CDK (TypeScript):** [`cdk/test/handlers/shared/registry-resolution-parity.test.ts`](../../cdk/test/handlers/shared/registry-resolution-parity.test.ts)
-  runs the same refs through `parseRef`.
+[`cdk/test/handlers/shared/registry-resolution-parity.test.ts`](../../cdk/test/handlers/shared/registry-resolution-parity.test.ts)
+runs each `ref` through `parseRef`.
 
 **2. Resolution ranking** — `resolution-cases.json`, golden `(candidates, constraint) → winner`:
-
-- **Agent (Python):** [`agent/tests/test_registry_resolution_ranking_corpus.py`](../../agent/tests/test_registry_resolution_ranking_corpus.py)
-  runs each case through `registry.resolver.select_highest`.
-- **CDK (TypeScript):** [`cdk/test/handlers/shared/registry-resolution-ranking-parity.test.ts`](../../cdk/test/handlers/shared/registry-resolution-ranking-parity.test.ts)
-  runs the same cases through `selectHighest`.
-
-Ranking runs in both languages (TS handler for the API, Python for the
-orchestrator's direct port), so caret/tilde/prerelease semantics must stay in
-lockstep — this second corpus is how we catch a ranking drift before deploy.
-
-Both parsers implement the identical grammar in different languages; this corpus
-is how we catch drift before deploy — the same mechanism
-[`contracts/workflow-validation/`](../workflow-validation/README.md)
-anticipates for the publish-path validator.
-
-## Why this lives in `contracts/`
-
-The `registry://` grammar is enforced on both sides of the platform: the
-orchestrator/handlers (TS) validate refs at publish and resolve time, and the
-agent (Python) parses resolved refs at load time. Neither `agent/` nor `cdk/`
-owns the grammar — it is an agreement *between* them, so it lives in this neutral
-directory both test suites reach into.
+[`cdk/test/handlers/shared/registry-resolution-ranking-parity.test.ts`](../../cdk/test/handlers/shared/registry-resolution-ranking-parity.test.ts)
+runs each case through `selectHighest`.
 
 ## Fixture shape
 
@@ -55,8 +34,8 @@ A single `cases.json` with a `cases` array. Each case:
 }
 ```
 
-Both parsers must agree on `ok`, on `reason` when `ok:false`, and on every parsed
-field when `ok:true`.
+The parser must return the expected `ok`, the `reason` when `ok:false`, and every
+parsed field when `ok:true`.
 
 ## Grammar (authoritative)
 
@@ -76,5 +55,5 @@ rejected with `INVALID_CONSTRAINT`; anything that does not match the ref shape i
 > **Note.** The workflow validator's `_REGISTRY_REF` (in `agent/src/workflow/
 > validator.py`) is a deliberately *looser* acceptance check that also admits the
 > legacy 2-segment illustrative form used by `contracts/workflow-validation/`.
-> This corpus pins the **strict** #246 grammar (`parse_ref` / `parseRef`), which
+> This corpus pins the **strict** #246 grammar (`parseRef`), which
 > is what resolution enforces.
