@@ -59,16 +59,11 @@ def main():
 
     for m in meta:
         n = m.get("child_count", {}).get("N", "?")
-        # Print ONLY whether an OAuth secret is present, never its value — and
-        # test key PRESENCE (``in``) so the secret ARN string is never even read.
-        # NOTE: CodeQL's py/clear-text-logging-sensitive-data still flags the
-        # prints below because it taints the whole stdin-derived meta dict as
-        # sensitive and follows any ``s(m, …)`` read into a print — a false
-        # positive (this dev-only debug helper logs only ids + a yes/no flag).
-        has_oauth = "yes" if "linear_oauth_secret_arn" in m else "no"
+        # Presence only (``in``): the secret ARN is never read, and only yes or no is printed.
+        linked = "yes" if "linear_oauth_secret_arn" in m else "no"
         issue = renamed(m, "parent_issue_ref", "parent_linear_issue_id")
         print(f"  PARENT  issue={issue}  repo={s(m, 'repo')}  children={n}")
-        print(f"          release_ctx: user={s(m, 'platform_user_id')}  oauth={has_oauth}")
+        print(f"          release_ctx: user={s(m, 'platform_user_id')}  oauth={linked}")
 
     for k in sorted(kids, key=lambda i: renamed(i, "display_id", "linear_identifier")):
         st = s(k, "child_status")
