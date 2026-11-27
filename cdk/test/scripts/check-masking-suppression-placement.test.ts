@@ -68,6 +68,8 @@ interface Options {
   readonly noGit?: boolean;
   /** Symbolic links to make before `git add`: path of the link -> its target. */
   readonly links?: Record<string, string>;
+  /** Files to delete after `git add`, so that git still lists them. */
+  readonly deleted?: readonly string[];
 }
 
 /** Run the script in a temp repo holding `files`, with a fake semgrep that reports `findings`. */
@@ -129,6 +131,7 @@ process.stdout.write(${JSON.stringify(JSON.stringify(report))});
       execFileSync('git', ['init', '--quiet'], { cwd: root, env, stdio: 'ignore' });
       execFileSync('git', ['add', '--all'], { cwd: root, env, stdio: 'ignore' });
     }
+    for (const rel of options.deleted ?? []) fs.rmSync(path.join(root, rel));
 
     const semgrepArgs = (): string[] => JSON.parse(fs.readFileSync(path.join(bin, 'args.json'), 'utf-8'));
     try {
@@ -292,6 +295,18 @@ describe('check-masking-suppression-placement', () => {
       expect(result.stderr).toBe('');
       expect(result.status).toBe(0);
       expect(result.stdout).toContain('0 semgrep suppressions in 2 files name a rule and a reason');
+    });
+
+    test('passes over a tracked file that is deleted in the working tree and not staged', () => {
+      const result = run(
+        { 'src/a.ts': 'export const x = 1;\n', 'src/gone.ts': 'export const y = 2;\n' },
+        [],
+        { scanned: ['src/a.ts'], deleted: ['src/gone.ts'] },
+      );
+
+      expect(result.stderr).toBe('');
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain('0 semgrep suppressions in 1 files name a rule and a reason');
     });
 
     test('reads a file that holds a NUL byte', () => {

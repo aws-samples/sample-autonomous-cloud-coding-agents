@@ -111,8 +111,9 @@ const { found, scanned } = scan();
 // Markdown by name or not: it picks its files by more than the name. No file is
 // left out for its content: semgrep reads a source file that holds a NUL byte.
 // A symbolic link and a submodule are left out: neither is a file, and semgrep
-// does not read through a link.
-const files = candidates.filter((f) => (!MARKDOWN.test(f) || scanned.has(f)) && lstatSync(f).isFile());
+// does not read through a link. So is a tracked file that was deleted and not
+// yet staged: git still lists it, and there is nothing to read.
+const files = candidates.filter((f) => (!MARKDOWN.test(f) || scanned.has(f)) && lstatSync(f, { throwIfNoEntry: false })?.isFile());
 const malformed = [];
 const unbound = [];
 let suppressions = 0;
