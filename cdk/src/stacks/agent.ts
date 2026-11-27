@@ -1578,7 +1578,7 @@ export class AgentStack extends Stack {
     const concurrencyMaintenance = new NestedStack(this, 'ConcurrencyMaintenance');
 
     // --- Concurrency counter reconciler (drift correction) ---
-    new ConcurrencyReconciler(concurrencyMaintenance, 'ConcurrencyReconciler', {
+    const concurrencyReconciler = new ConcurrencyReconciler(concurrencyMaintenance, 'ConcurrencyReconciler', {
       taskTable: taskTable.table,
       userConcurrencyTable: userConcurrencyTable.table,
     });
@@ -2265,6 +2265,9 @@ export class AgentStack extends Stack {
     // not exist yet at this point in the constructor.
     if (linearIntegration) {
       operationalAlerts.grantPublish(linearIntegration.webhookProcessorFn);
+      // #1004: the reconciler kicks the processor's grant health probe twice a day, so a
+      // grant that dies while nobody uses Linear is still detected and announced here.
+      concurrencyReconciler.triggerLinearGrantProbe(linearIntegration.webhookProcessorFn);
       linearIntegration.webhookProcessorFn.addEnvironment(
         'OPERATIONAL_ALERT_TOPIC_ARN',
         operationalAlerts.topic.topicArn,

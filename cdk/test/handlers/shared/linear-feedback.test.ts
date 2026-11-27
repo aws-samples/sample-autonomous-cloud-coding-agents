@@ -568,6 +568,13 @@ describe('linear-feedback', () => {
       expect(JSON.parse(fetchMock.mock.calls[1][1].body).variables.stateId).toBe('s-inreview');
     });
 
+    test('a strict name: a team without "In Review" gets no move, not its first started state', async () => {
+      const noReview = TEAM_STATES.filter((st) => st.id !== 's-inreview');
+      fetchMock.mockResolvedValueOnce(jsonResponse({ data: { issue: { state: cur('s-backlog'), team: { states: { nodes: noReview } } } } }));
+      expect(await transitionIssueState(CTX, ISSUE_ID, 'started', ['In Review'], false, true)).toBe(false);
+      expect(fetchMock).toHaveBeenCalledTimes(1); // the query only, no issueUpdate
+    });
+
     test('already in target state → no mutation, returns false', async () => {
       fetchMock.mockResolvedValueOnce(statesResp(cur('s-inreview')));
       const ok = await transitionIssueState(CTX, ISSUE_ID, 'started', ['In Review']);

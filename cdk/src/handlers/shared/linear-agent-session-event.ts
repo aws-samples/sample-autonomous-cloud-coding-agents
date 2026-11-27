@@ -154,6 +154,12 @@ export const SESSION_STOP_CANCELLED_VIA = 'linear_session_stop';
 const LEADING_PROFILE_MENTION = /^(?:\[[^\]\n]*\]\(\s*https:\/\/linear\.app\/[^\s)]+\/profiles\/[^\s)]+\s*\)|<?https:\/\/linear\.app\/\S+\/profiles\/[^\s>]+>?)[,:]?\s*/i;
 
 /**
+ * The comment Linear itself writes when an issue is delegated to an agent: it opens
+ * the session's thread and carries no instruction.
+ */
+const DELEGATION_THREAD_PLACEHOLDER = /^This thread is for an agent session with \S+\.?$/i;
+
+/**
  * The instruction in a mention comment, with the mention itself removed — a
  * bare mention is no instruction at all. Linear stores a real mention as the
  * app user's profile URL, so that is stripped first; the ``@bgagent`` text form
@@ -162,6 +168,7 @@ const LEADING_PROFILE_MENTION = /^(?:\[[^\]\n]*\]\(\s*https:\/\/linear\.app\/[^\
  */
 function mentionDirective(body: string | undefined): string {
   const trimmed = (body ?? '').trim().replace(LEADING_PROFILE_MENTION, '').trim();
+  if (DELEGATION_THREAD_PLACEHOLDER.test(trimmed)) return '';
   const trigger = parseCommentTrigger(trimmed);
   return trigger.triggered ? trigger.instruction : trimmed;
 }

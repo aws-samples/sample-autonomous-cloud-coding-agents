@@ -109,6 +109,17 @@ describe('parseAgentSessionEvent', () => {
     expect(at('https://linear.app/acme/issue/ENG-1 is related')).toBe('https://linear.app/acme/issue/ENG-1 is related');
   });
 
+  test('Linear\'s own delegation comment is not an instruction (it named every delegated branch)', () => {
+    const at = (body: string) => parseAgentSessionEvent({
+      ...base, action: 'created', agentSession: { id: 's-1', issueId: 'i-1', comment: { body } },
+    })?.directive;
+    expect(at('This thread is for an agent session with alanturing2.')).toBe('');
+    expect(at('this thread is for an agent session with bgagent')).toBe('');
+    // A person's comment that merely starts the same way is still theirs.
+    expect(at('This thread is for an agent session with bgagent, so please add tests')).toBe(
+      'This thread is for an agent session with bgagent, so please add tests');
+  });
+
   test('created by delegation has an empty directive and tolerates a blank promptContext', () => {
     const r = parseAgentSessionEvent({ ...base, action: 'created', agentSession: { id: 's-1', issueId: 'i-1' }, promptContext: '  ' });
     expect(r).toEqual(expect.objectContaining({ directive: '', actorId: null, promptContext: null }));
@@ -230,6 +241,24 @@ describe('GraphQL helpers', () => {
     await expect(emitAgentActivity('tok', 's', { type: 'thought', body: 'x' })).resolves.toEqual({ ok: false, retryable: true });
     fetchMock.mockResolvedValueOnce(jsonResponse({ errors: [{ message: 'bad session' }] }));
     await expect(emitAgentActivity('tok', 's', { type: 'thought', body: 'x' })).resolves.toEqual({ ok: false, retryable: false });
+  });
+
+  test('a short timeout aborts the request at that time, and reads as retryable', async () => {
+    jest.useFakeTimers();
+    try {
+      fetchMock.mockImplementation((_url: string, init: { signal: AbortSignal }) => new Promise((_resolve, reject) => {
+        init.signal.addEventListener('abort', () => reject(new Error('aborted')));
+      }));
+      let settled = false;
+      const emit = emitAgentActivity('tok', 's', { type: 'thought', body: 'x' }, { timeoutMs: 2000 })
+        .finally(() => { settled = true; });
+      await jest.advanceTimersByTimeAsync(1999);
+      expect(settled).toBe(false);
+      await jest.advanceTimersByTimeAsync(1);
+      await expect(emit).resolves.toEqual({ ok: false, retryable: true });
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   test('addAgentSessionExternalUrl appends rather than replaces', async () => {

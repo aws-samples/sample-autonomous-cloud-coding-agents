@@ -47,7 +47,7 @@ process.env.MAX_CONCURRENT_TASKS_PER_USER = '3';
 process.env.QUEUE_MAX_AGE_SECONDS = '86400';
 process.env.TASK_RETENTION_DAYS = '90';
 
-import { handler } from '../../src/handlers/reconcile-admission-queue';
+import { handler, queueHeartbeatMark } from '../../src/handlers/reconcile-admission-queue';
 
 /** A QUEUED StatusIndex row as the DDB low-level client returns it. */
 function queuedRow(opts: {
@@ -479,5 +479,87 @@ describe('reconcile-admission-queue — #331 regression (fan-out burst)', () => 
     expect(summary.picked_up).toBe(2);
     const flipped = sentDdbCommands('UpdateItem').map(u => u.input.Key.task_id.S);
     expect(flipped).toEqual(['P1', 'P2']);
+  });
+});
+
+describe('reconcile-admission-queue — queue heartbeat (#1066)', () => {
+  test('the mark counts whole 15-minute periods queued', () => {
+    expect([0, 899, 900, 1799, 1800, 2700].map(queueHeartbeatMark)).toEqual([0, 0, 1, 1, 2, 3]);
+  });
+
+  /** A full queue for user u1 with one task queued for ``age`` seconds; ``claim`` scripts the mark's conditional write. */
+  function fullQueue(age: number, claim: () => Promise<unknown> = () => Promise.resolve({})): void {
+    mockDdbSend.mockImplementation((cmd: SentCommand) => {
+      if (cmd._type === 'Query') return Promise.resolve({ Items: [queuedRow({ task_id: 'LONG', user_id: 'u1', created_at: isoAge(age) })] });
+      if (cmd._type === 'GetItem') return Promise.resolve({ Item: { active_count: { N: '3' } } });
+      if (cmd._type === 'UpdateItem' && cmd.input.UpdateExpression === 'SET queue_heartbeat_mark = :mark') return claim();
+      return Promise.resolve({});
+    });
+  }
+  const announced = () => sentDdbCommands('PutItem').map(c => c.input.Item).filter(i => i.event_type.S === 'admission_queued');
+
+  test('a mark is announced by the first run past it, even when runs drift past the minute after it', async () => {
+    fullQueue(961);
+    await handler();
+    expect(announced()).toHaveLength(1);
+    const claim = sentDdbCommands('UpdateItem').find(c => c.input.UpdateExpression === 'SET queue_heartbeat_mark = :mark')!;
+    expect(claim.input.ExpressionAttributeValues[':mark']).toEqual({ N: '1' });
+    expect(claim.input.ConditionExpression).toContain('#s = :queued');
+  });
+
+  test('a mark already announced (the conditional write fails) is not announced again', async () => {
+    fullQueue(1000, () => Promise.reject(Object.assign(new Error('claimed'), { name: 'ConditionalCheckFailedException' })));
+    await handler();
+    expect(announced()).toEqual([]);
+  });
+
+  test('a claim that fails for another reason sends nothing and does not fail the run', async () => {
+    fullQueue(1000, () => Promise.reject(new Error('throttled')));
+    await expect(handler()).resolves.toEqual(expect.objectContaining({ queued_seen: 1 }));
+    expect(announced()).toEqual([]);
+  });
+
+  test('a task still waiting past a mark gets an admission_queued event with waited_s', async () => {
+    mockDdbSend.mockImplementation((cmd: SentCommand) => {
+      if (cmd._type === 'Query') {
+        return Promise.resolve({
+          Items: [
+            queuedRow({ task_id: 'LONG', user_id: 'u1', created_at: isoAge(920) }),
+            queuedRow({ task_id: 'FRESH', user_id: 'u1', created_at: isoAge(120) }),
+          ],
+        });
+      }
+      if (cmd._type === 'GetItem') return Promise.resolve({ Item: { active_count: { N: '3' } } }); // full
+      return Promise.resolve({});
+    });
+
+    await handler();
+    const puts = sentDdbCommands('PutItem').map(c => c.input.Item);
+    expect(puts).toHaveLength(1);
+    expect(puts[0].task_id).toEqual({ S: 'LONG' });
+    expect(puts[0].event_type).toEqual({ S: 'admission_queued' });
+    expect(puts[0].metadata.M.reason).toEqual({ S: 'concurrency_limit' });
+    expect(Number(puts[0].metadata.M.waited_s.N)).toBeGreaterThanOrEqual(920);
+    expect(mockLambdaSend).not.toHaveBeenCalled();
+  });
+
+  test('picked-up tasks get no heartbeat; the ones left behind do', async () => {
+    mockDdbSend.mockImplementation((cmd: SentCommand) => {
+      if (cmd._type === 'Query') {
+        return Promise.resolve({
+          Items: [
+            queuedRow({ task_id: 'FIRST', user_id: 'u1', created_at: isoAge(930) }),
+            queuedRow({ task_id: 'SECOND', user_id: 'u1', created_at: isoAge(920) }),
+          ],
+        });
+      }
+      if (cmd._type === 'GetItem') return Promise.resolve({ Item: { active_count: { N: '2' } } }); // one slot
+      return Promise.resolve({});
+    });
+    mockLambdaSend.mockResolvedValue({ StatusCode: 202 });
+
+    await handler();
+    const heartbeats = sentDdbCommands('PutItem').map(c => c.input.Item).filter(i => i.event_type.S === 'admission_queued');
+    expect(heartbeats.map(i => i.task_id.S)).toEqual(['SECOND']);
   });
 });

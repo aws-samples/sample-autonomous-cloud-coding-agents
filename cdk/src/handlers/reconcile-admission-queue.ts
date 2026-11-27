@@ -353,6 +353,67 @@ async function expireQueuedTask(task: QueuedTask): Promise<boolean> {
   return true;
 }
 
+/** How often a task still waiting in the queue re-announces itself. */
+const QUEUE_HEARTBEAT_MINUTES = 15;
+const QUEUE_HEARTBEAT_SECONDS = QUEUE_HEARTBEAT_MINUTES * 60;
+
+/**
+ * The heartbeat mark a task queued for ``ageSeconds`` has reached: 0 before the first
+ * 15 minutes, then 1, 2, ... A mark fires once, whenever the first pickup run past it
+ * claims it, so runs that drift or skip never miss one.
+ * @param ageSeconds - how long the task has been queued.
+ */
+export function queueHeartbeatMark(ageSeconds: number): number {
+  return Math.floor(ageSeconds / QUEUE_HEARTBEAT_SECONDS);
+}
+
+/**
+ * Record that ``mark`` was announced, if no run has yet. False when it already was, or
+ * the task left the queue in the meantime.
+ */
+async function claimQueueHeartbeat(taskId: string, mark: number): Promise<boolean> {
+  try {
+    await ddb.send(new UpdateItemCommand({
+      TableName: TASK_TABLE,
+      Key: { task_id: { S: taskId } },
+      UpdateExpression: 'SET queue_heartbeat_mark = :mark',
+      ConditionExpression: '#s = :queued AND (attribute_not_exists(queue_heartbeat_mark) OR queue_heartbeat_mark < :mark)',
+      ExpressionAttributeNames: { '#s': 'status' },
+      ExpressionAttributeValues: { ':mark': { N: String(mark) }, ':queued': { S: 'QUEUED' } },
+    }));
+    return true;
+  } catch (err) {
+    if ((err as { name?: string }).name === 'ConditionalCheckFailedException') return false;
+    throw err;
+  }
+}
+
+/**
+ * Re-emit ``admission_queued`` (with ``waited_s``) once per heartbeat mark for tasks
+ * still queued (#1066). A Linear agent session shows it as "Still queued (N min so
+ * far)", and the activity keeps a long wait from turning the session stale. Best
+ * effort: a failed claim is logged and the next run tries the mark again.
+ * @param waiting - tasks this cycle leaves in the queue.
+ */
+async function emitQueueHeartbeats(waiting: readonly QueuedTask[]): Promise<void> {
+  for (const task of waiting) {
+    const mark = queueHeartbeatMark(task.age_seconds);
+    if (mark < 1) continue;
+    try {
+      if (!await claimQueueHeartbeat(task.task_id, mark)) continue;
+    } catch (err) {
+      logger.warn('Queue heartbeat claim failed; the next run retries it', {
+        task_id: task.task_id, error: err instanceof Error ? err.message : String(err),
+      });
+      continue;
+    }
+    await emitEvent(task.task_id, 'admission_queued', {
+      reason: { S: 'concurrency_limit' },
+      waited_s: { N: String(Math.floor(task.age_seconds)) },
+    });
+  }
+}
+
 export async function handler(): Promise<PickupSummary> {
   const now = new Date();
   const summary: PickupSummary = {
@@ -428,6 +489,7 @@ export async function handler(): Promise<PickupSummary> {
 
     if (available <= 0) {
       summary.skipped_no_capacity += live.length;
+      await emitQueueHeartbeats(live);
       continue;
     }
 
@@ -459,6 +521,7 @@ export async function handler(): Promise<PickupSummary> {
       }
     }
     summary.skipped_no_capacity += Math.max(0, live.length - available);
+    await emitQueueHeartbeats(live.slice(available));
   }
 
   // Escalate to ERROR when the cycle made no forward progress despite a

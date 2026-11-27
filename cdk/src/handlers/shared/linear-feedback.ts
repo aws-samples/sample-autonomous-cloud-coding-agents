@@ -295,9 +295,10 @@ export async function graphqlRequest(
   accessToken: string,
   query: string,
   variables: Record<string, unknown>,
+  timeoutMs: number = REQUEST_TIMEOUT_MS,
 ): Promise<LinearPostResult> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const resp = await fetch(LINEAR_GRAPHQL_URL, {
       method: 'POST',
@@ -841,6 +842,7 @@ function pickState(
   states: readonly TeamState[],
   type: string,
   preferredNames: readonly string[],
+  requirePreferredName: boolean,
 ): TeamState | null {
   const ofType = states.filter((s) => s.type === type);
   if (ofType.length === 0) return null;
@@ -848,6 +850,7 @@ function pickState(
     const hit = ofType.find((s) => s.name.toLowerCase() === name.toLowerCase());
     if (hit) return hit;
   }
+  if (requirePreferredName) return null;
   return [...ofType].sort((a, b) => a.position - b.position)[0];
 }
 
@@ -880,6 +883,12 @@ export async function transitionIssueState(
    * still ALWAYS blocked — this only relaxes the same-type position tiebreak.
    */
   allowSameTypeRegression = false,
+  /**
+   * Move only to a state named in ``preferredNames``. Without it a team that lacks
+   * the name gets its first state of ``targetType``, which for "In Review" is "In
+   * Progress": the wrong move for a caller that means review specifically.
+   */
+  requirePreferredName = false,
 ): Promise<boolean> {
   const token = await resolveToken(ctx);
   if (!token) return false;
@@ -894,7 +903,7 @@ export async function transitionIssueState(
     return false;
   }
 
-  const target = pickState(states, targetType, preferredNames);
+  const target = pickState(states, targetType, preferredNames, requirePreferredName);
   if (!target) {
     logger.warn('Linear state transition: no state of target type', { issue_id: issueId, target_type: targetType });
     return false;
@@ -989,8 +998,8 @@ export async function revertIssueToNotStarted(
 
   // Prefer an unstarted "Todo" (the natural "not started, waiting" state); fall
   // back to backlog. Within a type, prefer the named state, else lowest position.
-  const target = pickState(states, 'unstarted', ['Todo', 'To Do'])
-    ?? pickState(states, 'backlog', ['Backlog', 'Triage']);
+  const target = pickState(states, 'unstarted', ['Todo', 'To Do'], false)
+    ?? pickState(states, 'backlog', ['Backlog', 'Triage'], false);
   if (!target) {
     logger.info('Revert-to-not-started: no unstarted/backlog state on the team — leaving it', { issue_id: issueId });
     return false;
