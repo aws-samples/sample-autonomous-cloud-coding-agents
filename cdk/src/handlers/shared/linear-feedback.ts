@@ -406,6 +406,8 @@ export async function readLinearApprovalComment(
   botActor?: { id: string } | null;
   issue: { id: string };
   parent?: { id: string } | null;
+  /** The parent comment (the notice) is this app's and was never edited. */
+  noticeUnchanged: boolean;
 } | null> {
   const token = await resolveToken(ctx);
   if (!token) throw new Error('Linear approval verification token unavailable');
@@ -413,7 +415,7 @@ export async function readLinearApprovalComment(
     query VerifyApprovalComment($id: String!) {
       organization { id }
       viewer { id }
-      comment(id: $id) { id body user { id } botActor { id } issue { id } parent { id } }
+      comment(id: $id) { id body user { id } botActor { id } issue { id } parent { id editedAt user { id } } }
     }`, { id });
   if (!result.ok) throw new Error('Linear approval comment verification unavailable');
   if ((result.value.organization as { id?: string } | undefined)?.id !== ctx.linearWorkspaceId) {
@@ -421,12 +423,16 @@ export async function readLinearApprovalComment(
   }
   const viewerId = (result.value.viewer as { id?: string } | undefined)?.id;
   if (!viewerId) throw new Error('Linear approval verification identity unavailable');
-  const comment = result.value.comment as Awaited<ReturnType<typeof readLinearApprovalComment>> ?? null;
+  const comment = result.value.comment as Omit<NonNullable<Awaited<ReturnType<typeof readLinearApprovalComment>>>, 'noticeUnchanged'> & {
+    parent?: { id: string; editedAt?: string | null; user?: { id: string } | null } | null;
+  } | null ?? null;
   // Diagnostic user-mode OAuth tokens can post genuine human comments. Workers
   // holding that token must not manufacture consent from its own identity.
   // Read the identity from Linear, including for installations predating this check.
-  if (comment?.user?.id === viewerId) return null;
-  return comment;
+  if (!comment || comment.user?.id === viewerId) return null;
+  // The agent's tools hold the same app token and could rewrite the notice the
+  // owner is answering: an edited notice, or one by another author, is not ours.
+  return { ...comment, noticeUnchanged: comment.parent?.user?.id === viewerId && !comment.parent.editedAt };
 }
 
 /**

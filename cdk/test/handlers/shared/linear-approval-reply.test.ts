@@ -69,6 +69,7 @@ beforeEach(() => {
     user: { id: 'real-author' },
     issue: { id: 'issue' },
     parent: { id: root },
+    noticeUnchanged: true,
   });
   mockApprove.mockResolvedValue({ statusCode: 202 });
   mockDeny.mockResolvedValue({ statusCode: 202 });
@@ -83,7 +84,7 @@ beforeEach(() => {
 
 test.each(['approve', 'deny'])('records %s for the bound request and mapped owner', async body => {
   mockReadComment.mockResolvedValue({
-    id: 'reply', body, user: { id: 'real-author' }, issue: { id: 'issue' }, parent: { id: root },
+    id: 'reply', body, user: { id: 'real-author' }, issue: { id: 'issue' }, parent: { id: root }, noticeUnchanged: true,
   });
   expect(await handleLinearApprovalReply({ ...event, data: { ...event.data, body } }, deps)).toBe(true);
   const record = body === 'approve' ? mockApprove : mockDeny;
@@ -100,7 +101,7 @@ test.each(['approve', 'deny'])('records %s for the bound request and mapped owne
 test('passes a denial reason from the verified comment to the deny path', async () => {
   const body = 'deny use the staging config';
   mockReadComment.mockResolvedValue({
-    id: 'reply', body, user: { id: 'real-author' }, issue: { id: 'issue' }, parent: { id: root },
+    id: 'reply', body, user: { id: 'real-author' }, issue: { id: 'issue' }, parent: { id: root }, noticeUnchanged: true,
   });
   expect(await handleLinearApprovalReply({ ...event, data: { ...event.data, body } }, deps)).toBe(true);
   expect(mockDeny).toHaveBeenCalledWith({
@@ -114,7 +115,7 @@ test('passes a denial reason from the verified comment to the deny path', async 
 
 test('refuses a reply whose reason differs from what Linear holds (edited or forged)', async () => {
   mockReadComment.mockResolvedValue({
-    id: 'reply', body: 'deny something else', user: { id: 'real-author' }, issue: { id: 'issue' }, parent: { id: root },
+    id: 'reply', body: 'deny something else', user: { id: 'real-author' }, issue: { id: 'issue' }, parent: { id: root }, noticeUnchanged: true,
   });
   const forged = { ...event, data: { ...event.data, body: 'deny use the staging config' } };
   expect(await handleLinearApprovalReply(forged, deps)).toBe(true);
@@ -164,7 +165,7 @@ test.each([
   ['the @bgagent text form with a comma', '@bgagent, approve'],
   ['the profile link Linear stores', '[@bgagent](https://linear.app/acme/profiles/bgagent) approve'],
 ])('reads an answer after a leading mention in %s', async (_form, body) => {
-  mockReadComment.mockResolvedValue({ id: 'reply', body, user: { id: 'real-author' }, issue: { id: 'issue' }, parent: { id: root } });
+  mockReadComment.mockResolvedValue({ id: 'reply', body, user: { id: 'real-author' }, issue: { id: 'issue' }, parent: { id: root }, noticeUnchanged: true });
   expect(await handleLinearApprovalReply({ ...event, data: { ...event.data, body } }, deps)).toBe(true);
   expect(mockApprove).toHaveBeenCalledWith(expect.objectContaining({ body: JSON.stringify({ request_id: 'gate', decision: 'approve' }) }));
 });
@@ -172,7 +173,7 @@ test.each([
 test.each(['I approve', '> approve', 'approve and delete it', 'approve @bgagent', '@bgagent please fix the tests'])(
   'answers any other reply under an open notice, and keeps it from the comment trigger: %s',
   async body => {
-    mockReadComment.mockResolvedValue({ id: 'reply', body, user: { id: 'real-author' }, issue: { id: 'issue' }, parent: { id: root } });
+    mockReadComment.mockResolvedValue({ id: 'reply', body, user: { id: 'real-author' }, issue: { id: 'issue' }, parent: { id: root }, noticeUnchanged: true });
     expect(await handleLinearApprovalReply({ ...event, data: { ...event.data, body } }, deps)).toBe(true);
     expect(mockApprove).not.toHaveBeenCalled();
     expect(mockDeny).not.toHaveBeenCalled();
@@ -191,7 +192,7 @@ test('leaves any other reply under a closed notice to the comment trigger', asyn
 
 test('does not answer its own reply under an open notice', async () => {
   const body = 'Only the task owner can decide this request.';
-  mockReadComment.mockResolvedValue({ id: 'reply', body, botActor: { id: 'app' }, user: null, issue: { id: 'issue' }, parent: { id: root } });
+  mockReadComment.mockResolvedValue({ id: 'reply', body, botActor: { id: 'app' }, user: null, issue: { id: 'issue' }, parent: { id: root }, noticeUnchanged: true });
   expect(await handleLinearApprovalReply({ ...event, data: { ...event.data, body } }, deps)).toBe(true);
   expect(mockPost).not.toHaveBeenCalled();
 });
@@ -269,7 +270,7 @@ describe('a request the scan changed', () => {
   });
 
   test('can still be denied', async () => {
-    mockReadComment.mockResolvedValue({ id: 'reply', body: 'deny', user: { id: 'real-author' }, issue: { id: 'issue' }, parent: { id: root } });
+    mockReadComment.mockResolvedValue({ id: 'reply', body: 'deny', user: { id: 'real-author' }, issue: { id: 'issue' }, parent: { id: root }, noticeUnchanged: true });
     expect(await handleLinearApprovalReply({ ...event, data: { ...event.data, body: 'deny' } }, deps)).toBe(true);
     expect(mockDeny).toHaveBeenCalled();
   });
@@ -280,7 +281,15 @@ test('a high-severity request is not approved by a reply, and can be denied', as
   expect(await handleLinearApprovalReply(event, deps)).toBe(true);
   expect(mockApprove).not.toHaveBeenCalled();
   expect(mockPost.mock.calls[0][1].body).toContain('approved only with bgagent approve');
-  mockReadComment.mockResolvedValue({ id: 'reply', body: 'deny', user: { id: 'real-author' }, issue: { id: 'issue' }, parent: { id: root } });
+  mockReadComment.mockResolvedValue({ id: 'reply', body: 'deny', user: { id: 'real-author' }, issue: { id: 'issue' }, parent: { id: root }, noticeUnchanged: true });
   expect(await handleLinearApprovalReply({ ...event, data: { ...event.data, body: 'deny' } }, deps)).toBe(true);
   expect(mockDeny).toHaveBeenCalled();
+});
+
+test('a reply under a notice that was edited, or was not posted by ABCA, decides nothing', async () => {
+  const original = await mockReadComment();
+  mockReadComment.mockResolvedValue({ ...original, noticeUnchanged: false });
+  expect(await handleLinearApprovalReply(event, deps)).toBe(true);
+  expect(mockApprove).not.toHaveBeenCalled();
+  expect(mockPost.mock.calls[0][1].body).toMatch(/notice was changed after ABCA posted it/);
 });

@@ -97,6 +97,14 @@ export async function handleLinearApprovalReply(
     await respond(NOT_AN_ANSWER_MESSAGE);
     return true;
   }
+  if (!comment.noticeUnchanged) {
+    logger.warn('Linear approval reply under a notice that was edited or not posted by ABCA', {
+      task_id: thread.taskId, request_id: thread.requestId, comment_id: event.data.id,
+    });
+    await respond('This notice was changed after ABCA posted it, so it can\'t be answered here, and nothing was decided. '
+      + 'Run bgagent pending to see the request, then decide with bgagent approve or bgagent deny.');
+    return true;
+  }
   const { decision } = reply;
   const userId = await deps.lookupUser(workspaceId, comment.user.id);
   if (!userId || userId !== thread.userId) {

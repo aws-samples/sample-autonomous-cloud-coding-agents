@@ -1092,7 +1092,8 @@ describe('postIdentifiedComment against Linear', () => {
 });
 
 describe('readLinearApprovalComment against Linear', () => {
-  const reply = { id: 'r-1', body: 'approve', user: { id: 'u-1' }, botActor: null, issue: { id: ISSUE_ID }, parent: { id: 'notice-1' } };
+  const notice = { id: 'notice-1', editedAt: null, user: { id: 'app-user' } };
+  const reply = { id: 'r-1', body: 'approve', user: { id: 'u-1' }, botActor: null, issue: { id: ISSUE_ID }, parent: notice };
   beforeEach(() => {
     resolveLinearOauthTokenMock.mockReset().mockResolvedValue({ accessToken: TOKEN, scope: 'read write', workspaceSlug: 'acme', oauthSecretArn: 'arn:secret:acme' });
     fetchMock.mockReset();
@@ -1100,7 +1101,15 @@ describe('readLinearApprovalComment against Linear', () => {
 
   test('a person\'s comment comes back as Linear holds it', async () => {
     fetchMock.mockImplementation(linearComments({ comments: { 'r-1': reply } }));
-    await expect(readLinearApprovalComment(CTX, 'r-1')).resolves.toEqual(reply);
+    await expect(readLinearApprovalComment(CTX, 'r-1')).resolves.toEqual({ ...reply, noticeUnchanged: true });
+  });
+
+  test.each([
+    ['edited', { ...notice, editedAt: '2026-11-26T10:02:00.000Z' }],
+    ['posted by someone else', { ...notice, user: { id: 'u-9' } }],
+  ])('a reply under a notice that was %s says so', async (_what, parent) => {
+    fetchMock.mockImplementation(linearComments({ comments: { 'r-1': { ...reply, parent } } }));
+    await expect(readLinearApprovalComment(CTX, 'r-1')).resolves.toEqual(expect.objectContaining({ noticeUnchanged: false }));
   });
 
   test('a comment by the token\'s own user is no consent', async () => {
