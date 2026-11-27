@@ -32,6 +32,7 @@ import {
   type LinearFeedbackContext,
   deleteComment,
   fetchRecentComments,
+  postIdentifiedComment,
   postIssueComment,
   reactToComment,
   replyToComment,
@@ -993,5 +994,18 @@ describe('linear-feedback', () => {
       const result = await fetchRecentComments(CTX, ISSUE_ID);
       expect(result.map((c) => c.markdown)).toEqual(['kept']);
     });
+  });
+});
+
+describe('postIdentifiedComment without a workspace token', () => {
+  beforeEach(() => {
+    resolveLinearOauthTokenMock.mockReset().mockResolvedValue(null);
+    fetchMock.mockReset();
+  });
+
+  test('is retryable: the resolver also returns null when the secret cannot be read once', async () => {
+    await expect(postIdentifiedComment(CTX, { id: 'c-1', issueId: ISSUE_ID, body: 'Approval needed' }))
+      .resolves.toEqual({ ok: false, retryable: true });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

@@ -429,13 +429,17 @@ export async function readLinearApprovalComment(
   return comment;
 }
 
-/** Retry-safe posting for approval prompts and acknowledgements. */
+/**
+ * Retry-safe posting for approval prompts and acknowledgements. Without a token the
+ * post is retryable: the resolver also returns null when the secret cannot be read
+ * once, and an approval request that is never shown is denied when it times out.
+ */
 export async function postIdentifiedComment(
   ctx: LinearFeedbackContext,
   input: { id: string; issueId: string; body: string; parentId?: string },
 ): Promise<LinearPostResult> {
   const token = await resolveToken(ctx);
-  if (!token) return { ok: false, retryable: false };
+  if (!token) return { ok: false, retryable: true };
   const created = await graphqlData(token, `
     mutation ApprovalComment($input: CommentCreateInput!) {
       commentCreate(input: $input) { success comment { id } }

@@ -1756,7 +1756,15 @@ async function dispatchSessionApproval(
   const notification = await loadApprovalNotification(ddb, liveTask, effective, event.metadata ?? {}, 'linear_session');
   if (!notification) return;
   const token = await resolveToken(ctx);
-  if (!token) return;
+  if (!token) {
+    // The resolver also returns null when the secret cannot be read once. A request
+    // that is never shown is denied when it times out, so it is retried; a note is not.
+    logger.warn('[fanout/linear-session] approval notice: no workspace token', { ...logCtx, request_id: notification.requestId });
+    if (effective === 'approval_requested') {
+      throw new Error(`[fanout/linear-session] no Linear token for the approval request ${notification.requestId} of task ${task.task_id}`);
+    }
+    return;
+  }
   const activity = sessionApprovalActivity(effective, notification);
   const result = await emitAgentActivity(token, agentSessionId, activity.content, {
     id: sessionApprovalNoticeId(effective, notification.requestId),

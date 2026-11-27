@@ -465,6 +465,24 @@ test('a transient failure retries the batch, and nothing is marked delivered', a
   expect(mockMarkApproval).not.toHaveBeenCalled();
 });
 
+test('a pending request whose workspace token cannot be resolved is retried, not dropped', async () => {
+  mockTask({ ...SESSION_TASK, status: 'AWAITING_APPROVAL', awaiting_approval_request_id: 'req-1' });
+  mockLoadApproval.mockResolvedValue(PENDING_NOTICE);
+  mockResolveToken.mockResolvedValue(null);
+  const outcome = await routeEvent(ev('agent_milestone', { milestone: 'approval_requested', request_id: 'req-1' }), LINEAR_ONLY);
+  expect(outcome.infraRejections).toEqual(['linear']);
+  expect(mockEmitAgentActivity).not.toHaveBeenCalled();
+  expect(mockMarkApproval).not.toHaveBeenCalled();
+});
+
+test('a note after the request whose token cannot be resolved is skipped without a retry', async () => {
+  mockTask(SESSION_TASK);
+  mockLoadApproval.mockResolvedValue({ ...PENDING_NOTICE, title: 'Approval request timed out', marker: 'notified_linear_session_approval_timed_out' });
+  mockResolveToken.mockResolvedValue(null);
+  const outcome = await routeEvent(ev('agent_milestone', { milestone: 'approval_timed_out', request_id: 'req-1' }), LINEAR_ONLY);
+  expect(outcome.infraRejections).toEqual([]);
+});
+
 test('after the final response nothing reopens the session', async () => {
   mockTask({ ...SESSION_TASK, linear_final_comment_event_id: 'e-done' });
   mockLoadApproval.mockResolvedValue(PENDING_NOTICE);
