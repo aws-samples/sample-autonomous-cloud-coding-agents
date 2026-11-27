@@ -141,7 +141,6 @@ max-complexity = 15
 
 [tool.ruff.lint.per-file-ignores]
 "tests_emulator/**" = ["S101", "PLR2004", "ARG", "TID251"]  # emulator-backed tests (mise run test:integration): assert; literal assertions; fixtures taken for their effect; their own boto3 session
-"src/entrypoint.py" = ["E402"]  # re-export shim: importlib.reload() call must precede re-export from-imports
 # aws_session.py is the one module that builds boto3 clients, resources and sessions:
 # it attaches the solution User-Agent (#319). TID251 is one rule for the whole
 # banned-api table below, so this file-wide exemption also switches off the ban
@@ -166,7 +165,7 @@ max-complexity = 15
 # both to test them, under the tests/** exemption above. src/aws_session.py is
 # not checked for this either: its TID251 exemption is file-wide.
 "server".msg = "server.py is a process entrypoint (uvicorn loads it): move what you need into a module both can import"
-"entrypoint".msg = "entrypoint.py is the batch entrypoint and a re-export shim kept for tests, and importing it reloads config: import the name from the module that defines it"
+"entrypoint".msg = "entrypoint.py is the batch entrypoint: import the name from the module that defines it"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -801,7 +801,7 @@ class _ProgressWriter:
     #
     # ``approval_timeout_capped_at_submit`` is emitted by CreateTaskFn and
     # also lives on the Lambda side (Chunk 5). Agent-side helpers cover the
-    # 14 events the agent runtime emits.
+    # 13 events the agent runtime emits.
 
     def _put_approval_milestone(self, milestone: str, metadata: dict) -> None:
         """Emit an ``agent_milestone`` with ``milestone`` + extra metadata.
@@ -946,19 +946,6 @@ class _ProgressWriter:
         if matching_rule_ids is not None:
             payload["matching_rule_ids"] = list(matching_rule_ids)
         self._put_approval_milestone("approval_timed_out", payload)
-
-    def write_approval_stranded(
-        self,
-        *,
-        request_id: str,
-        age_s: int,
-        reason: str,
-    ) -> None:
-        """Emit ``approval_stranded`` (reconciler surface, §11.1)."""
-        self._put_approval_milestone(
-            "approval_stranded",
-            {"request_id": request_id, "age_s": age_s, "reason": self._preview(reason)},
-        )
 
     def write_approval_write_failed(self, *, request_id: str | None, error: str) -> None:
         """Emit ``approval_write_failed`` (TransactWriteItems failure, §11.1)."""

@@ -473,7 +473,7 @@ agent/
 ├── mise.toml            Tool versions / tasks used when the target repo relies on mise
 ├── src/                 Agent source modules (pythonpath configured in pyproject.toml)
 │   ├── __init__.py
-│   ├── entrypoint.py    Re-export shim for backward compatibility (tests); delegates to specific modules
+│   ├── entrypoint.py    Batch entry point; the ECS boot command imports run_task_from_payload from it
 │   ├── config.py        Configuration: build_config(), get_config(), resolve_github_token(), resolve_linear_api_token(); resolves the pinned workflow (resolved_workflow / ids like coding/new-task-v1) and validates required inputs per the workflow's requires_repo / read_only / is_pr_workflow (replaced TaskType in #248)
 │   ├── models.py        Pydantic data models (TaskConfig, RepoSetup, AgentResult, TaskResult, HydratedContext, AttachmentConfig, etc.). TaskConfig carries the workflow fields (resolved_workflow, policy_principal, read_only, allowed_tools, requires_repo, is_pr_workflow) that replaced the former TaskType enum (#248)
 │   ├── pipeline.py      Top-level pipeline: main() CLI entry, run_task() orchestration, status resolution, error chaining
