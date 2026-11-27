@@ -30,9 +30,7 @@ import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 import { integrationTable } from './integration-parts';
 import { ComponentUaAspect } from './solution-ua-aspect';
-
-/** Default task-record retention used for TTL computation (days). */
-const DEFAULT_TASK_RETENTION_DAYS = 90;
+import { grantTaskCreation, taskCreationEnvironment } from './task-creation';
 
 /** OAuth-callback Lambda timeout (seconds). */
 const OAUTH_CALLBACK_TIMEOUT_SECONDS = 15;
@@ -207,26 +205,9 @@ export class SlackIntegration extends Construct {
       authorizationType: apigw.AuthorizationType.NONE,
     };
 
-    // --- Task creation environment (matches TaskApi createTaskEnv pattern) ---
-    const createTaskEnv: Record<string, string> = {
-      TASK_TABLE_NAME: props.taskTable.tableName,
-      TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
-      TASK_RETENTION_DAYS: String(props.taskRetentionDays ?? DEFAULT_TASK_RETENTION_DAYS),
-    };
-    if (props.repoTable) {
-      createTaskEnv.REPO_TABLE_NAME = props.repoTable.tableName;
-    }
-    if (props.orchestratorFunctionArn) {
-      createTaskEnv.ORCHESTRATOR_FUNCTION_ARN = props.orchestratorFunctionArn;
-    }
-    if (props.guardrailId && props.guardrailVersion) {
-      createTaskEnv.GUARDRAIL_ID = props.guardrailId;
-      createTaskEnv.GUARDRAIL_VERSION = props.guardrailVersion;
-    }
-    if (props.budgetTable) {
-      createTaskEnv.BUDGET_TABLE_NAME = props.budgetTable.tableName;
-      createTaskEnv.USER_POOL_ID = props.userPool.userPoolId;
-    }
+    // SlackIntegrationProps declares no attachments bucket, and the helper would read one from an object that carries it.
+    const taskCreationInputs = { ...props, attachmentsBucket: undefined };
+    const createTaskEnv = taskCreationEnvironment(taskCreationInputs);
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Lambda Handlers
@@ -316,36 +297,7 @@ export class SlackIntegration extends Construct {
     this.installationTable.grantReadData(commandProcessorFn);
     this.channelMappingTable.grantReadData(commandProcessorFn);
     commandProcessorFn.addToRolePolicy(readSlackSecretsPolicy);
-    props.taskTable.grantReadWriteData(commandProcessorFn);
-    props.taskEventsTable.grantReadWriteData(commandProcessorFn);
-    if (props.repoTable) {
-      props.repoTable.grantReadData(commandProcessorFn);
-    }
-    if (props.budgetTable) {
-      props.budgetTable.grantReadData(commandProcessorFn);
-      commandProcessorFn.addToRolePolicy(new iam.PolicyStatement({
-        actions: ['cognito-idp:AdminListGroupsForUser'],
-        resources: [props.userPool.userPoolArn],
-      }));
-    }
-    if (props.orchestratorFunctionArn) {
-      commandProcessorFn.addToRolePolicy(new iam.PolicyStatement({
-        actions: ['lambda:InvokeFunction'],
-        resources: [props.orchestratorFunctionArn],
-      }));
-    }
-    if (props.guardrailId) {
-      commandProcessorFn.addToRolePolicy(new iam.PolicyStatement({
-        actions: ['bedrock:ApplyGuardrail'],
-        resources: [
-          Stack.of(this).formatArn({
-            service: 'bedrock',
-            resource: 'guardrail',
-            resourceName: props.guardrailId,
-          }),
-        ],
-      }));
-    }
+    grantTaskCreation(commandProcessorFn, taskCreationInputs);
 
     // Wire events handler to command processor for @mention forwarding.
     slackEventsFn.addEnvironment('SLACK_COMMAND_PROCESSOR_FUNCTION_NAME', commandProcessorFn.functionName);

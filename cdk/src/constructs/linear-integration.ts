@@ -18,7 +18,7 @@
  */
 
 import * as path from 'path';
-import { Aspects, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
+import { Aspects, Duration, RemovalPolicy } from 'aws-cdk-lib';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
@@ -32,10 +32,8 @@ import { Construct } from 'constructs';
 import { FeedbackTracker, grantTrackerFeedback, integrationTable, secretArnPattern, webhookDedupTable } from './integration-parts';
 import { LinearIdentityVault } from './linear-identity-vault';
 import { ComponentUaAspect } from './solution-ua-aspect';
+import { grantTaskCreation, taskCreationEnvironment } from './task-creation';
 import { LINEAR_ISSUE_INDEX_NAME } from './task-table-indexes';
-
-/** Default task-record retention used for TTL computation (days). */
-const DEFAULT_TASK_RETENTION_DAYS = 90;
 
 /**
  * Webhook-processor Lambda timeout (seconds). One event drives a chain of real
@@ -308,29 +306,7 @@ export class LinearIntegration extends Construct implements FeedbackTracker {
       ],
     };
 
-    // --- Task creation environment (matches TaskApi / SlackIntegration pattern) ---
-    const createTaskEnv: Record<string, string> = {
-      TASK_TABLE_NAME: props.taskTable.tableName,
-      TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
-      TASK_RETENTION_DAYS: String(props.taskRetentionDays ?? DEFAULT_TASK_RETENTION_DAYS),
-    };
-    if (props.repoTable) {
-      createTaskEnv.REPO_TABLE_NAME = props.repoTable.tableName;
-    }
-    if (props.orchestratorFunctionArn) {
-      createTaskEnv.ORCHESTRATOR_FUNCTION_ARN = props.orchestratorFunctionArn;
-    }
-    if (props.guardrailId && props.guardrailVersion) {
-      createTaskEnv.GUARDRAIL_ID = props.guardrailId;
-      createTaskEnv.GUARDRAIL_VERSION = props.guardrailVersion;
-    }
-    if (props.attachmentsBucket) {
-      createTaskEnv.ATTACHMENTS_BUCKET_NAME = props.attachmentsBucket.bucketName;
-    }
-    if (props.budgetTable) {
-      createTaskEnv.BUDGET_TABLE_NAME = props.budgetTable.tableName;
-      createTaskEnv.USER_POOL_ID = props.userPool.userPoolId;
-    }
+    const createTaskEnv = taskCreationEnvironment(props);
 
     // --- Cognito Authorizer (for /linear/link) ---
     const cognitoAuthorizer = new apigw.CognitoUserPoolsAuthorizer(this, 'LinearCognitoAuthorizer', {
@@ -459,50 +435,9 @@ export class LinearIntegration extends Construct implements FeedbackTracker {
     if (props.identityVault) {
       props.identityVault.grantMintToken(webhookProcessorFn);
     }
-    props.taskTable.grantReadWriteData(webhookProcessorFn);
-    props.taskEventsTable.grantReadWriteData(webhookProcessorFn);
-    if (props.repoTable) {
-      props.repoTable.grantReadData(webhookProcessorFn);
-    }
-    if (props.budgetTable) {
-      props.budgetTable.grantReadData(webhookProcessorFn);
-      webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
-        actions: ['cognito-idp:AdminListGroupsForUser'],
-        resources: [props.userPool.userPoolArn],
-      }));
-    }
-    if (props.orchestratorFunctionArn) {
-      webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
-        actions: ['lambda:InvokeFunction'],
-        resources: [props.orchestratorFunctionArn],
-      }));
-    }
-    if (props.guardrailId) {
-      webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
-        actions: ['bedrock:ApplyGuardrail'],
-        resources: [
-          Stack.of(this).formatArn({
-            service: 'bedrock',
-            resource: 'guardrail',
-            resourceName: props.guardrailId,
-          }),
-        ],
-      }));
-    }
-    // No bedrock:InvokeModel grant: this processor never calls a model directly.
-    // Its only Bedrock use is ApplyGuardrail above, to screen third-party text and
-    // attachment bytes before they reach an agent. All model inference happens
-    // inside the agent runtime, under the agent's own role.
-    //
-    // Issue descriptions can carry markdown `![alt](https://…)` images, which
-    // `extractImageUrlAttachments` (linear-webhook-processor.ts) turns into
-    // URL attachments. `createTaskCore` then uploads the screened bytes to
-    // `ATTACHMENTS_BUCKET_NAME`, mirroring the TaskApi/Slack paths. Without
-    // grantPut + grantDelete here, that upload fails closed with 503.
-    if (props.attachmentsBucket) {
-      props.attachmentsBucket.grantPut(webhookProcessorFn);
-      props.attachmentsBucket.grantDelete(webhookProcessorFn);
-    }
+    // No bedrock:InvokeModel grant: this processor never calls a model directly. It screens third-party text and attachment
+    // bytes (ApplyGuardrail). It stores the screened bytes and deletes them when the task is not created.
+    grantTaskCreation(webhookProcessorFn, props);
     // Agent-session channel (flag on only): nudges, the session → task pointer
     // and the compute stop for a session `stop`.
     grantAgentSessionAccess(webhookProcessorFn, this.webhookDedupTable, props.agentSessions);
