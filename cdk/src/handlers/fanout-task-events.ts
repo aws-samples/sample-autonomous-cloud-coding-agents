@@ -1741,7 +1741,7 @@ const LINEAR_SESSION_PROGRESS_CAP = 30;
  * Emit one progress activity into the task's session (#1066). Best effort: a failure is
  * logged and never retried through the batch, since the next event supersedes it. Never
  * posts after the session's final activity or into a finished task, because an activity
- * after the closing `response` would reopen the session. Persistent activities are capped
+ * after the closing `response` would reopen the session, nor while the task waits for approval. Persistent activities are capped
  * per task by a conditional counter on the task row; the activity id is derived from the
  * event id, so a re-run record emits the same activity.
  */
@@ -1753,6 +1753,9 @@ async function emitLinearSessionProgress(
   progress: SessionProgressActivity,
 ): Promise<void> {
   if (task.linear_final_comment_event_id || TERMINAL_STATUSES.includes(task.status)) return;
+  // A task waiting for approval is paused at a gated action. Tool calls written after
+  // that action would read in the session as if it had run.
+  if (task.status === TaskStatus.AWAITING_APPROVAL) return;
   const logCtx = { task_id: task.task_id, linear_agent_session_id: agentSessionId, event_type: effectiveEventType(event) };
   try {
     if (!progress.ephemeral && !(await claimProgressSlot(task.task_id))) return;

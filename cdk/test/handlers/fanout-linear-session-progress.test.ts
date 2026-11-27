@@ -148,6 +148,14 @@ test('nothing is posted once the session has closed, so a late event cannot reop
   }
 });
 
+test('nothing is streamed while the task waits for approval, so no activity lands after the request', async () => {
+  mockTask({ ...SESSION_TASK, status: 'AWAITING_APPROVAL' });
+  await routeEvent(ev('agent_tool_call', { tool_name: 'Bash', tool_input_preview: "{'command': 'git push --force'}" }), LINEAR_ONLY);
+  await routeEvent(ev('agent_turn', { text_preview: 'Waiting for the push to be approved.' }), LINEAR_ONLY);
+  expect(mockEmitAgentActivity).not.toHaveBeenCalled();
+  expect(updates()).toEqual([]);
+});
+
 test('a comment-path Linear task ignores progress milestones (no PR-opened comment from nudge_acknowledged)', async () => {
   mockTask({ ...COMMENT_TASK, pr_url: 'https://github.com/acme/web/pull/7' });
   await routeEvent(ev('agent_milestone', { milestone: 'nudge_acknowledged' }), LINEAR_ONLY);
