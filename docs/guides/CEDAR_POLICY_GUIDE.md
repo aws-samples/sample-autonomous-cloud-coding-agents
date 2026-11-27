@@ -48,7 +48,7 @@ new Blueprint(this, 'PaymentsBlueprint', {
 - The soft rule asks for approval with a 900-second limit. The task's approval window can shorten it. The default gives 300 seconds, `--approval-timeout 600` gives 600, and `--approval-timeout 3600` gives 900. The remaining task lifetime can shorten the window further.
 - Disabling built-in soft rules and capping `--pre-approve` scopes per repository are not supported yet.
 
-`bgagent policies list --repo owner/repo` lists the built-in rules and the repository's inline Blueprint rules. To see the additional rules the agent loads at task start, inspect the registry modules referenced by `assets.cedarPolicyModules`. The built-in rules are in [`hard_deny.cedar`](../../agent/policies/hard_deny.cedar) and [`soft_deny.cedar`](../../agent/policies/soft_deny.cedar).
+The built-in rules are in [`hard_deny.cedar`](../../agent/policies/hard_deny.cedar) and [`soft_deny.cedar`](../../agent/policies/soft_deny.cedar). `bgagent repo show <owner/repo> --output json` prints the repository's inline Blueprint rules. To see the additional rules the agent loads at task start, inspect the registry modules referenced by `assets.cedarPolicyModules`.
 
 ## Vocabulary
 
@@ -66,7 +66,7 @@ Every tool call the agent makes is evaluated as a Cedar `(principal, action, res
 
 | Annotation | Required? | Values | Purpose |
 |---|---|---|---|
-| `@rule_id("...")` | **Yes on tiered rules** | Unique kebab/snake-case identifier | Names a rule in approval requests, audit events, and `bgagent policies show --rule X`. The engine rejects duplicate IDs at task start. |
+| `@rule_id("...")` | **Yes on tiered rules** | Unique kebab/snake-case identifier | Names a rule in approval requests and audit events. The engine rejects duplicate IDs at task start. |
 | `@tier("hard"\|"soft")` | **Yes on named rules** | Exactly one of `"hard"` or `"soft"` | Selects the tier. All rules in one Blueprint entry must use the same tier. |
 | `@approval_timeout_s("N")` | No | Integer seconds ≥ 30 | Caps the task's approval window when this soft rule matches. The task default is 300 seconds and `--approval-timeout` can set it to at most 3600 seconds. Values below 120 seconds trigger a warning and values below 30 seconds fail validation. |
 | `@severity("low"\|"medium"\|"high")` | No | One of three | Displayed in the approval prompt. Default: `medium`. |
@@ -169,4 +169,4 @@ The agent's `PolicyEngine` is the only engine that loads and evaluates rules, so
 
 - [`docs/design/CEDAR_HITL_GATES.md`](../design/CEDAR_HITL_GATES.md) — full design: engine internals, fail-closed posture, late-approval races, concurrency.
 - [`agent/policies/hard_deny.cedar`](../../agent/policies/hard_deny.cedar) + [`agent/policies/soft_deny.cedar`](../../agent/policies/soft_deny.cedar) — the built-in rule set, good starting point for copy-paste.
-- [User guide — Approval gates](./USER_GUIDE.md#approval-gates-cedar-hitl) — the CLI side (`bgagent pending` / `approve` / `deny` / `policies`).
+- [User guide — Approval gates](./USER_GUIDE.md#approval-gates-cedar-hitl) — the CLI side (`bgagent pending` / `approve` / `deny`).

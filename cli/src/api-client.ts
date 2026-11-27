@@ -37,7 +37,6 @@ import {
   DenyResponse,
   ErrorResponse,
   GetPendingResponse,
-  GetPoliciesResponse,
   JiraLinkResponse,
   LinearLinkResponse,
   LinearRemoveWorkspaceResponse,
@@ -345,20 +344,6 @@ export class ApiClient {
     const res = await this.request<SuccessResponse<GetPendingResponse>>(
       'GET',
       '/pending',
-    );
-    return res.data;
-  }
-
-  /**
-   * GET /repos/{repo_id}/policies — list Cedar rules for a repo.
-   *
-   * The server encodes the repo_id itself; this client URL-encodes the
-   * path segment so callers can pass `owner/repo` as-is.
-   */
-  async listPolicies(repoId: string): Promise<GetPoliciesResponse> {
-    const res = await this.request<SuccessResponse<GetPoliciesResponse>>(
-      'GET',
-      `/repos/${encodeURIComponent(repoId)}/policies`,
     );
     return res.data;
   }

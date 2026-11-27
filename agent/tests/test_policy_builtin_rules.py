@@ -19,6 +19,8 @@ engines on policy text written into each fixture, not on the shipped rules.
 """
 
 import json
+import re
+from pathlib import Path
 from typing import NamedTuple
 
 # Hard import (not importorskip): without cedarpy the engine denies every call
@@ -201,18 +203,42 @@ def _rules_behind(decision: PolicyDecision) -> list[str]:
     return rule_ids.split(", ")
 
 
-def test_table_covers_exactly_the_shipped_rules() -> None:
+def _shipped_rules() -> dict[str, str]:
+    """Rule id -> tier of every forbid rule in ``agent/policies/``."""
     shipped = {}
     for tier, text in zip(("hard", "soft"), policy._load_builtin_policies(), strict=True):
         for rule in json.loads(cedarpy.policies_to_json_str(text))["staticPolicies"].values():
             if rule["effect"] == "forbid":
                 shipped[rule["annotations"]["rule_id"]] = tier
+    return shipped
+
+
+def test_table_covers_exactly_the_shipped_rules() -> None:
+    shipped = _shipped_rules()
     pinned = {rule_id: tier for rule_id, (tier, caught, _) in BUILTIN_RULES.items() if caught}
     assert pinned == shipped, (
         f"agent/policies/ ships the rules {shipped} but BUILTIN_RULES pins {pinned}. Every "
         "built-in rule needs an entry: its tier, the calls it must catch (at least two for each "
         "pattern, with different text for each `*`: see the comment above BUILTIN_RULES) and a "
         f"similar call it must leave alone. {_ON_PURPOSE}"
+    )
+
+
+def test_user_guide_lists_exactly_the_shipped_rules() -> None:
+    guide = Path(__file__).resolve().parents[2] / "docs/guides/USER_GUIDE.md"
+    section = re.search(
+        r"^### Rule ids\n(.*?)(?=^#{2,3} |\Z)",
+        guide.read_text(encoding="utf-8"),
+        re.DOTALL | re.MULTILINE,
+    )
+    assert section, "docs/guides/USER_GUIDE.md has no section '### Rule ids'"
+    # Pairs, not a dict: a rule listed twice fails as well.
+    listed = sorted(re.findall(r"^\| `([^`\n]*)` \| ([^|\n]*?) \|", section[1], re.MULTILINE))
+    shipped = sorted(_shipped_rules().items())
+    assert listed == shipped, (
+        f"agent/policies/ ships the rules {shipped} but the section 'Rule ids' of "
+        f"docs/guides/USER_GUIDE.md lists {listed}. Its table needs one row for each built-in "
+        "rule, written as: | `rule_id` | hard or soft | what it stops |"
     )
 
 

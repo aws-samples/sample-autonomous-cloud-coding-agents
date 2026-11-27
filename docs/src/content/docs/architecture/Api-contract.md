@@ -69,7 +69,6 @@ The gateway extracts `user_id` from the authenticated identity and attaches it t
 | `GET` | `/v1/tasks/{task_id}/trace` | Cognito | Get a presigned download URL for the task's `--trace` artifact |
 | `GET` | `/v1/tasks/{task_id}/replay` | Cognito | Get an aggregated operator replay bundle for a task |
 | `GET` | `/v1/pending` | Cognito | List the caller's pending approval requests |
-| `GET` | `/v1/repos/{repo_id}/policies` | Cognito | List the repo's Cedar hard/soft policy rules |
 | `POST` | `/v1/webhooks` | Cognito | Create webhook integration |
 | `GET` | `/v1/webhooks` | Cognito | List webhooks (paginated) |
 | `DELETE` | `/v1/webhooks/{webhook_id}` | Cognito | Revoke webhook |
@@ -513,13 +512,7 @@ Returns the caller's pending Cedar HITL approval requests across all their tasks
 
 ### Get repo policies
 
-```
-GET /v1/repos/{repo_id}/policies
-```
-
-Returns the repository's Cedar policy rules grouped into `hard` and `soft` lists (rule id, category, severity, per-rule `approval_timeout_s`, and a human-readable summary).
-
-**Response: `200 OK`** — `{ "data": { "repo_id": "...", "policies": { "hard": [ ... ], "soft": [ ... ] } } }`.
+**Migration from `GET /v1/repos/{repo_id}/policies`:** the route was removed (no alias); see [ADR-028](/sample-autonomous-cloud-coding-agents/decisions/adr-028-one-cedar-engine). The ids of the built-in rules are in the [user guide](/sample-autonomous-cloud-coding-agents/using/approval-gates-cedar-hitl#rule-ids). The ids of a repository's own rules are the `matching_rule_ids` of the approval requests they raise ([`GET /v1/pending`](#list-pending-approvals)).
 
 ### Nudge a running task
 
@@ -686,7 +679,7 @@ There is no per-user request-rate or "tasks-per-hour" limiter on task creation. 
 | API Gateway stage throttling | `throttlingRateLimit` 60 req/s, burst 100 | Account/stage-wide (not per user) | `429 Too Many Requests` (API Gateway, no body envelope) |
 | WAF rate-based rule | 1,000 requests / 5 min | Per source IP | `403` (blocked by WAF) |
 | Per-task nudge limit | Default 10/min | Per task (`POST /tasks/{id}/nudge`) | `429 RATE_LIMIT_EXCEEDED` |
-| Application rate limiter (`shared/rate-limit`) | Per-endpoint | Used by `approve`, `deny`, `pending`, `nudge`, `policies` and Linear webhook/fan-out paths — **not** task creation | `429 RATE_LIMIT_EXCEEDED` |
+| Application rate limiter (`shared/rate-limit`) | Per-endpoint | Used by `approve`, `deny`, `pending`, `nudge` and Linear webhook/fan-out paths — **not** task creation | `429 RATE_LIMIT_EXCEEDED` |
 
 **Concurrency (not a rate limit).** Per-user concurrent task count is bounded (configurable, default 10). This is enforced by admission control, not by the create-task endpoint:
 

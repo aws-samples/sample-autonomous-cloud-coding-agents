@@ -975,17 +975,27 @@ For the next 60 seconds, any other call of the same tool that the same rule gate
 
 If you want the action to go through this time and be asked again the next time, approve it with the default scope `this_call` instead of denying. To stop being asked about a rule for the rest of the task, approve with `--scope rule:<rule_id>`.
 
-### Discovering repo policies
+### Rule ids
 
-Before submitting a task you can list the rules that apply to the target repository:
+Each approval request names the rules that gated the call (the `rules:` line of `bgagent pending`), and `--scope rule:<rule_id>` and `--pre-approve rule:<rule_id>` take those ids.
 
-```bash
-node lib/bin/bgagent.js policies list --repo owner/repo
-node lib/bin/bgagent.js policies list --repo owner/repo --tier soft
-node lib/bin/bgagent.js policies show --repo owner/repo --rule force_push_any
-```
+The built-in rules are listed below. A **hard** rule is absolute: the call is refused, and neither an approval scope nor `--pre-approve` bypasses it. A **soft** rule pauses the task for your approval.
 
-`policies list` prints both tiers: **hard-deny** rules are absolute (even `--pre-approve` cannot bypass them), **soft-deny** rules are the approvable ones. `policies show` prints the full detail for a specific rule (severity, timeout, category, summary).
+| Rule id | Tier | What it stops |
+|---|---|---|
+| `read_only_forbid_write` | hard | the Write tool in a read-only workflow, for example a pull-request review |
+| `read_only_forbid_edit` | hard | the Edit tool in a read-only workflow |
+| `rm_slash` | hard | a shell command that removes from the filesystem root |
+| `write_git_internals` | hard | a file write into the repository's `.git/` directory |
+| `write_git_internals_nested` | hard | a file write into a nested `.git/` directory |
+| `drop_table` | hard | a shell command that contains SQL `DROP TABLE` |
+| `force_push_any` | soft | a forced `git push` |
+| `force_push_main` | soft | a forced push to `main` or `prod` |
+| `push_to_protected_branch` | soft | a direct push to `main`, `master`, `prod` or a `release/` branch |
+| `write_env_files` | soft | a write to a `.env` file |
+| `write_credentials` | soft | a write to a path that contains `credentials` |
+
+The patterns of each rule are in [`hard_deny.cedar`](../../agent/policies/hard_deny.cedar) and [`soft_deny.cedar`](../../agent/policies/soft_deny.cedar). A repository's own rules are named on the approval requests they raise (`bgagent pending`). Reading their text needs operator access with AWS credentials: `bgagent repo show <owner/repo> --output json` prints the repository's inline rules and names the registry modules attached to it.
 
 ### Pre-approving scopes at submit time
 

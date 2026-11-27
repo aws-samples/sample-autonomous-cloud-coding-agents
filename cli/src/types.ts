@@ -902,24 +902,6 @@ export interface GetPendingResponse {
   readonly pending: readonly PendingApprovalSummary[];
 }
 
-/** Rule metadata returned by `GET /v1/repos/{repo_id}/policies`. */
-export interface PolicyRuleSummary {
-  readonly rule_id: string;
-  readonly category?: string;
-  readonly severity?: Severity;
-  readonly approval_timeout_s?: number;
-  readonly summary: string;
-}
-
-/** GET /v1/repos/{repo_id}/policies response body. */
-export interface GetPoliciesResponse {
-  readonly repo_id: string;
-  readonly policies: {
-    readonly hard: readonly PolicyRuleSummary[];
-    readonly soft: readonly PolicyRuleSummary[];
-  };
-}
-
 /** Maximum deny reason length after server-side sanitization. */
 export const DENY_REASON_MAX_LENGTH = 2000;
 

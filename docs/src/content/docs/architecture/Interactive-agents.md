@@ -258,7 +258,7 @@ Commands:
 - `nudge <id> "<text>"` — steer.
 - `cancel <id>` — stop the task.
 - `ask <id> "<question>"` (Phase 2) — ask the agent a question.
-- `approve <id>` / `deny <id>` / `pending` / `policies` (Phase 3) — HITL.
+- `approve <id>` / `deny <id>` / `pending` (Phase 3) — HITL.
 
 Authentication: Cognito User Pool ID token in `Authorization` header for all REST calls. Token caching in `~/.bgagent/credentials.json` with auto-refresh.
 
@@ -411,7 +411,7 @@ Flags:
 
 **Rate limit:** 1 open ask per task per user (429 otherwise). Forward-compatible with multi-user team scenarios.
 
-### 5.6 `bgagent approve` / `deny` / `pending` / `policies` (Phase 3)
+### 5.6 `bgagent approve` / `deny` / `pending` (Phase 3)
 
 HITL approval commands. All flows are REST + DDB; no streaming. Detailed design in [`CEDAR_HITL_GATES.md`](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates). Summary:
 
@@ -735,7 +735,7 @@ Opt-in per task: 4 KB previews + full trajectory to S3 with TTL.
 ### Phase 3 — Cedar HITL
 
 - Hard-gate approval gates with Cedar policy evaluation
-- `bgagent approve` / `deny` / `pending` / `policies`
+- `bgagent approve` / `deny` / `pending`
 - `AWAITING_APPROVAL` state + orchestrator handling
 - Full design in [`CEDAR_HITL_GATES.md`](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates)
 

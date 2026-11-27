@@ -24,14 +24,13 @@ import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
-import { Runtime, Architecture, type LayerVersion } from 'aws-cdk-lib/aws-lambda';
+import { Runtime, Architecture } from 'aws-cdk-lib/aws-lambda';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
-import { CEDAR_WASM_MIN_LAMBDA_MEMORY_MB } from './cedar-wasm-layer';
 
 /** Default task-record retention used for TTL computation (days). */
 const DEFAULT_TASK_RETENTION_DAYS = 90;
@@ -119,15 +118,6 @@ export interface TaskApiProps {
    * §7.2, §7.7.
    */
   readonly taskApprovalsTable?: dynamodb.ITable;
-
-  /**
-   * Cedar-wasm Lambda layer (CedarWasmLayer.layer). Required by the
-   * handlers that parse blueprint policies (`GetPoliciesFn`,
-   * `CreateTaskFn`). Attached only when all approval-gate plumbing
-   * (TaskApprovalsTable, this layer, blueprint / cedar_policies on
-   * RepoTable) is present.
-   */
-  readonly cedarWasmLayer?: LayerVersion;
 
   /**
    * Per-task per-minute nudge rate limit.
@@ -421,7 +411,7 @@ export class TaskApi extends Construct {
    */
   public readonly webhookXssCountedAlarm?: cloudwatch.Alarm;
 
-  // eslint-disable-next-line complexity -- predates the ceiling (54; 53 when it landed); must not grow
+  // eslint-disable-next-line complexity -- predates the ceiling (51, down from 53 when it landed); must not grow
   constructor(scope: Construct, id: string, props: TaskApiProps) {
     super(scope, id);
 
@@ -1050,11 +1040,8 @@ export class TaskApi extends Construct {
       allFunctions.push(nudgeTaskFn);
     }
 
-    // --- Cedar HITL approval endpoints (§7.1, §7.2, §7.6, §7.7) ---
-    // Activated only when the approvals table is provided. The layer
-    // attachment on GetPoliciesFn is conditional on the cedar-wasm
-    // layer being supplied — without it the handler cannot parse
-    // policies and the route is skipped.
+    // --- Cedar HITL approval endpoints (§7.1, §7.2, §7.7) ---
+    // Activated only when the approvals table is provided.
     if (props.taskApprovalsTable) {
       const approvalEnv: Record<string, string> = {
         ...commonEnv,
@@ -1153,52 +1140,6 @@ export class TaskApi extends Construct {
       );
 
       allFunctions.push(approveTaskFn, denyTaskFn, getPendingFn);
-
-      // GetPoliciesFn — GET /repos/{repo_id}/policies. Requires the
-      // cedar-wasm layer to parse blueprint policy text.
-      if (props.cedarWasmLayer && props.repoTable) {
-        const getPoliciesEnv: Record<string, string> = {
-          ...approvalEnv,
-          REPO_TABLE_NAME: props.repoTable.tableName,
-        };
-        const getPoliciesFn = new lambda.NodejsFunction(this, 'GetPoliciesFn', {
-          entry: path.join(handlersDir, 'get-policies.ts'),
-          handler: 'handler',
-          runtime: Runtime.NODEJS_24_X,
-          architecture: Architecture.ARM_64,
-          environment: getPoliciesEnv,
-          bundling: {
-            ...commonBundling,
-            // Keep cedar-wasm in the layer, not the function bundle.
-            // esbuild externalizes the import at build time; the layer
-            // provides it at runtime.
-            externalModules: [
-              ...(commonBundling.externalModules ?? []),
-              '@cedar-policy/cedar-wasm',
-              '@cedar-policy/cedar-wasm/nodejs',
-            ],
-          },
-          layers: [props.cedarWasmLayer],
-          // Cedar-wasm needs ≥512 MB per the §15.2 task 10 note; also
-          // the wasm binary is ~4 MB which pushes init time.
-          memorySize: CEDAR_WASM_MIN_LAMBDA_MEMORY_MB,
-          timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
-        });
-        props.taskApprovalsTable.grantReadData(getPoliciesFn);
-        props.repoTable.grantReadData(getPoliciesFn);
-        // Allow the rate-limit Update path on TaskApprovalsTable.
-        props.taskApprovalsTable.grantWriteData(getPoliciesFn);
-
-        const repos = this.api.root.addResource('repos');
-        const repoById = repos.addResource('{repo_id}');
-        const policies = repoById.addResource('policies');
-        policies.addMethod(
-          'GET',
-          new apigw.LambdaIntegration(getPoliciesFn, { allowTestInvoke: false }),
-          cognitoAuthOptions,
-        );
-        allFunctions.push(getPoliciesFn);
-      }
     }
 
     // --- Platform API key infrastructure (only when apiKeyTable is provided) ---

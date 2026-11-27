@@ -422,13 +422,7 @@ node lib/bin/bgagent.js nudge <TASK_ID> "Also add a test for the edge case"
 
 If your blueprint defines any Cedar HITL policies tagged `@tier("soft")`, the agent pauses on matching tool calls and waits for your decision. This step walks through the flow end-to-end. Run the commands below from the `cli/` directory (`cd cli` from the repo root).
 
-First, check which rules apply to your repo:
-
-```bash
-cd cli
-
-node lib/bin/bgagent.js policies list --repo owner/repo
-```
+The built-in rules are listed in [User guide → Rule ids](/sample-autonomous-cloud-coding-agents/using/approval-gates-cedar-hitl#rule-ids).
 
 Submit a task that will plausibly trip a soft-deny rule — for example, one of the default blueprint rules guards force-pushes:
 

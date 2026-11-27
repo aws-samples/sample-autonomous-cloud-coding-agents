@@ -1509,21 +1509,6 @@ export interface DenyResponse {
  */
 export const DENY_REASON_MAX_LENGTH = 2000;
 
-/**
- * Rule metadata returned by `GET /v1/repos/{repo}/policies` (§7.6).
- * `approval_timeout_s` and `severity` are absent for hard-deny rules.
- */
-export interface PolicyRuleSummary {
-  readonly rule_id: string;
-  readonly category?: string;
-  readonly severity?: Severity;
-  readonly approval_timeout_s?: number;
-  readonly summary: string;
-}
-
-/**
- * `GET /v1/repos/{repo_id}/policies` response body.
- */
 /** One open issue in GET /v1/repos/{repo_id}/issues. Titles and metadata only, no body. */
 export interface RepoIssueSummary {
   readonly number: number;
@@ -1537,14 +1522,6 @@ export interface RepoIssueSummary {
 export interface ListRepoIssuesResponse {
   readonly repo: string;
   readonly issues: readonly RepoIssueSummary[];
-}
-
-export interface GetPoliciesResponse {
-  readonly repo_id: string;
-  readonly policies: {
-    readonly hard: readonly PolicyRuleSummary[];
-    readonly soft: readonly PolicyRuleSummary[];
-  };
 }
 
 /**

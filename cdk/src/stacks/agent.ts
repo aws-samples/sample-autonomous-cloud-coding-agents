@@ -672,7 +672,6 @@ export class AgentStack extends Stack {
       taskEventsTable: taskEventsTable.table,
       taskNudgesTable: taskNudgesTable.table,
       taskApprovalsTable: taskApprovalsTable.table,
-      cedarWasmLayer: cedarWasmLayer.layer,
       repoTable: repoTable.table,
       webhookTable: webhookTable.table,
       apiKeyTable: apiKeyTable.table,
