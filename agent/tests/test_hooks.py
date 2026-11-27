@@ -5,6 +5,7 @@ import hashlib
 import json as _json
 from collections import deque
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -2788,6 +2789,13 @@ class TestApprovalRowExpiry:
         created = int(parsed.timestamp())
         assert row["deadline_epoch"] == created + row["timeout_s"]
         assert row["ttl"] == row["deadline_epoch"] + hooks.CLEANUP_MARGIN_120S
+        # The writer's tests use the shared row: the hook builds exactly its fields.
+        shared = _json.loads(
+            (
+                Path(__file__).resolve().parents[2] / "contracts" / "approval-request-row.json"
+            ).read_text()
+        )["row"]
+        assert set(row) - {"ttl"} == set(shared)
 
 
 class TestChunk8aOutcomeEventSchema:

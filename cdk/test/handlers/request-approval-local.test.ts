@@ -25,6 +25,7 @@
 import { randomUUID } from 'node:crypto';
 import { CreateTableCommand, DeleteTableCommand, DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, PutCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { row as hookRow } from '../../../contracts/approval-request-row.json';
 
 const endpoint = process.env.ABCA_DDB_LOCAL_ENDPOINT;
 if (endpoint && (new URL(endpoint).hostname !== '127.0.0.1' || new URL(endpoint).protocol !== 'http:')) {
@@ -58,21 +59,17 @@ jest.setTimeout(30_000);
 local('Trusted approval writer against DynamoDB Local', () => {
   let taskId: string;
   const gate = 'gate';
-  const row = () => ({
-    task_id: taskId,
-    request_id: gate,
-    user_id: 'owner',
-    repo: 'owner/repo',
-    tool_name: 'Bash',
-    tool_input_preview: '{"command":"git push"}',
-    tool_input_sha256: 'a'.repeat(64),
-    reason: 'Protected operation',
-    severity: 'high',
-    matching_rule_ids: ['protected'],
-    status: 'PENDING',
-    created_at: new Date().toISOString(),
-    timeout_s: 0,
-  });
+  /** The row the hook builds, created now: the writer accepts only a current created_at. */
+  const row = () => {
+    const created = Math.floor(Date.now() / 1000);
+    return {
+      ...hookRow,
+      task_id: taskId,
+      request_id: gate,
+      created_at: new Date(created * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z'),
+      deadline_epoch: created + hookRow.timeout_s,
+    };
+  };
   const create = () => recordWorkerRequest({
     operation: 'create', task_id: taskId, request_id: gate, approval: row(),
   });
@@ -119,10 +116,10 @@ local('Trusted approval writer against DynamoDB Local', () => {
   });
 
   test('creates a durable pending request and its task pointer atomically', async () => {
-    expect(await create()).toEqual({ ok: true });
-    expect(await read(approvals)).toMatchObject({ status: 'PENDING', timeout_s: 0 });
-    // Retention comes from the writer, never the worker (no deadline: task retention).
-    expect((await read(approvals))?.ttl).toBeGreaterThan(Math.floor(Date.now() / 1000) + 80 * 86400);
+    const sent = row();
+    expect(await recordWorkerRequest({ operation: 'create', task_id: taskId, request_id: gate, approval: sent })).toEqual({ ok: true });
+    // Retention comes from the writer, never the worker: the deadline plus the cleanup margin.
+    expect(await read(approvals)).toEqual({ ...sent, ttl: sent.deadline_epoch + 120 });
     expect(await read(tasks)).toMatchObject({ status: 'AWAITING_APPROVAL', awaiting_approval_request_id: gate });
   });
   test.each(['APPROVED', 'DENIED', 'CANCELLED'])('timeout preserves an existing %s decision', async status => {

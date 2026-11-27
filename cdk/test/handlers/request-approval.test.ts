@@ -18,26 +18,12 @@
  */
 
 import type { APIGatewayProxyEvent } from 'aws-lambda';
+import { row as approval } from '../../../contracts/approval-request-row.json';
 
 const send = jest.fn();
 jest.mock('../../src/handlers/shared/ua', () => ({ makeDocClient: () => ({ send }) }));
 import { approvalRowTtl, handler, recordWorkerRequest } from '../../src/handlers/request-approval';
 
-const approval = {
-  task_id: 'task',
-  request_id: 'gate',
-  user_id: 'owner',
-  repo: 'owner/repo',
-  tool_name: 'Bash',
-  tool_input_preview: '{"command":"git push"}',
-  tool_input_sha256: 'a'.repeat(64),
-  reason: 'Protected operation',
-  severity: 'high',
-  matching_rule_ids: ['protected'],
-  status: 'PENDING',
-  created_at: '2026-09-18T00:00:00Z',
-  timeout_s: 0,
-};
 const input = { operation: 'create' as const, task_id: 'task', request_id: 'gate', approval };
 let task: Record<string, unknown>;
 beforeEach(() => {
@@ -51,6 +37,16 @@ test.each([
   { notified_linear_approval_requested: true }, { decision_source: 'forged' },
   { decided_at: 'now' }, { scope: 'all' }, { ttl: 1 }, { user_id: 'other' }, { repo: 'other/repo' },
 ])('rejects forged decision/notification fields and ownership: %j', async changes => {
+  expect(await recordWorkerRequest({ ...input, approval: { ...approval, ...changes } }))
+    .toMatchObject({ ok: false, code: 'APPROVAL_REQUEST_INVALID' });
+  expect(send).toHaveBeenCalledTimes(1);
+});
+
+test.each([
+  ['a deadline that is not created_at plus timeout_s', { deadline_epoch: approval.deadline_epoch + 3600 }],
+  ['no deadline', { deadline_epoch: undefined }],
+  ['a timeout above the maximum', { timeout_s: 3601, deadline_epoch: approval.deadline_epoch - 300 + 3601 }],
+])('rejects a request with %s', async (_name, changes) => {
   expect(await recordWorkerRequest({ ...input, approval: { ...approval, ...changes } }))
     .toMatchObject({ ok: false, code: 'APPROVAL_REQUEST_INVALID' });
   expect(send).toHaveBeenCalledTimes(1);

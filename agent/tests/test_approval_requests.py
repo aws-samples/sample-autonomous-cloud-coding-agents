@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT-0
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -12,24 +13,14 @@ from botocore.exceptions import ClientError
 import approval_requests as broker
 import task_state
 
+HOOK_ROW = json.loads(
+    (Path(__file__).resolve().parents[2] / "contracts" / "approval-request-row.json").read_text()
+)["row"]
+
 
 def pending_request() -> task_state.ApprovalRow:
-    return {
-        "task_id": "task",
-        "request_id": "request",
-        "tool_name": "Bash",
-        "tool_input_preview": '{"command":"git push"}',
-        "tool_input_sha256": "a" * 64,
-        "reason": "Protected operation",
-        "severity": "high",
-        "matching_rule_ids": ["protected"],
-        "status": "PENDING",
-        "created_at": "2026-09-18T00:00:00Z",
-        "timeout_s": 0,
-        "ttl": 1_800_000_000,
-        "user_id": "owner",
-        "repo": "owner/repo",
-    }
+    """The row the gate builds: the shared request plus the ttl the worker drops."""
+    return {**HOOK_ROW, "ttl": HOOK_ROW["deadline_epoch"] + 120}
 
 
 @pytest.fixture
@@ -76,7 +67,7 @@ def test_rejects_untrusted_endpoints_before_signing(transport, monkeypatch, url)
 def test_new_writers_use_service_instead_of_direct_dynamodb(transport, monkeypatch):
     direct = MagicMock()
     monkeypatch.setattr(task_state, "_get_ddb_client", direct)
-    task_state.transact_write_approval_request("task", "request", pending_request())
+    task_state.transact_write_approval_request("task", "gate", pending_request())
     assert task_state.best_effort_update_approval_status("task", "request", "TIMED_OUT")
     assert transport.call_count == 2
     direct.assert_not_called()
@@ -90,7 +81,7 @@ def test_cloud_worker_missing_endpoint_reports_configuration_error(monkeypatch, 
     monkeypatch.setattr(task_state, "_get_ddb_client", direct)
     with pytest.raises(RuntimeError, match=r"APPROVAL_REQUESTS_API_URL.*matching CDK"):
         if operation == "create":
-            task_state.transact_write_approval_request("task", "request", pending_request())
+            task_state.transact_write_approval_request("task", "gate", pending_request())
         else:
             task_state.best_effort_update_approval_status("task", "request", "TIMED_OUT")
     direct.assert_not_called()
@@ -108,7 +99,7 @@ def test_uncertain_service_write_does_not_fall_back_to_direct_dynamodb(transport
     monkeypatch.setattr(task_state, "_get_ddb_client", direct)
     transport.side_effect = TimeoutError("reply lost")
     with pytest.raises(TimeoutError):
-        task_state.transact_write_approval_request("task", "request", pending_request())
+        task_state.transact_write_approval_request("task", "gate", pending_request())
     direct.assert_not_called()
 
 
@@ -133,8 +124,6 @@ def test_timeout_race_preserves_human_winner_but_task_check_failure_is_not_benig
     assert failure.value.response["Error"]["Code"] == "TransactionCanceledException"
 
 
-def test_worker_never_sends_retention(transport):
-    broker.record_request("create", "task", "request", approval=dict(pending_request()))
-    sent = json.loads(transport.call_args.kwargs["data"])["approval"]
-    assert "ttl" not in sent
-    assert sent["status"] == "PENDING"
+def test_worker_sends_the_shared_request_without_retention(transport):
+    broker.record_request("create", "task", "gate", approval=dict(pending_request()))
+    assert json.loads(transport.call_args.kwargs["data"])["approval"] == HOOK_ROW
