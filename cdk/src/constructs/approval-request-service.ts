@@ -61,7 +61,7 @@ export class ApprovalRequestService extends NestedStack {
       resources: [props.taskTable.tableArn],
     }));
     this.fn.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['dynamodb:PutItem', 'dynamodb:UpdateItem'],
+      actions: ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem'],
       resources: [props.approvalsTable.tableArn],
     }));
     const accessLogs = new logs.LogGroup(this, 'AccessLogs', { retention: logs.RetentionDays.ONE_MONTH });

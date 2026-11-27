@@ -65,6 +65,19 @@ test('keeps the trusted writer and API infrastructure out of the parent resource
   child.resourceCountIs('AWS::DynamoDB::Table', 0);
 });
 
+test('grants the writer exactly the item actions each table needs', () => {
+  const statements = Object.values(child.findResources('AWS::IAM::Policy'))
+    .flatMap(policy => policy.Properties.PolicyDocument.Statement);
+  const actionsOn = (table: string) => statements
+    .filter(statement => JSON.stringify(statement.Resource).includes(table))
+    .flatMap(statement => [statement.Action].flat())
+    .sort();
+  // The task row: read for ownership, the AWAITING_APPROVAL transition, the timeout's check.
+  expect(actionsOn('Tasks')).toEqual(['dynamodb:ConditionCheckItem', 'dynamodb:GetItem', 'dynamodb:UpdateItem']);
+  // The request row: the create, the timeout, and the read that answers a repeated create.
+  expect(actionsOn('Approvals')).toEqual(['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem']);
+});
+
 test('denies the writer delete, scan and whole-table reach, and exposes no unauthenticated route', () => {
   const statements = Object.values(child.findResources('AWS::IAM::Policy'))
     .flatMap(policy => policy.Properties.PolicyDocument.Statement);
