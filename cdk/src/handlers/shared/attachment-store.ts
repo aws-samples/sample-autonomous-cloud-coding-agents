@@ -21,8 +21,8 @@
  * What a tracker attachment goes through once its bytes are downloaded, and the
  * cleanup of a batch: shared by `linear-attachments.ts` and `jira-attachments.ts`.
  *
- * Tests: through the two callers, in their suites and in
- * cdk/test/handlers/shared/attachment-store-failure.test.ts
+ * Tests: cdk/test/handlers/shared/attachment-store.test.ts, and through the two
+ * callers in their suites and in attachment-store-failure.test.ts
  */
 
 import { DeleteObjectsCommand, PutObjectCommand, type S3Client } from '@aws-sdk/client-s3';
