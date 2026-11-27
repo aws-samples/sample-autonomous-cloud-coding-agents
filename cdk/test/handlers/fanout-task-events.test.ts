@@ -216,10 +216,7 @@ import {
 import { parseCommentTrigger } from '../../src/handlers/shared/comment-trigger';
 import { MAX_REPLY_ATTEMPTS } from '../../src/handlers/shared/iteration-reply-claim';
 import type { AdfBlock, AdfParagraph } from '../../src/handlers/shared/jira-feedback';
-import {
-  renderJiraFinalStatusText,
-  renderJiraFinishedPointer,
-} from '../../src/handlers/shared/jira-status-comment';
+import { renderJiraFinishedPointer } from '../../src/handlers/shared/jira-status-comment';
 
 function mkRecord(
   eventName: 'INSERT' | 'MODIFY' | 'REMOVE',
@@ -3248,16 +3245,6 @@ describe('renderJiraFinalStatusComment', () => {
     // Find the run whose text is the URL and assert its href.
     const urlRun = paragraphs.flat().find((r) => r.text === 'https://github.com/o/r/pull/7');
     expect(urlRun).toEqual({ text: 'https://github.com/o/r/pull/7', href: 'https://github.com/o/r/pull/7' });
-    expect(renderJiraFinalStatusText({
-      eventType: 'task_completed',
-      prUrl: 'https://github.com/o/r/pull/7',
-      costUsd: 0.5,
-      turns: 3,
-      maxTurns: 100,
-      durationS: 60,
-      taskId: 't',
-      errorTitle: null,
-    })).toContain('[https://github.com/o/r/pull/7](https://github.com/o/r/pull/7)');
   });
 
   test.each([

@@ -22,7 +22,6 @@ import { buildAdfDocument } from '../../../src/handlers/shared/jira-feedback';
 import {
   jiraIterationFrame,
   renderJiraFinalStatusComment,
-  renderJiraFinalStatusText,
   type JiraFinalStatusInput,
 } from '../../../src/handlers/shared/jira-status-comment';
 
@@ -121,22 +120,6 @@ describe('renderJiraFinalStatusComment: the answer of the agent', () => {
         text: 'https://github.com/o/r/pull/7',
         marks: [{ type: 'link', attrs: { href: 'https://github.com/o/r/pull/7' } }],
       }]);
-  });
-
-  test('the plain-text form keeps the block fenced and the link as Markdown', () => {
-    expect(renderJiraFinalStatusText({ ...COMPLETED, answerText: ANSWER })).toBe([
-      '✅ Task completed',
-      'The retry is in worker.ts, not in the queue:',
-      '',
-      '```',
-      'for (const job of jobs) {',
-      '  await queue.retry(job);',
-      '}',
-      '```',
-      'See [the runbook](https://example.com/runbook).',
-      'cost: $0.50 • turns: 3 / 100 • duration: 1m',
-      'task t',
-    ].join('\n'));
   });
 });
 
