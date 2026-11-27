@@ -10,7 +10,6 @@ DynamoDB via ``task_state`` + ``ProgressWriter``.
 """
 
 import asyncio
-import contextlib as _ctx_for_debug
 import json
 import logging
 import os
@@ -43,7 +42,7 @@ from models import TaskResult
 from observability import propagate_correlation_context
 from pipeline import run_task
 from shared_constants import SHARED_CONSTANTS
-from shell import redact_secrets
+from shell import put_log_event, redact_secrets
 
 
 def _emit_stdout_line(stamped: str) -> None:
@@ -154,20 +153,7 @@ def _warn_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) -
     reported on stdout only, like a failed debug write.
     """
     try:
-        from aws_session import platform_client
-
-        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
-        client = platform_client("logs", region_name=region)
-
-        stream = f"server_warn/{task_id or 'server'}"
-        with _ctx_for_debug.suppress(client.exceptions.ResourceAlreadyExistsException):
-            client.create_log_stream(logGroupName=log_group, logStreamName=stream)
-
-        client.put_log_events(
-            logGroupName=log_group,
-            logStreamName=stream,
-            logEvents=[{"timestamp": int(_time_for_debug.time() * 1000), "message": stamped}],
-        )
+        put_log_event(log_group, f"server_warn/{task_id or 'server'}", stamped)
     except Exception as _exc:
         print(
             f"[server/warn/self] CloudWatch write failed: {type(_exc).__name__}: {_exc}",
@@ -178,20 +164,7 @@ def _warn_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) -
 def _debug_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) -> None:
     """Blocking CloudWatch write — only called from a background thread."""
     try:
-        from aws_session import platform_client
-
-        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
-        client = platform_client("logs", region_name=region)
-
-        stream = f"server_debug/{task_id or 'server'}"
-        with _ctx_for_debug.suppress(client.exceptions.ResourceAlreadyExistsException):
-            client.create_log_stream(logGroupName=log_group, logStreamName=stream)
-
-        client.put_log_events(
-            logGroupName=log_group,
-            logStreamName=stream,
-            logEvents=[{"timestamp": int(_time_for_debug.time() * 1000), "message": stamped}],
-        )
+        put_log_event(log_group, f"server_debug/{task_id or 'server'}", stamped)
     except Exception as _exc:
         # Never let debug logging break the request path.
         print(
