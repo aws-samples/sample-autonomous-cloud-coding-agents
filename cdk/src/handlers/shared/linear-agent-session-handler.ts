@@ -514,7 +514,7 @@ async function decideSessionApproval(
   accessToken: string,
 ): Promise<void> {
   const again = async (lead: string) => {
-    const activity = repeatedApprovalChoice(lead, requestId, (await readOpenRequest(task.task_id, requestId)).ruleIds);
+    const activity = repeatedApprovalChoice(lead, requestId);
     await emit(activity.content, false, activity);
   };
   const answer = parseSessionApprovalAnswer(request.directive);
@@ -555,14 +555,11 @@ async function decideSessionApproval(
     await again('That answer was written before this request was shown here, so nothing was decided.');
     return;
   }
-  const open = await readOpenRequest(task.task_id, requestId);
   // Loaded only when a session decides: other session deliveries do not need the
   // decision handlers' environment.
   const record = answer.decision === 'approve'
     ? (await import('../approve-task.js')).recordApprovalForUser
     : (await import('../deny-task.js')).recordDenialForUser;
-  const ruleIds = answer.wholeTask ? open.ruleIds : [];
-  const ruleScope = ruleIds.length === 1 ? `rule:${ruleIds[0]}` : undefined;
   const result = await record({
     userId: platformUserId,
     taskId: task.task_id,
@@ -570,7 +567,6 @@ async function decideSessionApproval(
     body: JSON.stringify({
       request_id: requestId,
       decision: answer.decision,
-      ...(ruleScope && { scope: ruleScope }),
       ...(answer.decision === 'deny' && answer.reason ? { reason: answer.reason } : {}),
     }),
   });
@@ -579,10 +575,9 @@ async function decideSessionApproval(
     task_id: task.task_id,
     request_id: requestId,
     decision: answer.decision,
-    scope: ruleScope ?? 'this_call',
     status_code: result.statusCode,
   });
-  await emit({ type: 'thought', body: sessionDecisionNote(answer, result, ruleScope) });
+  await emit({ type: 'thought', body: sessionDecisionNote(answer, result) });
 }
 
 /**
@@ -597,18 +592,8 @@ async function confirmedPrompt(
   const echoed = prompt ? parseSessionApprovalAnswer(prompt.body) : null;
   const same = prompt?.sessionId === request.sessionId && prompt.authorId === request.actorId
     && echoed?.decision === answer.decision && (echoed.reason ?? '') === (answer.reason ?? '')
-    && Boolean(echoed.wholeTask) === Boolean(answer.wholeTask) && echoed.requestId === answer.requestId;
+    && echoed.requestId === answer.requestId;
   return same ? prompt : null;
-}
-
-/** The rules the open request matched, read consistently from its row, never from the reply. */
-async function readOpenRequest(taskId: string, requestId: string): Promise<{ ruleIds: string[] }> {
-  if (!TASK_APPROVALS_TABLE_NAME) return { ruleIds: [] };
-  const { Item } = await ddb.send(new GetCommand({
-    TableName: TASK_APPROVALS_TABLE_NAME, Key: { task_id: taskId, request_id: requestId }, ConsistentRead: true,
-  }));
-  const ids: unknown[] = Array.isArray(Item?.matching_rule_ids) ? Item.matching_rule_ids : [];
-  return { ruleIds: ids.filter((id): id is string => typeof id === 'string') };
 }
 
 /** The prior task as read from the base table (strongly consistent). */

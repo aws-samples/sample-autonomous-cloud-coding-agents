@@ -887,20 +887,12 @@ describe('handleAgentSessionEvent — approval requests in the session (#1066)',
     expect(lastEmit()[2].type).toBe('elicitation');
   });
 
-  test('"Approve for this task" approves the request\'s one rule for the rest of the task', async () => {
+  test('a typed "approve for this task" is not an answer: nothing is decided and the choice comes back', async () => {
     waiting();
     approvalRow = { ...approvalRow, matching_rule_ids: ['write_env_files'] };
     await answer('approve for this task');
-    expect(JSON.parse(recordApprovalMock.mock.calls[0][0].body)).toEqual({ request_id: OPEN, decision: 'approve', scope: 'rule:write_env_files' });
-    expect(String(lastEmit()[2].body)).toContain('won\'t ask again for `rule:write_env_files`');
-  });
-
-  test('a whole-task answer to a request that matched several rules approves this action only', async () => {
-    waiting();
-    approvalRow = { ...approvalRow, matching_rule_ids: ['force_push_any', 'force_push_main'] };
-    await answer('approve for this task');
-    expect(JSON.parse(recordApprovalMock.mock.calls[0][0].body)).toEqual({ request_id: OPEN, decision: 'approve' });
-    expect(String(lastEmit()[2].body)).toMatch(/^Approved this action only/);
+    expect(recordApprovalMock).not.toHaveBeenCalled();
+    expect(lastEmit()[2].type).toBe('elicitation');
   });
 
   test('a late Approve after the task finished starts nothing', async () => {

@@ -36,30 +36,22 @@ import { parseLinearApprovalReply, type LinearApprovalReply } from './linear-app
 import { progressActivityId } from './linear-session-progress';
 
 /**
- * An answer from the session: approve once, approve the request's rule for the rest
- * of the task, or deny. ``requestId`` is set when the answer came from a button,
- * which names the request it was shown with.
+ * An answer from the session: approve once, or deny. ``requestId`` is set when the
+ * answer came from a button, which names the request it was shown with.
  */
-export type SessionApprovalAnswer = LinearApprovalReply & { readonly wholeTask?: boolean; readonly requestId?: string };
+export type SessionApprovalAnswer = LinearApprovalReply & { readonly requestId?: string };
 
 /** A button value names its request: ``approve request <id>``. Request ids are ULIDs. */
-const BUTTON_REQUEST = /^(approve|approve for this task|deny) request ([0-9A-HJKMNP-TV-Z]{26})$/i;
-const WHOLE_TASK = /^approve\s+for\s+(?:this|the)\s+(?:whole\s+)?task[.!]?$/i;
+const BUTTON_REQUEST = /^(approve|deny) request ([0-9A-HJKMNP-TV-Z]{26})$/i;
 
 /**
  * A reply that answers an approval request, or null: a button's value, or a typed
- * ``approve``, ``approve for this task`` or ``deny [reason]``.
+ * ``approve`` or ``deny [reason]``.
  * @param text - the reply.
  */
 export function parseSessionApprovalAnswer(text: string): SessionApprovalAnswer | null {
-  const trimmed = text.trim();
-  const button = BUTTON_REQUEST.exec(trimmed);
-  if (button) {
-    const verb = button[1].toLowerCase();
-    return verb === 'deny' ? { decision: 'deny', requestId: button[2] }
-      : { decision: 'approve', requestId: button[2], ...(verb !== 'approve' && { wholeTask: true }) };
-  }
-  if (WHOLE_TASK.test(trimmed)) return { decision: 'approve', wholeTask: true };
+  const button = BUTTON_REQUEST.exec(text.trim());
+  if (button) return { decision: button[1].toLowerCase() === 'deny' ? 'deny' : 'approve', requestId: button[2] };
   return parseLinearApprovalReply(text);
 }
 
@@ -139,18 +131,11 @@ export function waitingOnYouLine(deadline: string | undefined, now: Date = new D
 
 /**
  * The buttons for one request, as ``emitAgentActivity`` options. Each value names the
- * request, so a click on an older choice cannot decide a later request. "Approve for
- * this task" is offered only when the request matched exactly one rule: the agent
- * treats a rule approval as covering any later request that rule is among, so
- * approving one of several matched rules would also pass requests the others raise.
+ * request, so a click on an older choice cannot decide a later request.
  */
-function choice(body: string, requestId: string, ruleIds?: readonly string[]): SessionApprovalActivity {
+function choice(body: string, requestId: string): SessionApprovalActivity {
   const option = (label: string, verb: string) => ({ label, value: `${verb} request ${requestId}` });
-  const options = [
-    option('Approve', 'approve'),
-    ...(ruleIds?.length === 1 ? [option('Approve for this task', 'approve for this task')] : []),
-    option('Deny', 'deny'),
-  ];
+  const options = [option('Approve', 'approve'), option('Deny', 'deny')];
   return { content: { type: 'elicitation', body }, signal: 'select', signalMetadata: { options } };
 }
 
@@ -166,7 +151,7 @@ export function sessionApprovalActivity(
 ): SessionApprovalActivity {
   const body = approvalNotificationMarkdown(notification);
   if (eventType === 'approval_requested') {
-    return choice(`${body}\n\n${waitingOnYouLine(notification.deadline, now)}`, notification.requestId, notification.ruleIds);
+    return choice(`${body}\n\n${waitingOnYouLine(notification.deadline, now)}`, notification.requestId);
   }
   return { content: { type: 'thought', body } };
 }
@@ -177,10 +162,9 @@ export function sessionApprovalActivity(
  * showing the session as waiting for input.
  * @param lead - why it is shown again.
  * @param requestId - the open request.
- * @param ruleIds - the rules it matched, when known.
  */
-export function repeatedApprovalChoice(lead: string, requestId: string, ruleIds?: readonly string[]): SessionApprovalActivity {
-  return choice(`${lead}\n\nChoose **Approve** or **Deny**, or reply deny with a reason.`, requestId, ruleIds);
+export function repeatedApprovalChoice(lead: string, requestId: string): SessionApprovalActivity {
+  return choice(`${lead}\n\nChoose **Approve** or **Deny**, or reply deny with a reason.`, requestId);
 }
 
 /** What the decision handlers return. */
@@ -197,17 +181,8 @@ const HTTP_TOO_MANY = 429;
  * @param reply - the parsed answer.
  * @param result - the decision handler's result.
  */
-export function sessionDecisionNote(
-  reply: SessionApprovalAnswer, result: DecisionResult, ruleScope?: string,
-): string {
+export function sessionDecisionNote(reply: SessionApprovalAnswer, result: DecisionResult): string {
   if (result.statusCode >= HTTP_OK_MIN && result.statusCode < HTTP_OK_END) {
-    if (reply.wholeTask && ruleScope) {
-      return `Approved for the rest of this task: the agent won't ask again for \`${ruleScope}\`.`;
-    }
-    if (reply.wholeTask) {
-      return 'Approved this action only: it matched more than one rule, so I can\'t approve it for the whole task. '
-        + 'The agent continues.';
-    }
     return reply.decision === 'approve'
       ? 'Approved. The agent continues with this action.'
       : `Denied. The agent carries on without it${reply.reason ? ` (your reason: ${reply.reason})` : ''}.`;
