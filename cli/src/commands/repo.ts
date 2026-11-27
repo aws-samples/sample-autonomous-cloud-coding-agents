@@ -192,9 +192,20 @@ export function makeRepoCommand(): Command {
         const given: Record<string, unknown> = {};
         for (const [column, setting] of Object.entries(REPO_SETTINGS)) {
           if (!setting) continue;
-          const raw = opts[new Option(setting.flag).attributeName()];
-          const value = raw === undefined ? undefined : setting.parse(raw);
-          if (value !== undefined) given[column] = value;
+          const option = new Option(setting.flag);
+          const raw = opts[option.attributeName()];
+          if (raw === undefined) continue;
+          const value = setting.parse(raw);
+          if (value === undefined) {
+            throw new CliError(`${option.long} must not be empty (use --unset ${column} to remove the setting).`);
+          }
+          if (setting.maxBytes !== undefined) {
+            const bytes = Buffer.byteLength(String(value));
+            if (bytes > setting.maxBytes) {
+              throw new CliError(`${option.long}: ${bytes} bytes exceed the limit of ${setting.maxBytes}.`);
+            }
+          }
+          given[column] = value;
         }
         const set = given as RepoSettings;
         for (const column of opts.unset) {

@@ -929,3 +929,8 @@ export const MAX_BUDGET_USD_MIN = 0.01;
 /** Maximum allowed max_budget_usd ($100).
  *  Sourced from ``contracts/constants.json`` via cdk types.ts (#258). */
 export const MAX_BUDGET_USD_MAX = 100;
+
+/** Bounds of a repository's approval_gate_cap.
+ *  Sourced from ``contracts/constants.json`` via cdk types.ts. */
+export const APPROVAL_GATE_CAP_MIN = 1;
+export const APPROVAL_GATE_CAP_MAX = 500;

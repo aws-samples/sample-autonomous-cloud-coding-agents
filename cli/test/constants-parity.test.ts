@@ -41,6 +41,8 @@ import {
 import { LINEAR_OAUTH_SCOPES } from '../src/linear-oauth';
 import { LINEAR_VAULT_CUSTOM_PARAMS_FOR_TEST } from '../src/linear-vault';
 import {
+  APPROVAL_GATE_CAP_MAX,
+  APPROVAL_GATE_CAP_MIN,
   APPROVAL_TIMEOUT_S_MAX,
   APPROVAL_TIMEOUT_S_MIN,
   MAX_BUDGET_USD_MAX,
@@ -66,6 +68,7 @@ describe('CLI constants parity with contracts/constants.json', () => {
       'utf-8',
     ),
   ) as {
+    approval_gate_cap: { min: number; max: number };
     approval_timeout_s: { min: number; max: number; default: number };
     max_budget_usd: { min: number; max: number };
     monthly_budgets: {
@@ -101,6 +104,11 @@ describe('CLI constants parity with contracts/constants.json', () => {
   test('max_budget_usd bounds match the contract', () => {
     expect(MAX_BUDGET_USD_MIN).toBe(contracts.max_budget_usd.min);
     expect(MAX_BUDGET_USD_MAX).toBe(contracts.max_budget_usd.max);
+  });
+
+  test('approval_gate_cap bounds match the contract', () => {
+    expect(APPROVAL_GATE_CAP_MIN).toBe(contracts.approval_gate_cap.min);
+    expect(APPROVAL_GATE_CAP_MAX).toBe(contracts.approval_gate_cap.max);
   });
 
   test('monthly budget storage and alert constants match the contract', () => {
