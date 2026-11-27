@@ -143,7 +143,7 @@ If a hard-deny rule matches, any soft-deny matches are ignored — hard-deny sho
 
 ## What fails at task start
 
-The blueprint loader runs a probe Cedar evaluation before the task is admitted. Any of the following cause task-start failure with a clear error, never silent fall-through:
+The agent's policy engine loads the rules and runs a probe Cedar evaluation when the agent starts, after the task has been accepted. Any of the following cause task-start failure with a clear error, never silent fall-through:
 
 - Malformed Cedar syntax.
 - Duplicate `@rule_id` across hard + soft tiers.
