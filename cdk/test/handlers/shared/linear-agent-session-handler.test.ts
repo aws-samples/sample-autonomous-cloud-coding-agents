@@ -900,6 +900,14 @@ describe('handleAgentSessionEvent — approval requests in the session (#1066)',
     expect(recordDenialMock).toHaveBeenCalled();
   });
 
+  test('a high-severity request is not approved in the session', async () => {
+    waiting();
+    approvalRow = { ...approvalRow, severity: 'high' };
+    await answer('approve');
+    expect(recordApprovalMock).not.toHaveBeenCalled();
+    expect(String(lastEmit()[2].body)).toMatch(/^This request has high severity/);
+  });
+
   test('a typed "approve for this task" is not an answer: nothing is decided and the choice comes back', async () => {
     waiting();
     approvalRow = { ...approvalRow, matching_rule_ids: ['write_env_files'] };

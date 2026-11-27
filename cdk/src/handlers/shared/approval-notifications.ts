@@ -55,11 +55,16 @@ export interface ApprovalNotification {
 
 /**
  * Why a request can be denied in Linear but not approved there, or null when it can
- * be both. When the scan changed the saved arguments, the notice hides part of the
- * action, and an approval would be given for something the owner could not read.
+ * be both. A high-severity request is approved only from the CLI, as the approval
+ * gates' design has it for chat channels (CEDAR_HITL_GATES.md, section 11.2). When
+ * the scan changed the saved arguments, the notice hides part of the action, and an
+ * approval would be given for something the owner could not read.
  * @param row - the approval row.
  */
 export function linearApprovalRefusal(row: Record<string, unknown>): string | null {
+  if (row.severity === 'high') {
+    return 'This request has high severity, so it can be approved only with bgagent approve, signed in as the task owner.';
+  }
   const preview = typeof row.tool_input_preview === 'string' ? row.tool_input_preview : '';
   if (scanDenyReason(preview) !== preview) {
     return 'Part of this action looks like a credential, so it is hidden here, and a request you cannot read in full '

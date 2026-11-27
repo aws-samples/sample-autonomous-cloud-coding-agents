@@ -34,7 +34,7 @@ const row = {
   status: 'PENDING',
   user_id: 'owner',
   tool_name: 'Bash',
-  severity: 'high',
+  severity: 'medium',
   reason: 'Destructive command',
   tool_input_preview: 'git push --force',
   created_at: '2026-09-16T12:00:00Z',
@@ -255,4 +255,13 @@ describe('a request the scan changed cannot be approved in Linear', () => {
     expect(message.linearRefusal).toBeUndefined();
     expect(message.text).toContain('Reply approve');
   });
+});
+
+test.each(['linear', 'linear_session'] as const)('a high-severity request in the %s notice is approved only with bgagent approve', async (channel) => {
+  send.mockResolvedValue({ Item: { ...row, severity: 'high' } });
+  const message = (await loadApprovalNotification(ddb, task, 'approval_requested', { request_id: 'gate' }, channel))!;
+  expect(message.linearRefusal).toBe('This request has high severity, so it can be approved only with bgagent approve, signed in as the task owner.');
+  expect(message.text).toContain(message.linearRefusal);
+  expect(message.text).toContain('You can deny it here');
+  expect(message.text).not.toMatch(/Reply approve|Choose Approve/);
 });

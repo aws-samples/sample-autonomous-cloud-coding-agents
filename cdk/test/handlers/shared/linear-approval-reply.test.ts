@@ -242,3 +242,13 @@ describe('a request the scan changed', () => {
     expect(mockDeny).toHaveBeenCalled();
   });
 });
+
+test('a high-severity request is not approved by a reply, and can be denied', async () => {
+  approval = { user_id: 'owner', status: 'PENDING', severity: 'high' };
+  expect(await handleLinearApprovalReply(event, deps)).toBe(true);
+  expect(mockApprove).not.toHaveBeenCalled();
+  expect(mockPost.mock.calls[0][1].body).toContain('approved only with bgagent approve');
+  mockReadComment.mockResolvedValue({ id: 'reply', body: 'deny', user: { id: 'real-author' }, issue: { id: 'issue' }, parent: { id: root } });
+  expect(await handleLinearApprovalReply({ ...event, data: { ...event.data, body: 'deny' } }, deps)).toBe(true);
+  expect(mockDeny).toHaveBeenCalled();
+});

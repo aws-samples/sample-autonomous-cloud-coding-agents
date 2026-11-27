@@ -170,6 +170,13 @@ To decide from Linear, **reply to the notice comment** while signed in as the ta
 - `approve` — approves this one action (the same as `bgagent approve <task-id> <request-id>` with the default `this_call` scope).
 - `deny` or `deny <reason>` — denies it, and passes the reason to the agent. `deny: <reason>` and `deny - <reason>` also work.
 
+Two kinds of request can be denied from Linear but approved only with `bgagent approve`, and their notice says so:
+
+- A request with high severity (`force_push_main`, `write_env_files` and `write_credentials` among the built-in rules), as the [approval gates design](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates#112-fan-out-plane-interaction--slack-button--cognito-mapping) has it for chat channels.
+- A request whose saved arguments hold something that looks like a credential. The notice hides it, so it would ask you to approve what you can't read. `bgagent pending` shows the whole request.
+
+A notice for a file change (`Write`, `Edit`) names the file but not the new content, since everyone who can open the issue can read the notice. `bgagent pending` shows the content.
+
 ABCA acknowledges the decision in the same thread. Only the Linear user linked to the task's owner (through [inviting teammates](#inviting-teammates)) can decide. A reply from anyone else, or to a request that has already been decided or has expired, gets a short explanation in the thread and changes nothing. Replies from bots and apps, replies whose text no longer matches what Linear holds (for example, edited before ABCA read them), and any other comments in the thread are ignored. Broader scopes (`--scope`) are available only through the CLI and API.
 
 ### Trigger labels
@@ -253,7 +260,7 @@ If you do these the other way round, every mention in the meantime opens a sessi
 | — the agent opens a PR | Attaches the pull request to the session header and posts an **Opened pull request** action. |
 | — a long run is in progress | Posts a short-lived "Still working" thought at most every 10 minutes, so the session never goes stale (Linear's idle limit is 30 minutes). |
 | — the task finishes | Posts one final activity carrying the same outcome, cost, turns and duration as the comment channel: a *response* on success, an *elicitation* if the run stopped to ask you a question, an *error* on failure. Its last line says whether you need to do anything. Linear turns it into the thread comment. A task that completes with a pull request moves the issue to *In Review*; a failed task leaves it where it is. |
-| — the agent hits an approval gate | Posts the request with **Approve** / **Deny** buttons and the time by which it is denied if nobody answers (30 minutes by default; see `security.approvalTimeoutSeconds`). Choose one, or reply `deny <reason>`. Only the task owner can decide; anyone else, or any other reply, gets the choice again. A decision made elsewhere (`bgagent approve`, a comment reply) or a timeout shows up as a note. |
+| — the agent hits an approval gate | Posts the request with **Approve** / **Deny** buttons and the time by which it is denied if nobody answers (30 minutes by default; see `security.approvalTimeoutSeconds`). Choose one, or reply `deny <reason>`. A request that Linear can only deny (see [Approval gates](#approval-gates)) comes without buttons. Only the task owner can decide; anyone else, or any other reply, gets the choice again. A decision made elsewhere (`bgagent approve`, a comment reply) or a timeout shows up as a note. |
 | — you're at your concurrency limit | Posts a "Queued" thought in the session, and "Still queued (N min so far)" every 15 minutes. The task starts on its own when a slot frees up. |
 | Reply inside the session while the task runs | Your message goes to the running agent as a nudge (the same guardrail screening, 2,000-character cap and per-minute limit as `bgagent nudge`). The agent picks it up at its next step. Only the task's owner can steer it. |
 | Reply `approve` or `deny` when nothing is waiting | Says nothing is waiting and starts nothing, so a late answer after a timeout can't start new work. |
