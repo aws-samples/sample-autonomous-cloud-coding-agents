@@ -68,6 +68,16 @@ function text(value: unknown, max = 500): string {
   return clean.length > max ? `${clean.slice(0, max)}… [shortened]` : clean;
 }
 
+/**
+ * Tools whose arguments carry file content, and the argument that names the file.
+ * A notice shows only the file: content written to ``.env`` or a credentials file
+ * holds secrets the scanner cannot recognise (``DB_PASSWORD=...``), and a Linear
+ * issue is read by more people than the task owner.
+ */
+const FILE_CONTENT_TOOLS: Readonly<Record<string, string>> = {
+  Write: 'file_path', Edit: 'file_path', MultiEdit: 'file_path', NotebookEdit: 'notebook_path',
+};
+
 /** Describe only recorded arguments; tool names cannot establish intent or safety. */
 function describeAction(row: Record<string, unknown>, task: TaskRecord): string[] {
   const tool = text(row.tool_name, 100);
@@ -80,16 +90,22 @@ function describeAction(row: Record<string, unknown>, task: TaskRecord): string[
     // The guest stores a bounded preview, which may end partway through JSON.
   }
   const quote = (value: unknown) => JSON.stringify(text(value));
-  const path = typeof input?.file_path === 'string' ? input.file_path : '';
+  const pathKey = FILE_CONTENT_TOOLS[tool] ?? 'file_path';
+  const path = typeof input?.[pathKey] === 'string' ? input[pathKey] : '';
   const workspace = `/workspace/${task.task_id}/`;
   const target = quote(path.startsWith(workspace) ? path.slice(workspace.length) : path);
+  const repository = task.repo ? [`Repository: ${text(task.repo)}`] : [];
+  if (tool in FILE_CONTENT_TOOLS) {
+    const change = !path
+      ? `The agent wants to change a file with the tool ${quote(tool)}. Its path could not be read from the saved arguments.`
+      : tool === 'Write' ? `The agent wants to write to ${target}, creating the file or replacing its contents.`
+        : tool === 'NotebookEdit' ? `The agent wants to change the notebook ${target}.`
+          : `The agent wants to change text in ${target}.`;
+    return [change, ...repository, 'The new content is not shown here. Run bgagent pending to see it.'];
+  }
   let action: string;
   if (tool === 'Read' && path) {
     action = `The agent wants to read the file ${target}.`;
-  } else if (tool === 'Write' && path) {
-    action = `The agent wants to write to ${target}, creating the file or replacing its contents.`;
-  } else if (tool === 'Edit' && path) {
-    action = `The agent wants to change text in ${target}.`;
   } else if (tool === 'Bash') {
     action = 'The agent wants to run a shell command.';
   } else if (tool === 'WebFetch' && typeof input?.url === 'string') {
@@ -99,8 +115,7 @@ function describeAction(row: Record<string, unknown>, task: TaskRecord): string[
   } else {
     action = `The agent wants to call the tool ${quote(tool)}.`;
   }
-  const lines = [action];
-  if (task.repo) lines.push(`Repository: ${text(task.repo)}`);
+  const lines = [action, ...repository];
   if (typeof input?.description === 'string' && input.description.trim()) {
     lines.push(`Agent's explanation: ${quote(input.description)}`);
   }

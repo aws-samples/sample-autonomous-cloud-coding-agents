@@ -77,8 +77,26 @@ test('explains the README decision before exposing internal policy and request I
 });
 
 test.each([
-  ['Write', { file_path: '/etc/config', content: 'replacement' }, 'creating the file or replacing its contents.'],
-  ['Edit', { file_path: '/workspace/task/app.py', old_string: 'before', new_string: 'after' }, 'change text in "app.py".'],
+  ['Write', { file_path: '/workspace/task/.env', content: 'DB_PASSWORD=hunter2-but-longer' }, 'write to ".env", creating the file or replacing its contents.'],
+  ['Edit', { file_path: '/workspace/task/config/credentials', old_string: 'KEY=old', new_string: 'STRIPE_SECRET_KEY=sk_live_x' }, 'change text in "config/credentials".'],
+  ['MultiEdit', { file_path: '/workspace/task/.env', edits: [{ old_string: 'A=1', new_string: 'A=secret-value' }] }, 'change text in ".env".'],
+  ['NotebookEdit', { notebook_path: '/workspace/task/n.ipynb', new_source: 'token = "secret-value"' }, 'change the notebook "n.ipynb".'],
+])('shows only the file for %s: the new content stays with bgagent pending', async (tool, input, expected) => {
+  send.mockResolvedValue({ Item: { ...row, tool_name: tool, tool_input_preview: JSON.stringify(input) } });
+  const message = (await loadApprovalNotification(ddb, task, 'approval_requested', { request_id: 'gate' }, 'linear'))!;
+  expect(message.text).toContain(`The agent wants to ${expected}`);
+  expect(message.text).not.toMatch(/Saved arguments|DB_PASSWORD|STRIPE|KEY=old|secret-value|hunter2/);
+  expect(message.text).toContain('The new content is not shown here. Run bgagent pending to see it.');
+});
+
+test('a file change whose path cannot be read shows nothing of its arguments', async () => {
+  send.mockResolvedValue({ Item: { ...row, tool_name: 'Write', tool_input_preview: '{"content": "DB_PASSWORD=hunter2", "file_pa...' } });
+  const message = (await loadApprovalNotification(ddb, task, 'approval_requested', { request_id: 'gate' }, 'linear'))!;
+  expect(message.text).toContain('The agent wants to change a file with the tool "Write". Its path could not be read from the saved arguments.');
+  expect(message.text).not.toMatch(/Saved arguments|hunter2/);
+});
+
+test.each([
   ['Bash', { command: 'git push --force', description: 'Publish the branch' }, 'Command: "git push --force"'],
   ['WebFetch', { url: 'https://example.com' }, 'fetch content from "https://example.com".'],
   ['Grep', { pattern: 'password', path: '/etc' }, 'search file contents.'],
