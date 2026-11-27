@@ -122,9 +122,31 @@ test('a tool call is an ephemeral action with a deterministic id, and takes no p
 test("the agent's message is a persistent thought that claims one of the task's progress slots", async () => {
   mockTask(SESSION_TASK);
   await routeEvent(ev('agent_turn', { text_preview: 'Found it: the parser drops the last token.' }), LINEAR_ONLY);
-  expect(updates()).toEqual([expect.objectContaining({ UpdateExpression: 'ADD linear_session_progress_count :one' })]);
+  expect(updates()).toEqual([expect.objectContaining({ UpdateExpression: 'ADD linear_session_progress_event_ids :id' })]);
   expect(mockEmitAgentActivity).toHaveBeenCalledWith('lin_tok', 'session-1',
     { type: 'thought', body: 'Found it: the parser drops the last token.' }, expect.objectContaining({ ephemeral: false }));
+});
+
+test('a slot is held by the event id: a re-run claims the same slot, and a failed post gives its slot back', async () => {
+  mockTask(SESSION_TASK);
+  const turn = ev('agent_turn', { text_preview: 'Found it.' }, 'e-turn-1');
+  await routeEvent(turn, LINEAR_ONLY);
+  await routeEvent(turn, LINEAR_ONLY);
+  const claim = {
+    UpdateExpression: 'ADD linear_session_progress_event_ids :id',
+    ConditionExpression: 'attribute_exists(task_id) AND (attribute_not_exists(linear_session_progress_event_ids)'
+      + ' OR size(linear_session_progress_event_ids) < :cap OR contains(linear_session_progress_event_ids, :eid))',
+    ExpressionAttributeValues: { ':id': new Set(['e-turn-1']), ':eid': 'e-turn-1', ':cap': 30 },
+  };
+  expect(updates()).toEqual([expect.objectContaining(claim), expect.objectContaining(claim)]);
+
+  mockTask(SESSION_TASK);
+  mockEmitAgentActivity.mockResolvedValueOnce({ ok: false, retryable: false });
+  await routeEvent(ev('agent_turn', { text_preview: 'Found it.' }, 'e-turn-2'), LINEAR_ONLY);
+  expect(updates().at(-1)).toEqual(expect.objectContaining({
+    UpdateExpression: 'DELETE linear_session_progress_event_ids :id',
+    ExpressionAttributeValues: { ':id': new Set(['e-turn-2']) },
+  }));
 });
 
 test('past the cap, persistent progress is dropped; the stream never throws', async () => {

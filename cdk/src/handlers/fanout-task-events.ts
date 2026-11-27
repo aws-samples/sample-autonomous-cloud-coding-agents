@@ -1742,8 +1742,9 @@ const LINEAR_SESSION_PROGRESS_CAP = 30;
  * logged and never retried through the batch, since the next event supersedes it. Never
  * posts after the session's final activity or into a finished task, because an activity
  * after the closing `response` would reopen the session, nor while the task waits for approval. Persistent activities are capped
- * per task by a conditional counter on the task row; the activity id is derived from the
- * event id, so a re-run record emits the same activity.
+ * per task by the event ids recorded on the task row, and a failed post gives its slot
+ * back; the activity id is derived from the event id, so a re-run record emits the same
+ * activity.
  */
 async function emitLinearSessionProgress(
   event: FanOutEvent,
@@ -1757,15 +1758,20 @@ async function emitLinearSessionProgress(
   // that action would read in the session as if it had run.
   if (task.status === TaskStatus.AWAITING_APPROVAL) return;
   const logCtx = { task_id: task.task_id, linear_agent_session_id: agentSessionId, event_type: effectiveEventType(event) };
+  const persistent = !progress.ephemeral;
   try {
-    if (!progress.ephemeral && !(await claimProgressSlot(task.task_id))) return;
+    if (persistent && !(await claimProgressSlot(task.task_id, event.event_id))) return;
     const token = await resolveToken(ctx);
-    if (!token) return;
-    const result = await emitAgentActivity(token, agentSessionId, progress.content, {
-      ephemeral: progress.ephemeral,
-      id: progressActivityId(event.event_id),
-    });
-    if (!result.ok) logger.warn('[fanout/linear-session] progress activity not emitted', { ...logCtx, retryable: result.retryable });
+    const result: LinearPostResult = token
+      ? await emitAgentActivity(token, agentSessionId, progress.content, {
+        ephemeral: progress.ephemeral,
+        id: progressActivityId(event.event_id),
+      })
+      : { ok: false, retryable: false };
+    if (!result.ok) {
+      logger.warn('[fanout/linear-session] progress activity not emitted', { ...logCtx, retryable: result.retryable });
+      if (persistent) await releaseProgressSlot(task.task_id, event.event_id);
+    }
   } catch (err) {
     logger.warn('[fanout/linear-session] progress activity failed (best effort)', {
       ...logCtx, error: err instanceof Error ? err.message : String(err),
@@ -1773,21 +1779,36 @@ async function emitLinearSessionProgress(
   }
 }
 
-/** Take one of the task's persistent progress slots; false once the cap is reached. */
-async function claimProgressSlot(taskId: string): Promise<boolean> {
+/**
+ * Take one of the task's persistent progress slots for this event; false once the cap
+ * is reached. A slot is the event id in a string set, so a re-run of the same event
+ * holds the slot it already has rather than taking a second one.
+ */
+async function claimProgressSlot(taskId: string, eventId: string): Promise<boolean> {
   try {
     await ddb.send(new UpdateCommand({
       TableName: process.env.TASK_TABLE_NAME,
       Key: { task_id: taskId },
-      UpdateExpression: 'ADD linear_session_progress_count :one',
-      ConditionExpression: 'attribute_exists(task_id) AND (attribute_not_exists(linear_session_progress_count) OR linear_session_progress_count < :cap)',
-      ExpressionAttributeValues: { ':one': 1, ':cap': LINEAR_SESSION_PROGRESS_CAP },
+      UpdateExpression: 'ADD linear_session_progress_event_ids :id',
+      ConditionExpression: 'attribute_exists(task_id) AND (attribute_not_exists(linear_session_progress_event_ids)'
+        + ' OR size(linear_session_progress_event_ids) < :cap OR contains(linear_session_progress_event_ids, :eid))',
+      ExpressionAttributeValues: { ':id': new Set([eventId]), ':eid': eventId, ':cap': LINEAR_SESSION_PROGRESS_CAP },
     }));
     return true;
   } catch (err) {
     if ((err as { name?: string }).name === 'ConditionalCheckFailedException') return false;
     throw err;
   }
+}
+
+/** Give back the slot of an event whose activity was not posted, so failures do not use up the cap. */
+async function releaseProgressSlot(taskId: string, eventId: string): Promise<void> {
+  await ddb.send(new UpdateCommand({
+    TableName: process.env.TASK_TABLE_NAME,
+    Key: { task_id: taskId },
+    UpdateExpression: 'DELETE linear_session_progress_event_ids :id',
+    ExpressionAttributeValues: { ':id': new Set([eventId]) },
+  }));
 }
 
 /**
