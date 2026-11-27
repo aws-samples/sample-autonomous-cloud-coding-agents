@@ -170,17 +170,28 @@ export interface SessionPromptActivity {
 }
 
 const SESSION_PROMPT_QUERY = `
-query VerifySessionPrompt($id: String!) {
+query VerifySessionPrompt($id: ID!) {
   organization { id }
   viewer { id }
-  agentActivity(id: $id) {
-    createdAt
-    agentSession { id }
-    content { __typename ... on AgentActivityPromptContent { body } }
-    user { id app }
-    promptAuthor { id app }
+  agentActivities(filter: { id: { eq: $id } }, first: 1) {
+    nodes {
+      createdAt
+      agentSession { id }
+      content { __typename ... on AgentActivityPromptContent { body } }
+      user { id app }
+      promptAuthor { id app }
+    }
   }
 }`;
+
+/**
+ * The one activity of an ``agentActivities`` read by id, or null. Read through the
+ * filter because Linear declares ``agentActivity(id)`` non-null: a missing activity
+ * is a GraphQL error there, which would look like Linear failing.
+ */
+function onlyActivity<T>(data: { agentActivities?: { nodes?: T[] } | null }): T | null {
+  return data.agentActivities?.nodes?.[0] ?? null;
+}
 
 /**
  * Read a session prompt back from Linear before acting on it as consent. Webhook
@@ -201,18 +212,20 @@ export async function fetchSessionPromptActivity(
   const data = result.value as {
     organization?: { id?: string };
     viewer?: { id?: string };
-    agentActivity?: {
-      createdAt?: string;
-      agentSession?: { id?: string } | null;
-      content?: { __typename?: string; body?: string } | null;
-      user?: { id?: string; app?: boolean } | null;
-      promptAuthor?: { id?: string; app?: boolean } | null;
+    agentActivities?: {
+      nodes?: Array<{
+        createdAt?: string;
+        agentSession?: { id?: string } | null;
+        content?: { __typename?: string; body?: string } | null;
+        user?: { id?: string; app?: boolean } | null;
+        promptAuthor?: { id?: string; app?: boolean } | null;
+      }>;
     } | null;
   };
   if (data.organization?.id !== workspaceId) throw new Error('Linear session prompt verification workspace mismatch');
   const viewerId = data.viewer?.id;
   if (!viewerId) throw new Error('Linear session prompt verification identity unavailable');
-  const activity = data.agentActivity;
+  const activity = onlyActivity(data);
   const author = activity?.promptAuthor ?? activity?.user;
   const sessionId = activity?.agentSession?.id;
   if (activity?.content?.__typename !== 'AgentActivityPromptContent' || !sessionId
@@ -221,9 +234,9 @@ export async function fetchSessionPromptActivity(
 }
 
 const SESSION_ACTIVITY_QUERY = `
-query SessionActivityShown($id: String!) {
+query SessionActivityShown($id: ID!) {
   organization { id }
-  agentActivity(id: $id) { createdAt agentSession { id } }
+  agentActivities(filter: { id: { eq: $id } }, first: 1) { nodes { createdAt agentSession { id } } }
 }`;
 
 /**
@@ -239,11 +252,12 @@ export async function fetchSessionActivityShown(
   if (!result.ok) throw new Error('Linear session activity lookup unavailable');
   const data = result.value as {
     organization?: { id?: string };
-    agentActivity?: { createdAt?: string; agentSession?: { id?: string } | null } | null;
+    agentActivities?: { nodes?: Array<{ createdAt?: string; agentSession?: { id?: string } | null }> } | null;
   };
   if (data.organization?.id !== workspaceId) throw new Error('Linear session activity lookup workspace mismatch');
-  const sessionId = data.agentActivity?.agentSession?.id;
-  const createdAt = data.agentActivity?.createdAt;
+  const activity = onlyActivity(data);
+  const sessionId = activity?.agentSession?.id;
+  const createdAt = activity?.createdAt;
   return sessionId && createdAt ? { sessionId, createdAt } : null;
 }
 
