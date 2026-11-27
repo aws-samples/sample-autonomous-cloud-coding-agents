@@ -44,6 +44,18 @@ The suite is sealed off from the machine it runs on (`test/setup/`):
 | `cli/test/` | WRITE | Jest tests |
 | `cli/test/emulator/` | WRITE | Emulator-backed tests (`*.emulator.ts`): real CLI code against a local AWS Emulator. Not part of the unit run: `mise run test:integration` from the repository root (needs Docker). Rules and known differences from AWS: [scripts/aws-emulator/README.md](../scripts/aws-emulator/README.md). |
 
+## Recipes
+
+The tables under "Where to make changes" in [../AGENTS.md](../AGENTS.md#where-to-make-changes) and in the [developer guide](../docs/guides/DEVELOPER_GUIDE.md#where-to-make-changes) say where the code is. A recipe lists what has to change together.
+
+### Add a command
+
+1. `cli/src/commands/<name>.ts`: a `make<Name>Command()` factory (see **New command** under Code style).
+2. Its registration in `cli/src/bin/bgagent.ts`, with `program.addCommand(...)`.
+3. For each request to the API, a method on `ApiClient` (`cli/src/api-client.ts`) with its types in `cli/src/types.ts`, the mirror of `cdk/src/handlers/shared/types.ts` (`mise run check:types-sync`).
+4. `cli/test/commands/<name>.test.ts`, with `ApiClient` mocked.
+5. The command in `docs/guides/USER_GUIDE.md` ("Using the CLI") and in `cli/README.md`.
+
 ## Code style
 
 **New command** — factory function + `Command` from commander; throw `CliError` for user-facing errors:

@@ -53,6 +53,19 @@ Unit tests cannot reach AWS through botocore. `tests/conftest.py` removes the cr
 | `agent/README.md` | WRITE | Env vars, PAT notes |
 | `cli/src/commands/watch.ts` | WRITE (if event schema changes) | Event consumer |
 
+## Recipes
+
+The tables under "Where to make changes" in [../AGENTS.md](../AGENTS.md#where-to-make-changes) and in the [developer guide](../docs/guides/DEVELOPER_GUIDE.md#where-to-make-changes) say where the code is. A recipe lists what has to change together.
+
+### Add a workflow
+
+1. The file `agent/workflows/<domain>/<name>-vN.yaml`, whose `id` is that path below `agent/workflows/` without the extension. `agent/tests/test_workflow_tree_valid.py` validates every file of the tree against the rules of [docs/design/WORKFLOWS.md](../docs/design/WORKFLOWS.md#validation-rules).
+2. Its system prompt: a module in `agent/src/prompts/` and an entry in `_PROMPTS` (`agent/src/prompts/__init__.py`). Without the entry the task runs on a default prompt, with a warning in the log.
+3. Its descriptor in `DESCRIPTORS` (`cdk/src/handlers/shared/workflows.ts`): task creation refuses a `workflow_ref` that the table does not hold, and `cdk/test/handlers/shared/workflows.test.ts` holds the table and the files in step.
+4. The places keyed by a workflow's id. In the agent: `_NO_CLARIFICATION_WORKFLOW_IDS` in `agent/src/runner.py` (a writeable workflow that is not listed is offered the `request_clarification` tool; add the id, because the platform acts on the answer to a question only for `coding/new-task-v1`: `cdk/src/handlers/shared/clarify-resume.ts`) and `_PRINCIPAL_BY_ID` in `agent/src/workflow/loader.py` (the Cedar principal; `new_task` for an id that is not there). On the platform, for a workflow whose work goes into pull requests: the ids that `taskFacts` counts as coding work (`cdk/src/handlers/shared/scoreboard.ts`), and the row "Coding task" of `docs/design/OBSERVABILITY.md`.
+5. No table lists the workflows that work on an existing pull request: such a workflow has `pr_number` among the `all_of` of its `required_inputs`. The agent reads that from the file (`uses_pull_request` on `Workflow`, `agent/src/workflow/models.py`), the orchestrator from the descriptor (`workflowUsesPr` in `cdk/src/handlers/shared/workflows.ts`).
+6. A workflow that users select gets its row in the table of [Workflows](../docs/guides/USER_GUIDE.md#workflows) in the user guide.
+
 ## Code style
 
 **Progress events** — use `_ProgressWriter`; do not write DynamoDB directly from random call sites:
