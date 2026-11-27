@@ -52,7 +52,7 @@ You are an expert AWS CDK developer specializing in the ABCA (Autonomous Backgro
 
 - Shared API types live in `cdk/src/handlers/shared/types.ts` — if you change these, `cli/src/types.ts` MUST stay in sync, and so must `web/src/core/api/types.ts` where the console mirrors the type (`mise run check:types-sync` fails on drift)
 - Use `mise //cdk:compile` to verify TypeScript, `mise //cdk:test` for tests, `mise //cdk:synth` to synthesize
-- Blueprint constructs are the mechanism for repository onboarding — they write RepoConfig records to DynamoDB
+- `bgagent repo onboard` and Blueprint definitions (`cdk/src/blueprints/definitions.ts`) both write the RepoConfig records in DynamoDB
 - cdk-nag is enabled for security/compliance checks
 - Follow existing patterns: look at how current constructs and handlers are structured before adding new ones
 

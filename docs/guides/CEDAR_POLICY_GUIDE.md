@@ -17,12 +17,13 @@ Both tiers use the same Cedar syntax. The annotation is all that differs.
 
 ## Where rules live
 
-A repository's rules come from its `Blueprint` construct (`security.cedarPolicies`, an array of Cedar policy strings) and from any registry Cedar policy modules attached to it. They are appended to the platform's built-in rules. Each string declares its own tier:
+A repository's rules come from its `Blueprint` construct (`security.cedarPolicies`, an array of Cedar policy strings) and from any registry Cedar policy modules attached to it. The same array can be written without a deploy: `bgagent repo onboard <owner/repo> --cedar-policy-file <path>` takes one rule file per flag, each file is one entry with one tier, and the files given replace the stored rules. The rules are appended to the platform's built-in rules. Each string declares its own tier:
 
 ```ts
-new Blueprint(this, 'PaymentsBlueprint', {
+// cdk/src/blueprints/definitions.ts, in resolveBlueprintDefinitions
+definitions.push({
+  id: 'PaymentsBlueprint',
   repo: 'acme/payments-api',
-  repoTable,
   security: {
     cedarPolicies: [
       `@tier("hard")
@@ -48,7 +49,7 @@ new Blueprint(this, 'PaymentsBlueprint', {
 - The soft rule asks for approval with a 900-second limit. The task's approval window can shorten it. The default gives 300 seconds, `--approval-timeout 600` gives 600, and `--approval-timeout 3600` gives 900. The remaining task lifetime can shorten the window further.
 - Disabling built-in soft rules and capping `--pre-approve` scopes per repository are not supported yet.
 
-The built-in rules are in [`hard_deny.cedar`](../../agent/policies/hard_deny.cedar) and [`soft_deny.cedar`](../../agent/policies/soft_deny.cedar). `bgagent repo show <owner/repo> --output json` prints the repository's inline Blueprint rules. To see the additional rules the agent loads at task start, inspect the registry modules referenced by `assets.cedarPolicyModules`.
+The built-in rules are in [`hard_deny.cedar`](../../agent/policies/hard_deny.cedar) and [`soft_deny.cedar`](../../agent/policies/soft_deny.cedar). `bgagent repo show <owner/repo> --output json` prints what the repository's record holds: its inline rules (`cedar_policies`) and the registry modules it pins (`cedar_policy_modules`). To see the additional rules the agent loads at task start, inspect those modules. What counts is the record, not the Blueprint: a module list that the Blueprint leaves out stays pinned, and is detached with `assets: { cedarPolicyModules: [] }` and a deploy, or with `bgagent repo onboard <owner/repo> --unset cedar_policy_modules`.
 
 ## Vocabulary
 
@@ -150,7 +151,7 @@ The agent's policy engine loads the rules and runs a probe Cedar evaluation when
 - `@approval_timeout_s` below the 30 s floor or non-integer.
 - Combined hard + soft Cedar text exceeding 64 KB.
 
-Fix the Blueprint, redeploy, resubmit.
+Fix the Blueprint and redeploy, or fix the rule file and run `bgagent repo onboard` again with every rule file of the repository (the files given replace the stored rules); then resubmit.
 
 ## Capacity and UX budgets
 
@@ -161,9 +162,9 @@ Fix the Blueprint, redeploy, resubmit.
 
 The agent's `PolicyEngine` is the only engine that loads and evaluates rules, so test your rules with it:
 
-- Keep each `security.cedarPolicies` entry in a file and pass that file's text to the Blueprint (for example with `fs.readFileSync`), so that what is tested is what is deployed.
+- Keep each entry in a file, and pass that file to `bgagent repo onboard --cedar-policy-file` or its text to the Blueprint's `security.cedarPolicies` (for example with `fs.readFileSync`), so that what is tested is what is stored.
 - Add a case beside [`agent/tests/test_blueprint_cedar_routing.py`](../../agent/tests/test_blueprint_cedar_routing.py), which loads this guide's own example. Construct `PolicyEngine(task_type="new_task", repo="owner/repo", blueprint_policies=[...])` with the same text and assert on `evaluate_tool_use(...)`. If the rules cannot be loaded, construction raises the error a task would report at start.
-- Registry modules attached to the repository share the 64 KB budget and the rule-id space with the Blueprint's entries. They are not part of such a test unless their text is added to the list.
+- Registry modules attached to the repository share the 64 KB budget and the rule-id space with the repository's own entries. They are not part of such a test unless their text is added to the list, and `bgagent repo onboard` does not count them when it checks the size of the rule files.
 
 ## Where to look next
 

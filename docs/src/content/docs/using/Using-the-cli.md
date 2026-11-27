@@ -25,7 +25,7 @@ node lib/bin/bgagent.js login --username user@example.com
 
 ### Operator commands (stack admin)
 
-Stack admins can introspect deployment state and run smoke checks **without Cognito login** — these commands use operator AWS credentials (IAM profile / `AWS_REGION`):
+Stack admins can introspect deployment state, onboard repositories and run smoke checks **without Cognito login** — these commands use operator AWS credentials (IAM profile / `AWS_REGION`):
 
 ```bash
 # Print stack outputs (ApiUrl, UserPoolId, AppClientId, GitHubTokenSecretArn, …)
@@ -40,12 +40,21 @@ bgagent repo list
 # Show RepoConfig for one repo (secret ARNs redacted)
 bgagent repo show owner/repo
 
+# Onboard a repository, or change its per-repo settings (no deploy)
+bgagent repo onboard owner/repo
+bgagent repo onboard owner/repo --max-budget 5 --build-command 'npm run build && npm test'
+
+# Remove a per-repo setting, so that the platform default applies again
+bgagent repo onboard owner/repo --unset max_budget_usd
+
 # Store the platform GitHub PAT (or a per-blueprint secret via --repo)
 bgagent github set-token
 bgagent github set-token --repo owner/repo
 ```
 
-The read-only operator commands (`platform`, `repo`, `runtime`, `ops`, `webhook test`, `admin list-users`) accept `--output json`; the credential-writing `github` and `admin invite-user`/`delete-user`/`reset-password` commands do not. Region defaults to `bgagent configure --region` or `AWS_REGION`.
+`repo onboard` prints whether it `onboarded`, `updated` or `re-activated` the repository. It needs `dynamodb:GetItem` and `dynamodb:UpdateItem` on the table of the `RepoTableName` stack output, in addition to `cloudformation:DescribeStacks` for the stack outputs, and `lambda:ListManagedMicrovmImages` when the repository's compute type is `lambda-microvm`. [Per-repo overrides](/sample-autonomous-cloud-coding-agents/customizing/per-repo-overrides) lists the settings and their flags.
+
+The operator commands `platform`, `repo`, `runtime`, `ops`, `webhook test` and `admin list-users` accept `--output json`; the credential-writing `github` and `admin invite-user`/`delete-user`/`reset-password` commands do not. Region defaults to `bgagent configure --region` or `AWS_REGION`.
 
 ### Submitting a task
 

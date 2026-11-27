@@ -103,7 +103,7 @@ bgagent submit \
 
 At least one of `--issue` or `--task` is required.
 
-The repository must be onboarded to the platform via a `Blueprint` CDK construct. If the repo is not onboarded, the API returns a `REPO_NOT_ONBOARDED` error.
+The repository must be onboarded to the platform, with `bgagent repo onboard` or a `Blueprint` CDK construct. If the repo is not onboarded, the API returns a `REPO_NOT_ONBOARDED` error.
 
 When `--wait` is used, the CLI polls until the task reaches a terminal status (COMPLETED, FAILED, CANCELLED, TIMED_OUT) and exits with code 0 for COMPLETED or 1 otherwise. If the CLI stops waiting before that (the API keeps failing, or the maximum wait is reached), it exits with code 2: the task may still be running.
 
@@ -266,7 +266,7 @@ Exits with code 1 when any check fails (warnings are acceptable).
 
 ### `bgagent repo list`
 
-List repositories onboarded via Blueprint constructs (reads `RepoTable`).
+List onboarded repositories (reads `RepoTable`).
 
 ```
 bgagent repo list \
@@ -285,18 +285,35 @@ bgagent repo show owner/repo \
 
 ### `bgagent repo onboard <owner/repo>`
 
-Register or re-activate a repository in `RepoTable` without a CDK redeploy. With no overrides, tasks use the platform `RuntimeArn` and `GitHubTokenSecretArn` (IAM already granted at deploy). Custom `--runtime-arn` / `--token-secret-arn` values require matching `TaskOrchestrator` IAM via CDK — the command prints notes explaining this. Prefer CDK `Blueprint` constructs for durable lifecycle, Cedar policies, and egress validation.
+Register a repository in `RepoTable`, or change its per-repo settings, without a CDK redeploy. The command writes the settings it names and leaves the other stored settings as they are. It always activates the repository, and says what it did: `onboarded`, `updated` or `re-activated` (`change` in the JSON output). With no overrides, tasks use the platform `RuntimeArn` and `GitHubTokenSecretArn` (IAM already granted at deploy). Custom `--runtime-arn` / `--token-secret-arn` values require matching `TaskOrchestrator` IAM via CDK — the command prints notes explaining this. Extra egress domains need a CDK `Blueprint` and a deploy.
 
 ```
 bgagent repo onboard owner/repo \
-  --compute-type <agentcore|ecs> \
-  --runtime-arn <arn>         AgentCore runtime override (agentcore only) \
+  --compute-type <agentcore|ecs|lambda-microvm> \
+  --runtime-arn <arn>              AgentCore runtime override (agentcore only) \
   --model <model-id> \
   --token-secret-arn <arn> \
-  --max-turns <n> \
-  --poll-interval <ms>        Default agent poll interval in milliseconds \
+  --max-turns <n>                  Default turn limit for tasks (1-500) \
+  --poll-interval <ms>             Default agent poll interval in milliseconds \
+  --max-budget <usd>               Default cost budget for tasks (0.01-100) \
+  --memory-token-budget <tokens>   Token budget for the memory context of tasks \
+  --approval-gate-cap <n>          Cap on the approval gates of a task (1-500) \
+  --build-command <command>        Command the agent runs to build and verify the repository \
+  --lint-command <command>         Command the agent runs to lint the repository \
+  --system-prompt-file <path>      File with additional system prompt instructions \
+  --cedar-policy-file <path>       File with Cedar rules, one tier per file (repeatable) \
+  --mcp-server <ref>               registry://mcp_server/namespace/name@constraint (repeatable) \
+  --cedar-policy-module <ref>      registry://cedar_policy_module/namespace/name@constraint (repeatable) \
+  --skill <ref>                    registry://skill/namespace/name@constraint (repeatable) \
+  --unset <column>                 Remove a setting, so that the platform default applies again (repeatable) \
   --output <text|json>
 ```
+
+- **Values.** Every setting flag refuses an empty value, and a number is written in digits only (the budget may have a decimal part).
+- **Files.** `--system-prompt-file` and `--cedar-policy-file` read UTF-8 text and store it without surrounding whitespace. A file that is not UTF-8 or holds a NUL character is refused, and so is more than 64 KB of text (for the rule files, together). Keep these files in version control: the repository's row is the only other copy.
+- **Lists replace.** `--cedar-policy-file`, `--mcp-server`, `--cedar-policy-module` and `--skill` take one entry per flag, and the entries given replace the stored list: pass every entry that should remain. When the stored list held entries, the command notes `<column>: stored entries replaced (<n> before, <m> now).` A list flag that is not given leaves its list alone.
+- **Refs and rule text.** The command checks a registry ref for its `registry://<kind>/` prefix, and refuses one on a stack deployed without the Agent Registry. It does not parse the rest of the ref or the Cedar text: a wrong one fails the repository's tasks at start. Check a ref with `bgagent registry resolve <ref>` first, and test rule files as the [Cedar policy guide](../docs/guides/CEDAR_POLICY_GUIDE.md#testing-policies-before-shipping) describes.
+- **`--unset <column>`** takes the name of a setting in `RepoTable`: `compute_type`, `runtime_arn`, `model_id`, `github_token_secret_arn`, `max_turns`, `poll_interval_ms`, `max_budget_usd`, `memory_token_budget`, `approval_gate_cap`, `build_command`, `lint_command`, `system_prompt_overrides`, `cedar_policies`, `mcp_servers`, `cedar_policy_modules` or `skills`. It is refused for a repository that has no row, and for a setting the same command sets.
 
 ### `bgagent repo offboard <owner/repo>`
 

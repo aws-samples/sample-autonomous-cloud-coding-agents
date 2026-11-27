@@ -154,7 +154,7 @@ mise //cdk:bootstrap
 mise //cdk:deploy -- --require-approval never
 ```
 
-With no `abca.deployment.json`, this deploys the legacy topology, with every optional feature (about 463 resources against the minimal profile's 317). It has no Region check and no data-loss confirmation, and `mise //cdk:bootstrap` replaces a CDK bootstrap that is already in the account and Region: see [Bootstrap with least-privilege](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide#bootstrap-with-least-privilege). Once setup has written `abca.deployment.json`, `mise //cdk:deploy` uses it. `--require-approval never` lets the deploy run unattended; drop it to review IAM and security-group changes.
+With no `abca.deployment.json`, this deploys the legacy topology, with every optional feature (about 431 resources against the minimal profile's 287). It has no Region check and no data-loss confirmation, and `mise //cdk:bootstrap` replaces a CDK bootstrap that is already in the account and Region: see [Bootstrap with least-privilege](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide#bootstrap-with-least-privilege). Once setup has written `abca.deployment.json`, `mise //cdk:deploy` uses it. `--require-approval never` lets the deploy run unattended; drop it to review IAM and security-group changes.
 
 :::
 
@@ -353,7 +353,7 @@ node lib/bin/bgagent.js submit \
   --wait
 ```
 
-`repo onboard` registers the repository with the platform defaults: the GitHub token from Step 4, the default model, and the default egress allowlist. A repository that needs its own settings uses a CDK Blueprint instead; see [Onboard your own repositories](#onboard-your-own-repositories). The `--wait` flag polls until the task reaches a terminal state.
+`repo onboard` registers the repository with the platform defaults: the GitHub token from Step 4, the default model, and the default egress allowlist. A repository that needs its own settings passes flags to the same command; see [Onboard your own repositories](#onboard-your-own-repositories). The `--wait` flag polls until the task reaches a terminal state.
 
 </TabItem>
 
@@ -516,13 +516,13 @@ Once you have the basic flow working, here are the main ways to customize the pl
 
 There are two ways to register a repository. Both write the same configuration record to DynamoDB, which the orchestrator checks before it accepts a task.
 
-- **`repo onboard` (runtime, no redeploy).** `node lib/bin/bgagent.js repo onboard owner/repo` from `cli/`, as in Step 6. Use it when the repository works with the platform defaults: the platform GitHub token, a model the runtime already has access to, and the default egress allowlist.
-- **A CDK `Blueprint` (checked in, redeploy).** Use it when the repository needs its own settings, such as a per-repo GitHub token, another model, extra egress domains, Cedar approval policies or system-prompt overrides, or when you want the registration in source control. Add a `Blueprint` construct in `cdk/src/stacks/agent.ts` and redeploy:
+- **`repo onboard` (runtime, no redeploy).** `node lib/bin/bgagent.js repo onboard owner/repo` from `cli/`, as in Step 6. Flags of the same command give the repository its own settings; see [Per-repo configuration](#per-repo-configuration).
+- **A CDK `Blueprint` (checked in, redeploy).** Use it when you want the registration in source control, or when the repository needs extra egress domains, which only a Blueprint can add. Add an entry to `resolveBlueprintDefinitions` in `cdk/src/blueprints/definitions.ts`, not a `Blueprint` construct to `cdk/src/stacks/agent.ts` (only the definitions feed the DNS allowlist), and redeploy:
 
 ```typescript
-new Blueprint(this, 'MyServiceBlueprint', {
+definitions.push({
+  id: 'MyServiceBlueprint',
   repo: 'my-org/my-service',
-  repoTable: repoTable.table,
 });
 ```
 
@@ -530,19 +530,16 @@ The stack's sample `AgentPluginsBlueprint` takes its repository from the `BLUEPR
 
 ### Per-repo configuration
 
-Blueprints accept optional overrides to customize agent behavior per repository: which model to use, how many turns the agent gets, cost budget limits, extra system prompt instructions, and network egress rules. See the [User guide - Per-repo overrides](/sample-autonomous-cloud-coding-agents/using/overview) for the full list.
+Flags of `repo onboard` customize agent behavior per repository: which model to use, how many turns the agent gets, cost budget limits, the build and lint commands, extra system prompt instructions, and Cedar rules. The command changes only the settings it names. See the [User guide - Per-repo overrides](/sample-autonomous-cloud-coding-agents/customizing/per-repo-overrides) for the full list.
 
-```typescript
-new Blueprint(this, 'CustomBlueprint', {
-  repo: 'my-org/my-service',
-  repoTable: repoTable.table,
-  agent: {
-    modelId: 'global.anthropic.claude-opus-5',
-    maxTurns: 50,
-    systemPromptOverrides: 'Always write tests. Use conventional commits.',
-  },
-});
+```bash
+node lib/bin/bgagent.js repo onboard my-org/my-service \
+  --model global.anthropic.claude-opus-5 \
+  --max-turns 50 \
+  --system-prompt-file my-service-prompt.md
 ```
+
+A Blueprint definition takes the same settings as properties, and it is the only place for network egress rules; see [Multiple repositories](/sample-autonomous-cloud-coding-agents/developer-guide/repository-preparation#multiple-repositories).
 
 ### Add a CLAUDE.md to your repository
 

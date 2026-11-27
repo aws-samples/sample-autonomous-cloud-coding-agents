@@ -148,10 +148,7 @@ node cli/lib/bin/bgagent.js events <TASK_ID> --output json
 - Fix:
   1. **Check and fix the DynamoDB record first** — remove stale `model_id` if present:
      ```bash
-     aws dynamodb update-item \
-       --table-name <RepoTableName> \
-       --key '{"repo": {"S": "owner/repo"}}' \
-       --update-expression "REMOVE model_id"
+     bgagent repo onboard <owner/repo> --unset model_id
      ```
   2. If model_id is correct, wait and retry — throttling is often transient
   3. Switch to a model with higher availability (Haiku 4.5 > Sonnet 4.6 > Opus)

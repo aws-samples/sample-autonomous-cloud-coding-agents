@@ -14,18 +14,19 @@ deployment so tasks can target it.
 
 There are two paths.
 
-**Prefer the CLI operator path (Path A)** when the repo can run on the
-**platform/default-blueprint** setup — the default GitHub token secret, a model
-already granted to the runtime, and the default egress allowlist. It's a single
-runtime command against the deployed stack: no code change, no redeploy.
+**Prefer the CLI operator path (Path A).** It's a single runtime command against the
+deployed stack: no code change, no redeploy. Its flags set the repo's **own** config
+too: model, turn limit, cost budget, build and lint commands, system-prompt
+additions, Cedar HITL policies and registry pins.
 
-**Use the CDK Blueprint path (Path B)** when the repo needs its **own** config that
-the CLI can't provision at runtime — a per-repo GitHub token, a model not yet
-granted to the runtime, custom egress domains, Cedar HITL policies, or
-system-prompt overrides. These are baked into infrastructure and require a redeploy
-(with the correct permissions). When in doubt, start with Path A; if a task later
-fails on a missing token / model grant / blocked egress, promote the repo to a
-Blueprint.
+**Use the CDK Blueprint path (Path B)** when the repo needs **custom egress domains**,
+which only a Blueprint can add, or when the operator wants the registration checked
+in. It requires a redeploy (with the correct permissions).
+
+These need a redeploy on either path: IAM for a custom runtime ARN or a per-repo
+GitHub token secret, and what the stack does not have yet. `bgagent repo onboard`
+refuses a model not granted to the runtime, a compute backend the stack does not deploy
+and a registry pin on a stack without the Agent Registry, and says what to deploy.
 
 > **This is an operation, not a contribution.** Onboarding a repo into your own
 > deployment writes a record to the platform's RepoTable — it is **not** a change to
@@ -45,27 +46,39 @@ Use AskUserQuestion to collect (only the repository is required — the rest fal
   onboard` rejects a mismatch at the CLI rather than letting the task fail at turn 0. If overriding, it must be a model **already granted to the runtime** (see "Model not yet wired into the runtime"), specified as a cross-Region **inference-profile ID** (e.g. `global.anthropic.claude-opus-5-5`), not a raw `anthropic.*` foundation-model ID.
 - **Max turns** — default 100 (range 1–500).
 - **Per-repo GitHub token** — only if this repo needs a different token than the platform default (provide its Secrets Manager ARN).
+- **Build and lint commands** — only if the repo does not build with `mise run build` / `mise run lint` (e.g. `npm run build && npm test`). Without its real build command, build-regression gating is off for the repo.
 
-> **Per-task cost limits aren't set here.** `max_budget` / `max_turns` *per task* are flags on `bgagent submit` (the `submit-task` skill), not repo-onboarding fields. Onboarding sets only the per-repo **default** `max_turns`.
+> **Per-task cost limits aren't set here.** `max_budget` / `max_turns` *per task* are flags on `bgagent submit` (the `submit-task` skill), not repo-onboarding fields. Onboarding sets the per-repo **defaults** (`--max-turns`, `--max-budget`).
 
-If the repo needs config the CLI can't provision (per-repo egress, Cedar policies, system-prompt overrides, or a not-yet-granted model), use **Path B** instead.
+If the repo needs custom egress domains, use **Path B** instead.
 
 ## Path A — CLI operator onboarding (default)
 
 `bgagent repo onboard` writes (or re-activates) the repository's `RepoConfig` row in
-the deployed RepoTable directly. It takes effect immediately — **no `agent.ts` edit,
-no `cdk deploy`.**
+the deployed RepoTable directly. Run again for an onboarded repo, it changes the
+settings it names and keeps the others. It takes effect immediately — **no source
+edit, no `cdk deploy`.**
 
 ```bash
 bgagent repo onboard <owner/repo>
 # common overrides:
 #   --model <inference-profile-id>     e.g. global.anthropic.claude-opus-5-5 (must be runtime-granted)
 #   --compute-type <agentcore|ecs>
-#   --max-turns <n>                    per-repo default turn limit
-#   --token-secret-arn <arn>           per-repo GitHub token (else platform default)
-#   --runtime-arn <arn>                override AgentCore runtime ARN (agentcore only)
+#   --max-turns <n>                    per-repo default turn limit (1-500)
+#   --max-budget <usd>                 per-repo default cost budget (0.01-100)
+#   --build-command <command>          for a repo without mise, e.g. 'npm run build && npm test'
+#   --lint-command <command>           e.g. 'npm run lint'
+#   --system-prompt-file <path>        extra system prompt instructions (UTF-8 file, at most 64 KB)
+#   --cedar-policy-file <path>         Cedar rules, one tier per file; repeatable, the files given replace the stored rules
+#   --token-secret-arn <arn>           per-repo GitHub token (else platform default); its IAM needs a redeploy
+#   --runtime-arn <arn>                override AgentCore runtime ARN (agentcore only); its IAM needs a redeploy
 #   --poll-interval <ms>               agent completion poll interval
+#   --unset <column>                   remove a setting, e.g. --unset max_budget_usd
 ```
+
+`bgagent repo onboard --help` lists every flag, including the registry pins and the
+approval-gate cap. Keep prompt and rule files in version control: the row is the only
+other copy.
 
 Then confirm it landed:
 
@@ -84,30 +97,33 @@ uses the platform default — read it from the stack's `BedrockGeoRegion` +
 be invoked — see "Model not yet wired into the runtime" before choosing a model the
 deployment doesn't already support.
 
-## Path B — CDK Blueprint (declarative / canonical)
+## Path B — CDK Blueprint (declarative, checked in)
 
 Use this when the operator wants the repo committed to infrastructure-as-code (so a
-fresh deploy re-creates it) rather than set as a runtime record. This **does** require
-editing the stack and redeploying.
+fresh deploy re-creates it) rather than set as a runtime record, or when the repo needs
+custom egress domains. This **does** require editing the CDK app and redeploying.
 
-1. Read `cdk/src/stacks/agent.ts` to find where `Blueprint` constructs are defined and
-   the `repoTable` reference.
-2. Add a construct following the existing pattern:
+1. Read `resolveBlueprintDefinitions` in `cdk/src/blueprints/definitions.ts`. The stack
+   creates a `Blueprint` for each definition, and the DNS allowlist is built from the
+   same list, so do not add a `Blueprint` construct to `cdk/src/stacks/agent.ts`.
+2. Add a definition following the existing pattern:
 
    ```typescript
-   new Blueprint(this, 'MyRepoBlueprint', {
+   definitions.push({
+     id: 'MyRepoBlueprint', // construct ID: keep it stable across releases
      repo: 'owner/repo',
-     repoTable: repoTable.table,
      // Optional overrides:
-     // computeType: 'agentcore',
-     // modelId: 'global.anthropic.claude-opus-5-5',
-     // maxTurns: 100,
-     // maxBudgetUsd: 50,
-     // githubTokenSecretArn: 'arn:aws:secretsmanager:...',
+     // compute: { type: 'agentcore' },
+     // agent: { modelId: 'global.anthropic.claude-opus-5-5', maxTurns: 100, maxBudgetUsd: 50 },
+     // credentials: { githubTokenSecretArn: 'arn:aws:secretsmanager:...' },
+     // networking: { egressAllowlist: ['npm.internal.example.com'] },
    });
    ```
 
 3. Redeploy with the `deploy` skill: `bgagent setup` with the stack's current features (`DeploymentFeatures` output) and `--yes`. Setup shows the diff and refuses to delete data without the user's confirmation.
+
+A setting deleted from a definition stays in the row: to remove it, also run
+`bgagent repo onboard <owner/repo> --unset <column>`.
 
 > **Sample-repo shortcut:** the stack's AgentPlugins blueprint resolves its `repo` from
 > `BLUEPRINT_REPO` (env) → CDK context `blueprintRepo` → default `awslabs/agent-plugins`.
@@ -193,6 +209,8 @@ platform default, and treat "add model X" as a separate, later change.
 | `system_prompt_overrides` | Custom system instructions | None |
 | `github_token_secret_arn` | Repo-specific GitHub token | Platform default |
 | `poll_interval_ms` | Completion polling frequency | 30000ms |
+
+The other seven settings (`build_command`, `lint_command`, `approval_gate_cap`, `cedar_policies` and the registry pins `mcp_servers`, `cedar_policy_modules`, `skills`) have flags too: see `bgagent repo onboard --help`.
 
 Task-level parameters override per-repo defaults where one exists (`memory_token_budget` has none); if neither specifies a value, platform defaults apply.
 

@@ -152,7 +152,7 @@ Run `/bgagent link` in Slack, then `bgagent slack link <code>` in your terminal.
 
 ### "Repository not onboarded"
 
-The repo must be registered with a Blueprint before submitting tasks. See the [User guide](./USER_GUIDE.md).
+The repo must be registered with `bgagent repo onboard` or a Blueprint before submitting tasks. See the [User guide](./USER_GUIDE.md).
 
 In a channel that has a default repo (`bgagent slack onboard-channel`) you get this answer only for a repo that is given as a GitHub link, that is written with an issue number (`org/repo#42`), or that has the same owner as the repo the task would otherwise run on: the channel's default, or an onboarded repo named in the same message. Any other `word/word`, a repo of another owner included, is read as part of the description.
 

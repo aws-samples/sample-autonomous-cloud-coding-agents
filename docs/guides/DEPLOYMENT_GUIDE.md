@@ -134,7 +134,7 @@ Without a [deployment profile](#deployment-profiles), AWS Agent Registry is enab
 cdk deploy --context enableAgentRegistry=false
 ```
 
-Blueprints without `registry://` asset references continue to work. A remaining registry reference fails task startup rather than silently skipping the asset.
+Repositories whose record holds no `registry://` asset reference continue to work. A remaining registry reference fails task startup rather than silently skipping the asset. What counts is the record, which `bgagent repo show <owner/repo>` prints, not the Blueprint: detach a list with `bgagent repo onboard <owner/repo> --unset <column>` (`mcp_servers`, `cedar_policy_modules` or `skills`), or declare it empty in the Blueprint (`assets: { mcpServers: [] }`) and deploy; deleting the list from the Blueprint leaves it in the record.
 
 The string form is case-sensitive: use lowercase `true` or `false`. Any other value fails synthesis with an actionable validation error.
 
@@ -200,7 +200,7 @@ Six features are optional and can be enabled independently ([ADR-024](../decisio
 | AWS Agent Registry (`agentRegistry`) | `enableAgentRegistry` | 2 (plus nested stacks) | AWS Agent Registry |
 | Tool Gateway (`toolGateway`, experimental) | `enableToolGateway` | ~7 | AgentCore Gateway |
 
-Linear and Jira share the stranded-orchestration sweep and the iteration heartbeat, so enabling both costs slightly less than the sum. The minimal profile deploys about 317 root resources; the legacy topology deploys about 463.
+Linear and Jira share the stranded-orchestration sweep and the iteration heartbeat, so enabling both costs slightly less than the sum. The minimal profile deploys about 287 root resources; the legacy topology deploys about 431.
 
 ### Choosing features with `bgagent setup`
 

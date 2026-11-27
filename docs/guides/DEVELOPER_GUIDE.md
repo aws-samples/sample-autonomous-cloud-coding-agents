@@ -31,7 +31,7 @@ For a concise duplicate of this table, common pitfalls, and a CDK test file map,
 
 ## Repository preparation
 
-The [Quick Start](./QUICK_START.mdx) covers the basic setup: forking a sample repo, creating a PAT, registering a Blueprint, and storing the token in Secrets Manager. This section covers what you need beyond that.
+The [Quick Start](./QUICK_START.mdx) covers the basic setup: forking a sample repo, creating a PAT, storing the token in Secrets Manager, and onboarding the fork. This section covers what you need beyond that.
 
 ### Pre-flight checks
 
@@ -60,7 +60,13 @@ The default is `awslabs/agent-plugins`. For a quick end-to-end test, fork that r
 
 ### Multiple repositories
 
-To onboard additional repositories, add entries to `resolveBlueprintDefinitions` in `cdk/src/blueprints/definitions.ts`. The app resolves these plain inputs before constructing either stack, so repository provisioning and DNS egress policy use the same configuration:
+To onboard another repository, run `bgagent repo onboard` with operator AWS credentials. It writes the repository's record without a deploy, and its flags set the per-repo overrides, which [Per-repo overrides](./USER_GUIDE.md#per-repo-overrides) lists:
+
+```bash
+bgagent repo onboard acme/my-service --max-turns 150 --max-budget 5
+```
+
+To keep a registration in source control, or to give a repository extra egress domains, add an entry to `resolveBlueprintDefinitions` in `cdk/src/blueprints/definitions.ts` instead. The app resolves these plain inputs before constructing either stack, so repository provisioning and DNS egress policy use the same configuration:
 
 ```typescript
 definitions.push({
@@ -90,13 +96,13 @@ definitions.push({
 });
 ```
 
-If you use a custom `compute.runtimeArn` or `credentials.githubTokenSecretArn`, pass the ARNs to `TaskOrchestrator` via `additionalRuntimeArns` and `additionalSecretArns` so the Lambda has IAM permission. See [Repo onboarding](../design/REPO_ONBOARDING.md) for the full model.
+If you use a custom runtime ARN or GitHub token secret (`--runtime-arn` and `--token-secret-arn`, or `compute.runtimeArn` and `credentials.githubTokenSecretArn`), pass the ARNs to `TaskOrchestrator` via `additionalRuntimeArns` and `additionalSecretArns` so the Lambda has IAM permission. See [Repo onboarding](../design/REPO_ONBOARDING.md) for the full model.
 
 #### Build-regression gating (important for non-mise repos)
 
 Before opening a PR, the agent runs a **build** and **lint** command in its cloud container — once on the clean clone (baseline) and again after its changes. If the build was green before and fails after, the task fails (a build-**regression** gate). This is a compile/test verification, **not** a deployment — your app's actual deploy stays in your own CI/CD after the PR merges.
 
-The command defaults to **`mise run build`** / **`mise run lint`**. A repo that uses [mise](https://mise.jdx.dev/) with `build` / `lint` tasks gets gating for free. A repo that uses npm, gradle, cargo, make, etc. **must set `pipeline.buildCommand`** (and optionally `lintCommand`) to its real command — otherwise the default `mise run build` finds no task, **build-regression gating is silently OFF, and a change that breaks the build still reports success**. When that happens the agent surfaces a `⚠️ Build-regression gating is OFF` warning on the PR so the gap is visible, but the fix is to configure the command. For #247 orchestration this matters doubly: dependent sub-issues stack onto a predecessor's branch, so an unverified broken predecessor propagates downstream.
+The command defaults to **`mise run build`** / **`mise run lint`**. A repo that uses [mise](https://mise.jdx.dev/) with `build` / `lint` tasks gets gating for free. A repo that uses npm, gradle, cargo, make, etc. **must set its build command** (and optionally its lint command) to its real command, with `bgagent repo onboard owner/repo --build-command 'npm run build && npm test'` (and `--lint-command`) or with `pipeline.buildCommand` (and `lintCommand`) in its Blueprint — otherwise the default `mise run build` finds no task, **build-regression gating is silently OFF, and a change that breaks the build still reports success**. When that happens the agent surfaces a `⚠️ Build-regression gating is OFF` warning on the PR so the gap is visible, but the fix is to configure the command. For #247 orchestration this matters doubly: dependent sub-issues stack onto a predecessor's branch, so an unverified broken predecessor propagates downstream.
 
 Redeploy after changing Blueprints: `mise //cdk:deploy`. A redeploy writes the overrides a definition declares. It does not clear one that was deleted from the definition: see [Removing a per-repo override](./USER_GUIDE.md#removing-a-per-repo-override).
 
@@ -232,6 +238,7 @@ Token ratio 1.169; cost ratio 1.169 — identical. **The per-token rate is uncha
 | Per task, CLI | `bgagent submit --max-budget <dollars>` (`cli/src/commands/submit.ts`), range 0.01–100 | Works |
 | Per task, REST | `max_budget_usd` in the `POST /v1/tasks` body | Works |
 | Local batch only | `MAX_BUDGET_USD` shell env, when running `entrypoint.py` directly | Works locally; **ignored** by the deployed AgentCore **server** mode, which reads the budget from the `/invocations` JSON body |
+| Per repo, CLI | `bgagent repo onboard <owner/repo> --max-budget <dollars>` (`cli/src/repo-settings.ts`), range 0.01–100 | Works — persisted to `RepoTable.max_budget_usd` without a deploy |
 | Per repo, Blueprint | `agent.maxBudgetUsd` on the repo's `Blueprint` construct | Works — persisted to `RepoTable.max_budget_usd`; same `0.01`–`100` range as the CLI, validated at CDK synth so an out-of-range value cannot deploy. See [Per-repo overrides](./USER_GUIDE.md#per-repo-overrides). |
 | Platform default | — | None by design: **unset means unlimited** |
 
@@ -496,7 +503,7 @@ Everything that runs on AWS: the CDK stack, Lambda handlers, and DynamoDB table 
 | Modify the orchestration flow | `cdk/src/handlers/orchestrate-task.ts`, `cdk/src/handlers/shared/orchestrator.ts` |
 | Change how context is assembled for the agent | `cdk/src/handlers/shared/context-hydration.ts` |
 | Add a DynamoDB table or modify a schema | `cdk/src/constructs/`: one construct per platform table (`*-table.ts`); an integration's tables are declared in its `*-integration.ts`, with the helpers of `integration-parts.ts` |
-| Onboard repos or change Blueprint behavior | `cdk/src/constructs/blueprint.ts`, `cdk/src/stacks/agent.ts` |
+| Onboard repos or change Blueprint behavior | `cdk/src/blueprints/definitions.ts` (the repositories), `cdk/src/constructs/blueprint.ts` |
 | Change webhook authentication | `cdk/src/handlers/webhook-authorizer.ts`, `cdk/src/handlers/webhook-create-task.ts` |
 | Add or update tests | `cdk/test/` mirrors `cdk/src/` - each handler and construct has a colocated test file |
 
