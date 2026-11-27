@@ -1009,3 +1009,83 @@ describe('postIdentifiedComment without a workspace token', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * A fetch that answers as Linear does for the approval comment calls. Comments live
+ * in ``comments``; ``comment(id)`` is non-null in Linear's schema, so a missing one is
+ * a GraphQL error, and a create with an id that exists fails with one. ``createFails``
+ * makes the create fail as given before Linear answers (or after it stored the comment,
+ * when ``storedAnyway``).
+ */
+function linearComments(opts: {
+  comments?: Record<string, Record<string, unknown>>;
+  createFails?: 'network' | 500 | 429 | 401 | 'graphql';
+  storedAnyway?: boolean;
+  org?: string;
+  viewer?: string;
+} = {}) {
+  const comments = { ...opts.comments };
+  const notFound = (field: string) => jsonResponse({ data: null, errors: [{ message: 'Entity not found: Comment', path: [field], extensions: { code: 'INPUT_ERROR' } }] });
+  return async (_url: string, init: { body: string }) => {
+    const { query, variables } = JSON.parse(init.body) as { query: string; variables: Record<string, any> };
+    if (/commentCreate/.test(query)) {
+      const { id, issueId, body, parentId } = variables.input;
+      if (opts.createFails && opts.storedAnyway) comments[id] = { id, body, issue: { id: issueId }, parent: parentId ? { id: parentId } : null };
+      if (opts.createFails === 'network') throw new Error('socket hang up');
+      if (typeof opts.createFails === 'number') return jsonResponse({ errors: [{ message: 'failed' }] }, opts.createFails);
+      if (opts.createFails === 'graphql' || comments[id]) {
+        return jsonResponse({ data: null, errors: [{ message: comments[id] ? 'Entity already exists' : 'Entity not found: Issue', extensions: { code: 'INPUT_ERROR' } }] });
+      }
+      comments[id] = { id, body, issue: { id: issueId }, parent: parentId ? { id: parentId } : null };
+      return jsonResponse({ data: { commentCreate: { success: true, comment: { id } } } });
+    }
+    if (/comment\(id: \$id\)/.test(query)) {
+      const found = comments[variables.id];
+      if (!found) return notFound('comment');
+      return jsonResponse({ data: { organization: { id: opts.org ?? 'ws-uuid-1' }, viewer: { id: opts.viewer ?? 'app-user' }, comment: found } });
+    }
+    return jsonResponse({ errors: [{ message: 'unexpected query' }] }, 400);
+  };
+}
+
+describe('postIdentifiedComment against Linear', () => {
+  const input = { id: 'c-1', issueId: ISSUE_ID, body: 'Approval needed', parentId: 'notice-1' };
+  beforeEach(() => {
+    resolveLinearOauthTokenMock.mockReset().mockResolvedValue({ accessToken: TOKEN, scope: 'read write', workspaceSlug: 'acme', oauthSecretArn: 'arn:secret:acme' });
+    fetchMock.mockReset();
+  });
+
+  test('a created comment is posted', async () => {
+    fetchMock.mockImplementation(linearComments());
+    await expect(postIdentifiedComment(CTX, input)).resolves.toEqual({ ok: true });
+  });
+
+  test.each(['network', 500, 429] as const)('a create that fails with %s and stored nothing is retried', async (createFails) => {
+    fetchMock.mockImplementation(linearComments({ createFails }));
+    await expect(postIdentifiedComment(CTX, input)).resolves.toEqual({ ok: false, retryable: true });
+  });
+
+  test.each([401, 'graphql'] as const)('a create that fails with %s is final', async (createFails) => {
+    fetchMock.mockImplementation(linearComments({ createFails }));
+    await expect(postIdentifiedComment(CTX, input)).resolves.toEqual({ ok: false, retryable: false });
+  });
+
+  test('a create whose response was lost is recognised by the comment Linear stored', async () => {
+    fetchMock.mockImplementation(linearComments({ createFails: 'network', storedAnyway: true }));
+    await expect(postIdentifiedComment(CTX, input)).resolves.toEqual({ ok: true });
+  });
+
+  test('a retry of a create that went through finds the comment, also when the scan changed its body', async () => {
+    const secret = `ghp_${'a'.repeat(36)}`;
+    const withSecret = { ...input, body: `Approval needed for ${secret}` };
+    fetchMock.mockImplementation(linearComments());
+    await expect(postIdentifiedComment(CTX, withSecret)).resolves.toEqual({ ok: true });
+    // The second create hits the id that exists: Linear holds the redacted body.
+    await expect(postIdentifiedComment(CTX, withSecret)).resolves.toEqual({ ok: true });
+  });
+
+  test('a comment with that id elsewhere or with other text is not this one', async () => {
+    fetchMock.mockImplementation(linearComments({ comments: { 'c-1': { id: 'c-1', body: 'other text', issue: { id: ISSUE_ID }, parent: { id: 'notice-1' } } } }));
+    await expect(postIdentifiedComment(CTX, input)).resolves.toEqual({ ok: false, retryable: false });
+  });
+});

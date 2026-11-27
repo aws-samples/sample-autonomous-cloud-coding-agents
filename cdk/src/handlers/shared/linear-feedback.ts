@@ -440,28 +440,28 @@ export async function postIdentifiedComment(
 ): Promise<LinearPostResult> {
   const token = await resolveToken(ctx);
   if (!token) return { ok: false, retryable: true };
-  const created = await graphqlData(token, `
+  const created = await graphqlRequest(token, `
     mutation ApprovalComment($input: CommentCreateInput!) {
       commentCreate(input: $input) { success comment { id } }
     }`, { input });
-  if (created.ok && (created.value.commentCreate as { success?: boolean } | undefined)?.success) {
-    return { ok: true };
-  }
-  // A successful write can lose its response. A duplicate ID is acceptable only
-  // when destination and content match, ignoring transport line endings only.
+  if (created.ok) return { ok: true };
+  // A successful write can lose its response, and a retry then meets the id that
+  // exists. The read-back only recognises that comment; whether a failure is worth a
+  // retry is the create's own answer (network, 5xx and 429 are; GraphQL errors and
+  // other 4xx are not). ``comment(id)`` is non-null in Linear's schema, so a missing
+  // comment is an error here, not null. Linear holds the body as the scan left it.
   const existing = await graphqlData(token, `
     query ApprovalComment($id: String!) {
       comment(id: $id) { body issue { id } parent { id } }
     }`, { id: input.id });
-  if (!existing.ok) return { ok: false, retryable: true };
-  const comment = existing.value.comment as {
-    body?: string; issue?: { id?: string }; parent?: { id?: string };
-  } | undefined;
+  const comment = existing.ok ? existing.value.comment as {
+    body?: string; issue?: { id?: string }; parent?: { id?: string } | null;
+  } | undefined : undefined;
   const normalizeBody = (body: string) => body.replace(/\r\n?/g, '\n').replace(/\n+$/, '');
-  return typeof comment?.body === 'string' && normalizeBody(comment.body) === normalizeBody(input.body)
+  const same = typeof comment?.body === 'string' && normalizeBody(comment.body) === normalizeBody(redactValue(input.body))
     && comment.issue?.id === input.issueId
-    && comment.parent?.id === input.parentId
-    ? { ok: true } : { ok: false, retryable: false };
+    && comment.parent?.id === input.parentId;
+  return same ? { ok: true } : created;
 }
 
 /**
