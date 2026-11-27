@@ -186,7 +186,7 @@
         "properties": {
           "kind": {
             "type": "string",
-            "description": "Dispatches to a registered step handler.",
+            "description": "The pipeline phase this step declares.",
             "enum": ["clone_repo", "hydrate_context", "run_agent", "verify_build", "verify_lint", "ensure_pr", "post_review", "deliver_artifact"]
           },
           "name": {
