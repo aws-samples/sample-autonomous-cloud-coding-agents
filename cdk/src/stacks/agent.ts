@@ -1822,6 +1822,7 @@ export class AgentStack extends Stack {
     // same createTaskCore release path, so it needs the identical grants
     // (repo config, guardrail, orchestrator invoke, linear-oauth secret).
     // Only Linear and Jira seed orchestrations, so only they need the sweep.
+    let strandedSweepFn: StrandedOrchestrationReconciler['fn'] | undefined;
     if (issueOrchestrationEnabled) {
       const strandedOrchestrationReconciler = new StrandedOrchestrationReconciler(
         this, 'StrandedOrchestrationReconciler', {
@@ -1831,6 +1832,7 @@ export class AgentStack extends Stack {
           orchestratorFunctionArn: orchestrator.alias.functionArn,
         },
       );
+      strandedSweepFn = strandedOrchestrationReconciler.fn;
       repoTable.table.grantReadData(strandedOrchestrationReconciler.fn);
       strandedOrchestrationReconciler.fn.addEnvironment('REPO_TABLE_NAME', repoTable.table.tableName);
       strandedOrchestrationReconciler.fn.addEnvironment('GUARDRAIL_ID', inputGuardrail.guardrailId);
@@ -1981,6 +1983,8 @@ export class AgentStack extends Stack {
 
       // The reconciler picks the feedback surface from each orchestration's own recorded channel.
       jiraIntegration.grantFeedback(orchestrationReconciler.fn, { writeBack: true });
+      // The stranded sweep runs the same panel refresh.
+      if (strandedSweepFn) jiraIntegration.grantFeedback(strandedSweepFn, { writeBack: true });
 
       new CfnOutput(this, 'JiraWebhookSecretArn', {
         value: jiraIntegration.webhookSecret.secretArn,
@@ -2065,6 +2069,7 @@ export class AgentStack extends Stack {
         orchestrator.fn,
         githubScreenshot?.webhookProcessorFn,
         orchestrationReconciler.fn,
+        strandedSweepFn,
         iterationHeartbeat?.fn,
       ].filter((fn): fn is NonNullable<typeof fn> => fn !== undefined)) {
         linearWriter.addEnvironment('LINEAR_VAULT_ENABLED', 'true');
