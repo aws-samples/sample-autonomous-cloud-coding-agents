@@ -170,7 +170,11 @@ const ROOT_UID = 0;
  * `<file>.<pid>.<uuid>.tmp`, beside the file it was to replace: owner-only, holding the
  * content that was being written. Nothing removes it later.
  */
-export function writeSecretFile(file: string, content: string): void {
+export function writeSecretFile(file: string, content: string | Uint8Array): void {
+  prepareSecretFile(file)(content);
+}
+
+export function prepareSecretFile(file: string): (content: string | Uint8Array) => void {
   let destination = file;
   let target = fs.lstatSync(file, { throwIfNoEntry: false });
   if (target && !target.isFile()) refuseEntryOfAnotherUser(file, target);
@@ -182,30 +186,34 @@ export function writeSecretFile(file: string, content: string): void {
       // The link leads nowhere, or to a file that has no path: written through it below.
     }
   }
-  if (!target || target.isFile()) {
-    try {
-      replaceFile(destination, content);
-    } catch (err) {
-      if (!CANNOT_REPLACE.has((err as NodeJS.ErrnoException).code ?? '')) throw err;
-      // In place, by the rules above: nothing was there, or it is a file this user may write.
-      if (!target) {
-        fs.writeFileSync(destination, content, { mode: SECRET_FILE_MODE, flag: 'wx' });
-      } else if (mayWriteInPlace(target)) {
-        fs.chmodSync(destination, SECRET_FILE_MODE);
-        fs.writeFileSync(destination, content, { mode: SECRET_FILE_MODE });
-      } else {
-        throw err;
+  const found = target;
+  if (!found || found.isFile()) {
+    return (content) => {
+      try {
+        replaceFile(destination, content);
+      } catch (err) {
+        if (!CANNOT_REPLACE.has((err as NodeJS.ErrnoException).code ?? '')) throw err;
+        // In place, by the rules above: nothing was there, or it is a file this user may write.
+        if (!found) {
+          fs.writeFileSync(destination, content, { mode: SECRET_FILE_MODE, flag: 'wx' });
+        } else if (mayWriteInPlace(found)) {
+          fs.chmodSync(destination, SECRET_FILE_MODE);
+          fs.writeFileSync(destination, content, { mode: SECRET_FILE_MODE });
+        } else {
+          throw err;
+        }
       }
-    }
-    return;
+    };
   }
   // A device, a FIFO, or a link that does not resolve to a regular file: a rename would
   // replace the node or the link itself. writeFileSync only honors `mode` when CREATING
   // the file, so chmod what the path resolves to, if that is a regular file.
-  fs.writeFileSync(file, content, { mode: SECRET_FILE_MODE });
-  if (fs.statSync(file).isFile()) {
-    fs.chmodSync(file, SECRET_FILE_MODE);
-  }
+  return (content) => {
+    fs.writeFileSync(file, content, { mode: SECRET_FILE_MODE });
+    if (fs.statSync(file).isFile()) {
+      fs.chmodSync(file, SECRET_FILE_MODE);
+    }
+  };
 }
 
 /**
@@ -261,7 +269,7 @@ function mayWriteInPlace(stats: fs.Stats): boolean {
  * after a failed write or the removal, is not reported: if the removal fails, the
  * temporary file stays, owner-only.
  */
-function replaceFile(file: string, content: string): void {
+function replaceFile(file: string, content: string | Uint8Array): void {
   const temp = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
   const fd = fs.openSync(temp, 'wx', SECRET_FILE_MODE);
   try {
