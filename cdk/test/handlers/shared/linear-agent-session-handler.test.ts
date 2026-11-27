@@ -933,6 +933,30 @@ describe('handleAgentSessionEvent — approval requests in the session (#1066)',
     expect(cancelTaskMock).toHaveBeenCalledWith(expect.anything(), 't-1', 'platform-user-1', expect.any(String), expect.anything());
   });
 
+  test.each([
+    ['another reason', 'deny use the staging config', 'deny use production'],
+    ['another decision', 'deny', 'approve'],
+    ['another request\'s button', `deny request ${OPEN}`, 'deny request 01M89PAAAAAAAAAAAAAAAAAAAA'],
+    ['the same button without its request', `deny request ${OPEN}`, 'deny'],
+  ])('an answer whose copy in Linear has %s decides nothing', async (_what, webhookBody, linearBody) => {
+    waiting();
+    fetchSessionPromptActivityMock.mockResolvedValue({ sessionId: 'session-1', authorId: 'linear-user-1', body: linearBody, createdAt: WRITTEN });
+    await handleAgentSessionEvent(prompted({ content: { body: webhookBody } }));
+    expect(recordApprovalMock).not.toHaveBeenCalled();
+    expect(recordDenialMock).not.toHaveBeenCalled();
+    expect(String(lastEmit()[2].body)).toMatch(/^I couldn't confirm this answer with Linear/);
+  });
+
+  test.each([
+    ['another session', { sessionId: 'session-2', authorId: 'linear-user-1' }],
+    ['another author', { sessionId: 'session-1', authorId: 'linear-user-2' }],
+  ])('an answer that Linear holds in %s decides nothing', async (_what, held) => {
+    waiting();
+    fetchSessionPromptActivityMock.mockResolvedValue({ ...held, body: 'approve', createdAt: WRITTEN });
+    await handleAgentSessionEvent(prompted({ content: { body: 'approve' } }));
+    expect(recordApprovalMock).not.toHaveBeenCalled();
+  });
+
   test('a typed "approve for this task" is not an answer: nothing is decided and the choice comes back', async () => {
     waiting();
     approvalRow = { ...approvalRow, matching_rule_ids: ['write_env_files'] };

@@ -34,6 +34,7 @@ import {
   fetchRecentComments,
   postIdentifiedComment,
   postIssueComment,
+  readLinearApprovalComment,
   reactToComment,
   replyToComment,
   reportIssueFailure,
@@ -1087,5 +1088,34 @@ describe('postIdentifiedComment against Linear', () => {
   test('a comment with that id elsewhere or with other text is not this one', async () => {
     fetchMock.mockImplementation(linearComments({ comments: { 'c-1': { id: 'c-1', body: 'other text', issue: { id: ISSUE_ID }, parent: { id: 'notice-1' } } } }));
     await expect(postIdentifiedComment(CTX, input)).resolves.toEqual({ ok: false, retryable: false });
+  });
+});
+
+describe('readLinearApprovalComment against Linear', () => {
+  const reply = { id: 'r-1', body: 'approve', user: { id: 'u-1' }, botActor: null, issue: { id: ISSUE_ID }, parent: { id: 'notice-1' } };
+  beforeEach(() => {
+    resolveLinearOauthTokenMock.mockReset().mockResolvedValue({ accessToken: TOKEN, scope: 'read write', workspaceSlug: 'acme', oauthSecretArn: 'arn:secret:acme' });
+    fetchMock.mockReset();
+  });
+
+  test('a person\'s comment comes back as Linear holds it', async () => {
+    fetchMock.mockImplementation(linearComments({ comments: { 'r-1': reply } }));
+    await expect(readLinearApprovalComment(CTX, 'r-1')).resolves.toEqual(reply);
+  });
+
+  test('a comment by the token\'s own user is no consent', async () => {
+    fetchMock.mockImplementation(linearComments({ comments: { 'r-1': { ...reply, user: { id: 'app-user' } } } }));
+    await expect(readLinearApprovalComment(CTX, 'r-1')).resolves.toBeNull();
+  });
+
+  test('another workspace, a 500, a missing comment and no token each throw, so the delivery retries', async () => {
+    fetchMock.mockImplementation(linearComments({ comments: { 'r-1': reply }, org: 'other-ws' }));
+    await expect(readLinearApprovalComment(CTX, 'r-1')).rejects.toThrow('workspace mismatch');
+    fetchMock.mockResolvedValue(jsonResponse({}, 500));
+    await expect(readLinearApprovalComment(CTX, 'r-1')).rejects.toThrow('unavailable');
+    fetchMock.mockImplementation(linearComments());
+    await expect(readLinearApprovalComment(CTX, 'r-1')).rejects.toThrow('unavailable');
+    resolveLinearOauthTokenMock.mockResolvedValue(null);
+    await expect(readLinearApprovalComment(CTX, 'r-1')).rejects.toThrow('token unavailable');
   });
 });
