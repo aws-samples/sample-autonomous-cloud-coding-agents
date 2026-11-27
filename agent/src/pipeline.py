@@ -15,7 +15,7 @@ from pydantic import ValidationError
 
 import memory as agent_memory
 import task_state
-from channel_mcp import configure_channel_mcp, strip_linear_mcp_servers
+from channel_mcp import strip_linear_mcp_servers
 from config import (
     AGENT_WORKSPACE,
     DEFAULT_WORKFLOW_ID,
@@ -1346,7 +1346,6 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
             #
             # Resolve the per-channel access token from Secrets Manager first
             # (react_task_started/comment_task_started read the env var it sets).
-            # configure_channel_mcp DOES need setup.repo_dir, so it stays below.
             if config.channel_source == "linear":
                 resolve_linear_api_token(config.channel_metadata)
             elif config.channel_source == "jira":
@@ -1408,22 +1407,15 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
 
             system_prompt = build_system_prompt(config, setup, hc, system_prompt_overrides)
 
-            # Channel-specific MCP wiring. Must happen before
-            # discover_project_config so the scan picks up the file we just
-            # wrote — and after the clone, since it writes .mcp.json into the
-            # repo dir. (Token resolution + the 👀/start ACK moved earlier so
-            # the user gets immediate feedback; see the Early ACK block above.)
-            configure_channel_mcp(setup.repo_dir, config.channel_source)
             # ADR-016 ENFORCEMENT: strip any Linear MCP server a repo may have
             # COMMITTED to its own .mcp.json before the SDK reads it — the prompt
             # prohibition ("you have no Linear tools") is not a security boundary,
             # and we export LINEAR_API_TOKEN + load project settings under
-            # bypassPermissions. Runs for every channel (defense-in-depth); never
-            # matches Jira's own entry.
+            # bypassPermissions. Runs for every channel (defense-in-depth).
             strip_linear_mcp_servers(setup.repo_dir)
 
             # Registry assets (#246): merge resolved mcp_server configs into
-            # .mcp.json alongside the channel MCP entry, before the project scan.
+            # .mcp.json, before the project scan.
             # Fail-closed (#246 Option C): apply_resolved_assets raises
             # RegistryAssetLoadError for any condition that would leave a pinned
             # asset unloaded (missing repo_dir, empty/invalid runtime, structurally

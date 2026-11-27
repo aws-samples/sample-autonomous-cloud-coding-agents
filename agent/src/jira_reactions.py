@@ -33,8 +33,7 @@ issue key + cloud id are present in ``channel_metadata``. All network / auth
 errors are logged and swallowed — a transient Jira API failure must never fail
 the task itself (comments are advisory UX, not load-bearing).
 
-See: ``agent/src/channel_mcp.py`` for the (non-functional) MCP gate, and
-``agent/src/linear_reactions.py`` for the parallel Linear shim.
+See: ``agent/src/linear_reactions.py`` for the parallel Linear shim.
 """
 
 from __future__ import annotations
@@ -140,9 +139,8 @@ def _enabled(
 ) -> tuple[str, str] | None:
     """Return ``(cloud_id, issue_key)`` if comments should fire, else None.
 
-    Gating mirrors ``channel_mcp.configure_channel_mcp`` — the same
-    ``channel_source == 'jira'`` check, plus a metadata presence check so we
-    don't fire REST calls we can't address.
+    Gating: a ``channel_source == 'jira'`` check, plus a metadata presence
+    check so we don't fire REST calls we can't address.
     """
     if channel_source != "jira":
         return None

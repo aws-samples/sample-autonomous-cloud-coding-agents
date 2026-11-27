@@ -226,7 +226,6 @@ class TestCedarPoliciesInjection:
         mock_task_state.get_task.return_value = None
 
         with (
-            patch("pipeline.configure_channel_mcp"),
             patch("pipeline.strip_linear_mcp_servers", return_value=0),
             patch("pipeline.get_disk_usage", return_value=0),
             patch("pipeline.print_metrics"),
@@ -2516,7 +2515,6 @@ class TestEarlyAckOrdering:
             patch("pipeline.react_task_started", return_value="reaction-42") as m_react,
             patch("pipeline.comment_task_started") as m_comment,
             patch("pipeline.transition_task_started") as m_transition,
-            patch("pipeline.configure_channel_mcp"),
             patch("pipeline.ensure_committed", return_value=False),
             patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
             patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
