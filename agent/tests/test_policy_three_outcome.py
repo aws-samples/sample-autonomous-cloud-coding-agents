@@ -15,7 +15,7 @@ Covers:
   independent 50-entry memory bound.
 - Annotation parsing + multi-match merging (min timeout, max severity,
   floor clamp, WARN on sub-120s).
-- Load-time validation: 64 KB cap, hard-deny disable rejection,
+- Load-time validation: 64 KB cap,
   approval_gate_cap bounds, tier/rule_id checks.
 - Three-outcome pipeline happy paths: hard-deny → DENY, pre-approved →
   ALLOW, soft-deny hit → REQUIRE_APPROVAL, rule-scope allowlist → ALLOW,
@@ -43,7 +43,9 @@ from policy import (
     PolicyDecision,
     PolicyEngine,
     RecentDecisionCache,
+    _parse_policy_annotations,
     _sha256_tool_input,
+    _validate_tier,
 )
 
 # ---------------------------------------------------------------------------
@@ -164,22 +166,26 @@ class TestPolicyDecisionConstruction:
 
 
 class TestEvaluateToolUseFailClosed:
-    """The fail_closed flag must be True at engine-error/unavailable sites and
+    """The fail_closed flag must be True at engine-error sites and
     False for intentional hard-deny + cache-deny (§13.16, decision E)."""
-
-    def test_engine_unavailable_is_fail_closed(self):
-        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
-        # Force the "policy engine unavailable" guard.
-        engine._cedarpy = None
-        d = engine.evaluate_tool_use("Bash", {"command": "echo hi"})
-        assert d.outcome == Outcome.DENY
-        assert d.fail_closed is True
 
     def test_unhashable_tool_input_is_fail_closed(self):
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
         # A non-JSON-serialisable input trips the unhashable fail-closed path.
         d = engine.evaluate_tool_use("Bash", {"command": {1, 2, 3}})
         assert d.outcome == Outcome.DENY
+        assert d.fail_closed is True
+
+    def test_soft_deny_without_a_known_rule_is_fail_closed(self):
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        # No permit in the soft tier: Cedar denies the call and names no rule.
+        engine._soft_policies = (
+            '@tier("soft") @rule_id("only_writes") '
+            'forbid (principal, action == Agent::Action::"write_file", resource);'
+        )
+        d = engine.evaluate_tool_use("Bash", {"command": "echo hi"})
+        assert d.outcome == Outcome.DENY
+        assert d.reason == "fail-closed: soft_deny_without_rule"
         assert d.fail_closed is True
 
     def test_cedar_eval_exception_is_fail_closed(self):
@@ -688,27 +694,6 @@ class TestLoadTimeValidation:
         )
         assert e.approval_gate_cap == APPROVAL_GATE_CAP_MAX
 
-    def test_blueprint_disable_rejects_builtin_hard_deny_rule(self):
-        # §5.1, finding #9: blueprints may NOT disable built-in hard-deny
-        # rules. Attempting `disable: [rm_slash]` must fail at task start.
-        with pytest.raises(ValueError, match="rm_slash"):
-            PolicyEngine(
-                task_type="new_task",
-                repo="owner/repo",
-                blueprint_disable=["rm_slash"],
-            )
-
-    def test_blueprint_disable_accepts_unknown_id(self):
-        # A disable entry that names a non-existent rule is tolerated (it's
-        # a no-op). Blueprint-drift safeguard — we reject only hard-deny.
-        e = PolicyEngine(
-            task_type="new_task",
-            repo="owner/repo",
-            blueprint_disable=["nonexistent_rule"],
-        )
-        # Constructs cleanly; the unknown ID is stored but does nothing.
-        assert "nonexistent_rule" in e._disabled_rule_ids
-
     def test_blueprint_64kb_cap_rejected(self):
         # §12.4, finding #12: combined blueprint text > 64 KB rejected.
         big = (
@@ -721,20 +706,7 @@ class TestLoadTimeValidation:
             PolicyEngine(
                 task_type="new_task",
                 repo="owner/repo",
-                blueprint_soft_policies=big,
-            )
-
-    def test_registry_extra_policies_counted_in_64kb_cap(self):
-        # #246 review: registry cedar_policy_module assets arrive via the legacy
-        # extra_policies path, which previously bypassed the cap entirely. An
-        # oversized registry policy must be rejected just like blueprint text.
-        big = 'forbid (principal, action, resource) when { context.x like "*aaaaaaaaaa*" };' * 1000
-        assert len(big) > POLICIES_MAX_BYTES
-        with pytest.raises(ValueError, match="64 KB cap"):
-            PolicyEngine(
-                task_type="new_task",
-                repo="owner/repo",
-                extra_policies=[big],
+                blueprint_policies=[big],
             )
 
     def test_blueprint_soft_rule_missing_rule_id_rejected(self):
@@ -743,7 +715,7 @@ class TestLoadTimeValidation:
             PolicyEngine(
                 task_type="new_task",
                 repo="owner/repo",
-                blueprint_soft_policies=bad,
+                blueprint_policies=[bad],
             )
 
     def test_blueprint_soft_timeout_below_floor_rejected(self):
@@ -756,7 +728,7 @@ class TestLoadTimeValidation:
             PolicyEngine(
                 task_type="new_task",
                 repo="owner/repo",
-                blueprint_soft_policies=bad,
+                blueprint_policies=[bad],
             )
 
     def test_blueprint_soft_timeout_sub_120s_emits_warn(self):
@@ -775,7 +747,7 @@ class TestLoadTimeValidation:
         PolicyEngine(
             task_type="new_task",
             repo="owner/repo",
-            blueprint_soft_policies=ok_but_warn,
+            blueprint_policies=[ok_but_warn],
         )
 
     def test_duplicate_rule_id_across_tiers_rejected(self):
@@ -788,7 +760,7 @@ class TestLoadTimeValidation:
             PolicyEngine(
                 task_type="new_task",
                 repo="owner/repo",
-                blueprint_soft_policies=conflict,
+                blueprint_policies=[conflict],
             )
 
     def test_invalid_scope_in_initial_approvals_rejected(self):
@@ -800,55 +772,48 @@ class TestLoadTimeValidation:
             )
 
     @pytest.mark.parametrize(
-        ("policies", "message"),
+        ("text", "message"),
         [
             pytest.param(
-                {"extra_policies": ["forbid (principal, action, resource) when {"]},
+                "forbid (principal, action, resource) when {",
                 "Cedar policy parse failed",
                 id="text that is not Cedar",
             ),
             pytest.param(
-                {
-                    "blueprint_soft_policies": '@tier("soft") @rule_id("t") '
-                    '@approval_timeout_s("soon") forbid (principal, action, resource);'
-                },
+                '@tier("soft") @rule_id("t") '
+                '@approval_timeout_s("soon") forbid (principal, action, resource);',
                 "@approval_timeout_s must be integer",
                 id="a timeout that is not a number",
             ),
             pytest.param(
-                {
-                    "blueprint_soft_policies": '@tier("soft") @rule_id("t") '
-                    '@severity("urgent") forbid (principal, action, resource);'
-                },
+                '@tier("soft") @rule_id("t") '
+                '@severity("urgent") forbid (principal, action, resource);',
                 "@severity must be one of",
                 id="a severity outside low, medium, high",
             ),
             pytest.param(
-                {
-                    "blueprint_soft_policies": '@tier("soft") @rule_id("force_push_any") '
-                    "forbid (principal, action, resource);"
-                },
+                '@tier("soft") @rule_id("force_push_any") forbid (principal, action, resource);',
                 "duplicate @rule_id 'force_push_any'",
                 id="the rule id of a built-in rule of the same tier",
             ),
-            pytest.param(
-                {
-                    "blueprint_soft_policies": '@tier("hard") @rule_id("h") '
-                    "forbid (principal, action, resource);"
-                },
-                "lives in the 'soft' file",
-                id="a hard rule among the soft rules",
-            ),
         ],
     )
-    def test_policy_the_engine_cannot_use_fails_at_start(self, policies, message):
+    def test_policy_the_engine_cannot_use_fails_at_start(self, text, message):
         # One row per rejection. Without it the task would start with a rule
         # that does not mean what its author wrote: a rule without its timeout
-        # or with an unknown severity, two rules behind one id, an absolute
-        # rule that a human can approve. Text that is not Cedar has to be
-        # reported as a parse error, not as whatever fails after it.
+        # or with an unknown severity, or two rules behind one id. Text that is
+        # not Cedar has to be reported as a parse error, not as whatever fails
+        # after it.
         with pytest.raises(ValueError, match=message):
-            PolicyEngine(task_type="new_task", repo="owner/repo", **policies)
+            PolicyEngine(task_type="new_task", repo="owner/repo", blueprint_policies=[text])
+
+    def test_hard_rule_among_the_soft_rules_is_rejected(self):
+        # An absolute rule in the soft tier would be one a human can approve.
+        # Only a built-in file can put it there: an operator's entry goes to
+        # the tier it declares.
+        hard = '@tier("hard") @rule_id("h") forbid (principal, action, resource);'
+        with pytest.raises(ValueError, match="lives in the 'soft' file"):
+            _validate_tier(_parse_policy_annotations(hard), "soft", "soft_deny")
 
     @pytest.mark.parametrize(
         ("rule", "attribute"),
@@ -905,7 +870,7 @@ class TestLoadTimeValidation:
         # the engine then denies every call the rule is evaluated for
         # ("fail-closed"): with the first rule, every tool call of the task.
         with pytest.raises(ValueError, match=rf"soft-deny Cedar probe failed.*{attribute}"):
-            PolicyEngine(task_type="new_task", repo="owner/repo", extra_policies=[rule])
+            PolicyEngine(task_type="new_task", repo="owner/repo", blueprint_policies=[rule])
 
     def test_hard_rule_reading_an_absent_context_attribute_fails_at_start(self):
         rule = (
@@ -913,7 +878,7 @@ class TestLoadTimeValidation:
             'when { context.command like "*terraform destroy*" };'
         )
         with pytest.raises(ValueError, match=r"hard-deny Cedar probe failed.*command"):
-            PolicyEngine(task_type="new_task", repo="owner/repo", blueprint_hard_policies=rule)
+            PolicyEngine(task_type="new_task", repo="owner/repo", blueprint_policies=[rule])
 
 
 # ---------------------------------------------------------------------------
@@ -929,14 +894,7 @@ class TestFailClosedPosture:
         d = engine.evaluate_tool_use("Write", {"file_path": "a.py"})
         assert d.outcome == Outcome.DENY
         assert "fail-closed" in d.reason
-
-    def test_engine_disabled_returns_deny(self):
-        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
-        engine._disabled = True
-        engine._cedarpy = None
-        d = engine.evaluate_tool_use("Read", {"file_path": "a.py"})
-        assert d.outcome == Outcome.DENY
-        assert "unavailable" in d.reason
+        assert d.fail_closed is True
 
     def test_unhashable_tool_input_surfaces_distinct_reason(self):
         # Review finding #5: a non-JSON-serializable tool_input should be
@@ -957,48 +915,6 @@ class TestReviewRegressions:
     """Lock the review findings from Chunk 2 so a future refactor cannot
     silently reintroduce them.
     """
-
-    # Finding #1: blueprint_disable actually disables the soft rule at eval time.
-    def test_blueprint_disable_suppresses_soft_deny(self):
-        engine = PolicyEngine(
-            task_type="new_task",
-            repo="owner/repo",
-            blueprint_disable=["force_push_any"],
-        )
-        d = engine.evaluate_tool_use("Bash", {"command": "git push --force origin feature"})
-        assert d.outcome == Outcome.ALLOW, (
-            "blueprint_disable must actually disable the matching soft rule, "
-            "not just log-and-continue"
-        )
-
-    def test_blueprint_disable_partial_leaves_surviving_rules(self):
-        # Only disable force_push_any; force_push_main still fires on push to main.
-        engine = PolicyEngine(
-            task_type="new_task",
-            repo="owner/repo",
-            blueprint_disable=["force_push_any"],
-        )
-        d = engine.evaluate_tool_use("Bash", {"command": "git push --force origin main"})
-        assert d.outcome == Outcome.REQUIRE_APPROVAL
-        assert "force_push_main" in d.matching_rule_ids
-        assert "force_push_any" not in d.matching_rule_ids
-
-    # Finding #2: legacy extra_policies with annotations rejected.
-    def test_legacy_extra_policies_with_tier_annotation_rejected(self):
-        with pytest.raises(ValueError, match="already declares"):
-            PolicyEngine(
-                task_type="new_task",
-                repo="owner/repo",
-                extra_policies=['@tier("soft") forbid (principal, action, resource);'],
-            )
-
-    def test_legacy_extra_policies_with_rule_id_annotation_rejected(self):
-        with pytest.raises(ValueError, match="already declares"):
-            PolicyEngine(
-                task_type="new_task",
-                repo="owner/repo",
-                extra_policies=['@rule_id("foo") forbid (principal, action, resource);'],
-            )
 
     # Finding #6: scope whitespace normalization + empty-value rejection.
     def test_allowlist_strips_whitespace(self):
@@ -1021,11 +937,7 @@ class TestReviewRegressions:
             'when { context.command like "*foo*" };'
         )
         with pytest.raises(ValueError, match="missing @tier"):
-            PolicyEngine(
-                task_type="new_task",
-                repo="owner/repo",
-                blueprint_soft_policies=bad,
-            )
+            _validate_tier(_parse_policy_annotations(bad), "soft", "soft_deny")
 
 
 # ---------------------------------------------------------------------------

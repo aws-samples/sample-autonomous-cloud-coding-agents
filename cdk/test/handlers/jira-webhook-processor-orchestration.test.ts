@@ -689,7 +689,13 @@ describe('jira-webhook-processor orchestration adapter', () => {
   test('releases only a newly-added root and reopens the existing panel', async () => {
     const extendedSnapshot = {
       ...snapshot,
-      meta: { ...snapshot.meta, child_count: 2, status_comment_id: 'panel-1' },
+      meta: {
+        ...snapshot.meta,
+        child_count: 2,
+        status_comment_id: 'panel-1',
+        // The subtasks run as whoever seeded the epic, not as whoever re-applied the label.
+        release_context: { ...snapshot.meta.release_context, platform_user_id: 'epic-owner' },
+      },
       children: [
         { ...snapshot.children[0], child_status: 'succeeded' },
         {
@@ -714,6 +720,7 @@ describe('jira-webhook-processor orchestration adapter', () => {
       .mockResolvedValueOnce(snapshot)
       .mockResolvedValueOnce(extendedSnapshot)
       .mockResolvedValueOnce(extendedSnapshot);
+    readConcurrencyBudgetMock.mockResolvedValueOnce(4);
 
     await handler(event());
 
@@ -722,6 +729,9 @@ describe('jira-webhook-processor orchestration adapter', () => {
       expect.objectContaining({ sub_issue_id: 'ENG-3', child_status: 'ready' }),
     ]);
     expect(releaseReadyChildrenMock.mock.calls[0][6]).toBe(extendedSnapshot.children);
+    // Throttled to that user's free budget, as the seed and the retry are.
+    expect(readConcurrencyBudgetMock).toHaveBeenCalledWith(expect.anything(), 'Concurrency', 'epic-owner', 10);
+    expect(releaseReadyChildrenMock.mock.calls[0].slice(7)).toEqual(['main', 4]);
     expect(upsertEpicPanelMock).toHaveBeenCalledWith(expect.objectContaining({
       statusCommentId: 'panel-1',
       inProgress: true,

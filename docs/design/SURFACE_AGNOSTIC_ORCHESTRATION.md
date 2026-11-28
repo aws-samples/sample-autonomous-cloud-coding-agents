@@ -1,17 +1,19 @@
 # Surface-agnostic sub-issue orchestration
 
-**Status:** the Channel interface, its Linear + Jira + Slack adapters, the engine rewiring
+**Status:** the Channel interface, its Linear and Jira adapters, the engine rewiring
 onto it, and the channel-neutral row shape are all implemented. Adapters are selected from a
 registry keyed on the row's stored `channel_source`. **Goal:** make the sub-issue
-orchestration engine work across issue-tracking surfaces (Linear today; Jira next — a Jira
-comment-back path already exists) behind one **Channel adapter interface**, so the generic
-engine has no surface knowledge and each surface's specifics live in its own adapter.
+orchestration engine work across issue-tracking surfaces (Linear and Jira today) behind one
+**Channel adapter interface**, so the generic engine has no surface knowledge and each
+surface's specifics live in its own adapter.
 
 **Scope of the "no core edit" claim** — worth stating precisely, because the loose version
-of it is not true. Adding a surface needs no change to the *engine*: nothing in discovery,
-release, reconcile, or rollup names a surface, and an adapter can be registered from its own
-module via `registerChannelFactory`. Three things outside the engine still need editing, and
-none is hidden:
+of it is not true. Adding a surface needs no change to discovery, reconcile, or rollup: none
+of them branches on a surface, and an adapter can be registered from its own module via
+`registerChannelFactory`. Release, the reconciler's iteration reply and the heartbeat sweep
+do branch on a surface: [What was coupled](#what-was-coupled-and-what-still-is) says where,
+and which of them a further surface has to edit. Three things outside the engine still need
+editing, and none is hidden:
 
 1. **Registry-table wiring per handler.** Each handler declares which surfaces' credentials
    registries it can reach (`CHANNEL_REGISTRY_TABLES` in the reconciler), plus the CDK env +
@@ -46,20 +48,32 @@ forks) and reduces the current Linear/Jira duplication (both already expose para
   `reportIssueFailure`, `reactToComment`, `replyToComment`, `upsertThreadedReply`)
   from `orchestration-rollup.ts`,
   `orchestration-reconciler.ts`, `linear-webhook-processor.ts`, and
-  `iteration-heartbeat-sweep.ts`. All of those now go through a `Channel`.
+  `iteration-heartbeat-sweep.ts`. All of those now go through a `Channel`, except Jira's
+  iteration reply (below).
 - **Fixed** — the orchestration row FIELDS are now channel-neutral with dual-read
   back-compat (see the row-shape section below).
 - **Still coupled** — `fetchIssueParentId` on the Linear-webhook entry path; that entry
   point is Linear-specific by definition, so it was left in place.
+- **Still coupled** — three places branch on a surface:
+  - `replyToIterationComment` in `orchestration-reconciler.ts` writes Jira's iteration
+    reply with Jira's own code (`updateJiraIterationComment`, `postIssueCommentAdf`)
+    instead of `upsertThreadedReply`. Every other surface takes the `Channel` path.
+  - The heartbeat sweep (`iteration-heartbeat-sweep.ts` with `iteration-heartbeat.ts`)
+    plans a heartbeat for Linear and Jira tasks only, and edits a Jira reply with the same
+    Jira code. A further surface gets no heartbeat until it is added there.
+  - `releaseChild` in `orchestration-release.ts` stamps Linear's `channel_metadata` keys
+    on a child of a Linear orchestration. Another surface's keys come from the row's own
+    `channel_metadata`, so it needs no edit there.
 
 ## The Channel adapter interface
 
-A `Channel` captures everything the engine needs from a surface. The engine holds a
-`Channel` and never names a concrete surface. As built (`orchestration-channel.ts`):
+A `Channel` captures what the engine needs from a surface for issue feedback. The engine
+holds a `Channel`; where it still branches on a surface is listed above. As built
+(`orchestration-channel.ts`):
 
 ```
 interface Channel {
-  readonly kind: ChannelKind;   // open string, logging/metrics only — never branched on
+  readonly kind: ChannelKind;   // open string; the reconciler's iteration reply branches on 'jira'
 
   // --- feedback: REQUIRED (unifies the duplicated linear-/jira-feedback) ---
   postComment(issue, body): Promise<CommentRef | null>;
@@ -100,7 +114,7 @@ surface" the design allows):**
 - **Comment formatting** — Linear takes markdown; Jira takes ADF (Atlassian Document
   Format). The adapter renders; the engine passes structured intent.
 - **Reaction vocabulary** — mapped per surface inside the adapter (Linear emoji vs
-  whatever Jira supports); the engine speaks a small `Reaction` enum.
+  none in the Jira adapter); the engine speaks a small `Reaction` enum.
 - **Auth** — `oauth_secret_arn` / workspace slug become an opaque `credentials_ref`
   the adapter resolves; the engine never touches surface auth.
 
@@ -118,41 +132,27 @@ the `channel_metadata` keys handed to the agent (a cross-language contract the P
 reads), the `linearOauthSecretArn`/`WorkspaceSlug`/`ProjectId` release params, and the
 Linear workspace-registry table the CLI writes.
 
-## Proof the abstraction holds: the Slack adapter
+## The second adapter: Jira
 
-Linear alone could not demonstrate surface-agnosticism — one implementation plus a
-comment-only stub is consistent with an interface shaped around that one surface. Slack
-is the counter-example that tests it, because it is a chat product rather than a tracker:
-
-- **A thread is the issue.** `IssueRef.issueId` is `<channel>:<thread_ts>`; a message
-  `ts` is the `CommentRef`, and `chat.update` is what lets one panel mature in place.
-- **It OMITS `transitionState` / `revertState`** — Slack has no workflow state. They are
-  absent rather than stubbed to a silent success, because returning `true` would tell the
-  engine the platform mirrored a state it never moved.
-- **The engine drives it unmodified.** A rollup test runs the real Slack adapter through
-  `upsertEpicPanel` with `mirrorParentState: true` — asking for a state mirror Slack
-  cannot perform — and asserts the panel still lands, the ✅ marker goes on the thread
-  root, and nothing attempts a transition.
-
-Slack's `replaceCommentReaction` also shows why the add-vs-replace split is per-surface
-rather than cosmetic: Slack has no atomic swap, so the adapter removes its OWN markers
-(scoped to the emoji it may have set, so a human's reaction survives) and then adds the
-target.
+Jira implements comments, failure reports and state transitions, and omits reactions,
+`revertState` and threaded replies (`cdk/src/handlers/shared/orchestration-channel-jira.ts`).
+The engine checks each optional operation and skips a missing one. A rollup test drives a
+surface with reactions and without workflow state through the registry: the panel lands and
+the marker is applied, although the transition the engine is asked for does not exist.
 
 ## What the feedback rewiring does NOT make surface-agnostic
 
-The feedback axis is only one of the couplings. Jira orchestration is not reachable yet,
-because seeding is still Linear-only end to end:
+The feedback axis is only one of the couplings. Besides its adapter, each surface keeps:
 
-- Every `discoverOrchestration` caller hardcodes `channel_source: 'linear'`, and all of
-  them sit on Linear paths (the Linear webhook processor and the reconciler).
-- The Jira webhook processor has no orchestration/sub-issue path at all — it uses the
-  single-issue comment-back only.
-- Adapter selection from a stored `channel_source` now EXISTS (the registry), so the
-  event-driven paths follow the row rather than assuming Linear. Surface-specific entry
-  points — a Linear webhook processor only ever handles Linear — still build their adapter
-  directly, which is correct for them.
+- **The seeding path.** Each tracker's webhook processor reads its own sub-issue graph
+  (`linearGraphSource`, `jiraGraphSource`) and seeds the orchestration with its own
+  `channel_source` (`'linear'`, `'jira'`). The event-driven paths then follow the stored
+  row through the registry. A webhook processor only ever handles its own surface, so it
+  builds its adapter directly.
+- **The registry wiring per handler** (point 1 above). The reconciler, the
+  stranded-orchestration sweep and the heartbeat sweep are given each surface's credentials
+  registry: an environment variable and an IAM grant per surface.
 
-Reaching a Jira epic therefore still needs: a Jira graph source (or a declarative one), a
-Jira seeding/trigger path, and the Jira credentials registry wired into the handlers that
-would act on it (point 1 above).
+A further surface therefore needs a graph source (or a declarative one), a seeding path
+and that wiring, and an entry in the heartbeat sweep if its iteration replies are to get
+a heartbeat.

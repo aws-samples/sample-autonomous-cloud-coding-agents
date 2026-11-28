@@ -28,13 +28,9 @@ import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
-import { SlackChannelMappingTable } from './slack-channel-mapping-table';
-import { SlackInstallationTable } from './slack-installation-table';
-import { SlackUserMappingTable } from './slack-user-mapping-table';
+import { integrationTable } from './integration-parts';
 import { ComponentUaAspect } from './solution-ua-aspect';
-
-/** Default task-record retention used for TTL computation (days). */
-const DEFAULT_TASK_RETENTION_DAYS = 90;
+import { grantTaskCreation, taskCreationEnvironment } from './task-creation';
 
 /** OAuth-callback Lambda timeout (seconds). */
 const OAUTH_CALLBACK_TIMEOUT_SECONDS = 15;
@@ -55,8 +51,11 @@ export interface SlackIntegrationProps {
   /** The existing REST API to add Slack routes to. */
   readonly api: apigw.RestApi;
 
-  /** Cognito user pool for the /slack/link endpoint (Cognito-authenticated). */
+  /** Cognito user pool in which the budget check looks up the groups of a user. */
   readonly userPool: cognito.IUserPool;
+
+  /** Cognito authorizer of `api`, for the /slack/link route. */
+  readonly linkAuthorizer: apigw.IAuthorizer;
 
   /** The DynamoDB task table. */
   readonly taskTable: dynamodb.ITable;
@@ -102,13 +101,26 @@ export interface SlackIntegrationProps {
  * the DynamoDB-documented one-reader-per-shard limit.
  */
 export class SlackIntegration extends Construct {
-  /** The Slack installation table. */
+  /**
+   * Schema: team_id (PK) — one record per installed Slack workspace.
+   * Stores workspace metadata and a pointer to the bot token in Secrets Manager.
+   * Bot tokens are stored in Secrets Manager at `bgagent/slack/{team_id}`.
+   */
   public readonly installationTable: dynamodb.Table;
 
-  /** The Slack user mapping table. */
+  /**
+   * DynamoDB table for mapping Slack user identities to platform user IDs.
+   *
+   * Schema: slack_identity (PK) — composite key `{team_id}#{user_id}`.
+   * Also used for pending link records (with status='pending' and TTL).
+   */
   public readonly userMappingTable: dynamodb.Table;
 
-  /** The Slack channel → default-repo mapping table. */
+  /**
+   * DynamoDB table mapping Slack channels to a default GitHub repository.
+   * Schema: channel_id (PK) — composite key `{team_id}#{channel_id}`.
+   * A Slack channel id can repeat across teams.
+   */
   public readonly channelMappingTable: dynamodb.Table;
 
   /** The Slack signing secret (placeholder — user populates after creating the Slack App). */
@@ -132,12 +144,11 @@ export class SlackIntegration extends Construct {
     const removalPolicy = props.removalPolicy ?? RemovalPolicy.DESTROY;
 
     // --- DynamoDB Tables ---
-    const installationTable = new SlackInstallationTable(this, 'InstallationTable', { removalPolicy });
-    const userMappingTable = new SlackUserMappingTable(this, 'UserMappingTable', { removalPolicy });
-    const channelMappingTable = new SlackChannelMappingTable(this, 'ChannelMappingTable', { removalPolicy });
-    this.installationTable = installationTable.table;
-    this.userMappingTable = userMappingTable.table;
-    this.channelMappingTable = channelMappingTable.table;
+    this.installationTable = integrationTable(this, 'InstallationTable', { partitionKey: 'team_id', ttl: true, removalPolicy });
+    this.userMappingTable = integrationTable(this, 'UserMappingTable', {
+      partitionKey: 'slack_identity', ttl: true, platformUserIndex: true, removalPolicy,
+    });
+    this.channelMappingTable = integrationTable(this, 'ChannelMappingTable', { partitionKey: 'channel_id', removalPolicy });
 
     // --- Slack App Secrets (CDK-created placeholders) ---
     // Users populate these after creating the Slack App via the SlackAppCreateUrl output.
@@ -183,13 +194,8 @@ export class SlackIntegration extends Construct {
       resources: [slackSecretArnPrefix],
     });
 
-    // --- Cognito Authorizer (for /slack/link endpoint) ---
-    const cognitoAuthorizer = new apigw.CognitoUserPoolsAuthorizer(this, 'SlackCognitoAuthorizer', {
-      cognitoUserPools: [props.userPool],
-    });
-
     const cognitoAuthOptions: apigw.MethodOptions = {
-      authorizer: cognitoAuthorizer,
+      authorizer: props.linkAuthorizer,
       authorizationType: apigw.AuthorizationType.COGNITO,
     };
 
@@ -197,26 +203,9 @@ export class SlackIntegration extends Construct {
       authorizationType: apigw.AuthorizationType.NONE,
     };
 
-    // --- Task creation environment (matches TaskApi createTaskEnv pattern) ---
-    const createTaskEnv: Record<string, string> = {
-      TASK_TABLE_NAME: props.taskTable.tableName,
-      TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
-      TASK_RETENTION_DAYS: String(props.taskRetentionDays ?? DEFAULT_TASK_RETENTION_DAYS),
-    };
-    if (props.repoTable) {
-      createTaskEnv.REPO_TABLE_NAME = props.repoTable.tableName;
-    }
-    if (props.orchestratorFunctionArn) {
-      createTaskEnv.ORCHESTRATOR_FUNCTION_ARN = props.orchestratorFunctionArn;
-    }
-    if (props.guardrailId && props.guardrailVersion) {
-      createTaskEnv.GUARDRAIL_ID = props.guardrailId;
-      createTaskEnv.GUARDRAIL_VERSION = props.guardrailVersion;
-    }
-    if (props.budgetTable) {
-      createTaskEnv.BUDGET_TABLE_NAME = props.budgetTable.tableName;
-      createTaskEnv.USER_POOL_ID = props.userPool.userPoolId;
-    }
+    // SlackIntegrationProps declares no attachments bucket, and the helper would read one from an object that carries it.
+    const taskCreationInputs = { ...props, attachmentsBucket: undefined };
+    const createTaskEnv = taskCreationEnvironment(taskCreationInputs);
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Lambda Handlers
@@ -306,36 +295,7 @@ export class SlackIntegration extends Construct {
     this.installationTable.grantReadData(commandProcessorFn);
     this.channelMappingTable.grantReadData(commandProcessorFn);
     commandProcessorFn.addToRolePolicy(readSlackSecretsPolicy);
-    props.taskTable.grantReadWriteData(commandProcessorFn);
-    props.taskEventsTable.grantReadWriteData(commandProcessorFn);
-    if (props.repoTable) {
-      props.repoTable.grantReadData(commandProcessorFn);
-    }
-    if (props.budgetTable) {
-      props.budgetTable.grantReadData(commandProcessorFn);
-      commandProcessorFn.addToRolePolicy(new iam.PolicyStatement({
-        actions: ['cognito-idp:AdminListGroupsForUser'],
-        resources: [props.userPool.userPoolArn],
-      }));
-    }
-    if (props.orchestratorFunctionArn) {
-      commandProcessorFn.addToRolePolicy(new iam.PolicyStatement({
-        actions: ['lambda:InvokeFunction'],
-        resources: [props.orchestratorFunctionArn],
-      }));
-    }
-    if (props.guardrailId) {
-      commandProcessorFn.addToRolePolicy(new iam.PolicyStatement({
-        actions: ['bedrock:ApplyGuardrail'],
-        resources: [
-          Stack.of(this).formatArn({
-            service: 'bedrock',
-            resource: 'guardrail',
-            resourceName: props.guardrailId,
-          }),
-        ],
-      }));
-    }
+    grantTaskCreation(commandProcessorFn, taskCreationInputs);
 
     // Wire events handler to command processor for @mention forwarding.
     slackEventsFn.addEnvironment('SLACK_COMMAND_PROCESSOR_FUNCTION_NAME', commandProcessorFn.functionName);

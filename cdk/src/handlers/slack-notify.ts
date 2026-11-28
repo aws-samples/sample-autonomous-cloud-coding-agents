@@ -72,7 +72,7 @@ const TERMINAL_EVENTS = new Set<string>([
 /**
  * Map an event type to the ``channel_metadata`` attribute that should
  * guard against double-posting on a partial-batch retry. PR #79 review
- * #4 surfaced the gap: when GitHub or Email rate-limits and the record
+ * #4 surfaced the gap: when GitHub rate-limits and the record
  * is replayed, every Slack-subscribed event for that record runs again.
  * Terminals were already dedup-protected by ``slack_notified_terminal``
  * but ``agent_error`` was not — operators would page twice on a single

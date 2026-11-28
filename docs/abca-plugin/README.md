@@ -24,7 +24,7 @@ Or add to your project's `.claude/settings.json`:
 |-------|---------|-------------|
 | `/setup` | First-time setup, prerequisites | Walk through prerequisites, toolchain, and first deployment |
 | `/deploy` | Deploy, diff, destroy | Deploy, diff, or destroy the CDK stack |
-| `/onboard-repo` | Add a repository | Onboard a GitHub repo via Blueprint CDK construct |
+| `/onboard-repo` | Add a repository | Onboard a GitHub repo with `bgagent repo onboard` or a CDK Blueprint |
 | `/submit-task` | Submit a coding task | Submit tasks with prompt quality guidance and cost controls (supports quick mode, `--trace`) |
 | `/troubleshoot` | Debug, errors, failures | Diagnose build, deployment, auth, and task execution issues (supports `--verbose`) |
 | `/status` | Status, health check | Check stack health, running tasks, and recent history |

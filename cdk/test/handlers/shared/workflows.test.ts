@@ -217,47 +217,10 @@ describe('CDK descriptors stay in sync with agent/workflows/**', () => {
     }
   });
 
-  // #296 finding #10: _KNOWN_WRITEABLE_WORKFLOW_IDS (agent/src/config.py) is a
-  // THIRD hand-maintained copy of the writeable set, used by the agent's
-  // load-failure fallback. It must agree with the descriptors: a workflow that
-  // is read_only:false (writeable) and repo-bound — i.e. the agent must allow
-  // writes if its file fails to load — has to be in that set, or its writes get
-  // mis-denied on the fallback path. Cross-check the agent constant against the
-  // CDK descriptors so adding a writeable workflow without updating the agent
-  // list fails CI here.
-  test('agent _KNOWN_WRITEABLE_WORKFLOW_IDS matches the writeable repo-bound descriptors', () => {
-    const configPy = fs.readFileSync(
-      path.resolve(__dirname, '../../../../agent/src/config.py'), 'utf8',
-    );
-    // Tolerate ruff's formatting of the frozenset: it may render single-line
-    // ``frozenset(("a", "b"))`` or multi-line with whitespace between the parens.
-    const match = configPy.match(/_KNOWN_WRITEABLE_WORKFLOW_IDS\s*=\s*frozenset\(\s*\(([^)]*)\)\s*\)/s);
-    expect(match).not.toBeNull();
-    const agentWriteable = new Set(
-      [...match![1].matchAll(/"([^"]+)"/g)].map(m => m[1]),
-    );
-
-    // The expected writeable set from the YAML: read_only:false AND requires_repo
-    // (pr-review is read-only; default/agent-v1 is repo-less and intentionally
-    // excluded so its fallback fails closed — mirrors the constant's own docstring).
-    const expectedWriteable = new Set<string>();
-    for (const file of yamlFiles) {
-      const doc = yaml.load(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
-      const requiresRepo = doc.requires_repo !== undefined
-        ? Boolean(doc.requires_repo)
-        : doc.domain === 'coding';
-      const readOnly = Boolean(doc.read_only ?? false);
-      if (requiresRepo && !readOnly) expectedWriteable.add(doc.id as string);
-    }
-    expect([...agentWriteable].sort()).toEqual([...expectedWriteable].sort());
-  });
-
   // #296 finding #10 residual: REPO_LESS_DEFAULT_WORKFLOW_ID (agent/src/config.py)
-  // is the load-failure fallback's notion of "the one repo-less default". It must
-  // (a) match the CDK platform default and (b) actually be requires_repo:false in
-  // the YAML — otherwise the fallback mis-classifies repo-optionality on the very
-  // path that exists to fail closed. DEFAULT_WORKFLOW_ID (the coding default) must
-  // conversely be a repo-bound workflow. Both pinned here so drift fails CI.
+  // must (a) match the CDK platform default and (b) actually be requires_repo:false
+  // in the YAML. DEFAULT_WORKFLOW_ID (the coding default) must conversely be a
+  // repo-bound workflow. Both pinned here so drift fails CI.
   test('agent default-workflow constants agree with the YAML and CDK default', () => {
     const configPy = fs.readFileSync(
       path.resolve(__dirname, '../../../../agent/src/config.py'), 'utf8',

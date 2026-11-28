@@ -94,7 +94,7 @@ class TestIndividualRules:
 
     def test_rule4_read_only_rejects_ensure_pr_without_a_strategy(self):
         # A step that names no strategy runs as `create` (the default of the
-        # pipeline and of the step handler): it pushes and opens a pull request.
+        # pipeline): it pushes and opens a pull request.
         w = _base()
         w["read_only"] = True
         w["agent_config"]["tier"] = "read-only"
@@ -185,10 +185,10 @@ class TestIndividualRules:
         w["agent_config"]["cedar_policy_modules"] = ["builtin/hard_deny", "builtin/soft_deny", ref]
         assert ("rule-8" in validate_workflow(w)) is bad
 
-    def test_rule8_step_kind_without_a_handler_flagged(self):
+    def test_unknown_step_kind_is_a_schema_violation(self):
         w = _base()
         w["steps"].insert(1, {"kind": "teleport"})
-        assert "rule-8" in validate_workflow(w)
+        assert validate_workflow(w) == ["schema"]
 
     def test_rule8_unknown_deliver_target_flagged(self):
         # ADR-014 addendum: deliver_artifact.target must name a registered

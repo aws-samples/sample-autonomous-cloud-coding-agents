@@ -176,16 +176,3 @@ export function validateDag(nodes: readonly DagNode[]): DagValidationResult {
 
   return { ok: true, layers };
 }
-
-/**
- * Convenience: the flat topological order (roots first). Only valid to
- * call on a graph ``validateDag`` accepted; throws otherwise so a caller
- * can't accidentally order a rejected graph.
- */
-export function topologicalOrder(nodes: readonly DagNode[]): readonly string[] {
-  const result = validateDag(nodes);
-  if (!result.ok) {
-    throw new Error(`Cannot order an invalid dependency graph: ${result.reason}`);
-  }
-  return result.layers.flat();
-}

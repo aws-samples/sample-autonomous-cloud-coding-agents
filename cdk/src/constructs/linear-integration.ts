@@ -18,25 +18,22 @@
  */
 
 import * as path from 'path';
-import { ArnFormat, Aspects, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
+import { Aspects, Duration, RemovalPolicy } from 'aws-cdk-lib';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
-import { Runtime, Architecture } from 'aws-cdk-lib/aws-lambda';
+import { Runtime, Architecture, Function as LambdaFunction } from 'aws-cdk-lib/aws-lambda';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
+import { FeedbackTracker, grantTrackerFeedback, integrationTable, secretArnPattern, webhookDedupTable } from './integration-parts';
 import { LinearIdentityVault } from './linear-identity-vault';
-import { LinearProjectMappingTable } from './linear-project-mapping-table';
-import { LinearUserMappingTable } from './linear-user-mapping-table';
-import { LinearWorkspaceRegistryTable } from './linear-workspace-registry-table';
 import { ComponentUaAspect } from './solution-ua-aspect';
-
-/** Default task-record retention used for TTL computation (days). */
-const DEFAULT_TASK_RETENTION_DAYS = 90;
+import { grantTaskCreation, taskCreationEnvironment } from './task-creation';
+import { LINEAR_ISSUE_INDEX_NAME } from './task-table-indexes';
 
 /**
  * Webhook-processor Lambda timeout (seconds). One event drives a chain of real
@@ -69,8 +66,11 @@ export interface LinearIntegrationProps {
   /** The existing REST API to add Linear routes to. */
   readonly api: apigw.RestApi;
 
-  /** Cognito user pool for the /linear/link endpoint (Cognito-authenticated). */
+  /** Cognito user pool in which the budget check looks up the groups of a user. */
   readonly userPool: cognito.IUserPool;
+
+  /** Cognito authorizer of `api`, for the /linear/link and /linear/workspaces/{slug} routes. */
+  readonly linkAuthorizer: apigw.IAuthorizer;
 
   /** The DynamoDB task table. */
   readonly taskTable: dynamodb.ITable;
@@ -201,17 +201,38 @@ export interface LinearIntegrationProps {
  * - API Gateway routes under /linear/*
  * - Two Secrets Manager secrets (webhook signing secret + personal API token)
  */
-export class LinearIntegration extends Construct {
-  /** Linear project → repo mapping table. */
+export class LinearIntegration extends Construct implements FeedbackTracker {
+  public readonly issueIndexName = LINEAR_ISSUE_INDEX_NAME;
+
+  /**
+   * DynamoDB table mapping Linear projects to GitHub repositories.
+   *
+   * Schema: linear_project_id (PK).
+   *
+   * Fields:
+   * - repo — `owner/repo`
+   * - team_id — Linear team UUID (the project's team)
+   * - label_filter — Linear issue label that triggers a task (default `bgagent`)
+   * - status — 'active' | 'removed'
+   * - onboarded_at, updated_at — ISO timestamps
+   */
   public readonly projectMappingTable: dynamodb.Table;
 
-  /** Linear user → platform user mapping table. */
+  /**
+   * DynamoDB table for mapping Linear user identities to platform user IDs.
+   *
+   * Schema: linear_identity (PK) — composite key `{workspace_id}#{user_id}` for confirmed mappings,
+   * `pending#{code}` for in-flight link codes (with TTL).
+   *
+   * GSIs:
+   * - PlatformUserIndex (PK: platform_user_id, SK: linked_at) — list linked Linear accounts for a user
+   */
   public readonly userMappingTable: dynamodb.Table;
 
   /**
-   * Registry of Linear workspaces that have completed OAuth onboarding.
-   * Lookup `provider_name` (AgentCore credential provider) by Linear
-   * `organizationId` from the inbound webhook.
+   * DynamoDB table tracking Linear workspaces that have completed OAuth onboarding.
+   *
+   * Schema: linear_workspace_id (PK) — Linear's organization UUID.
    */
   public readonly workspaceRegistryTable: dynamodb.Table;
 
@@ -236,22 +257,15 @@ export class LinearIntegration extends Construct {
     const removalPolicy = props.removalPolicy ?? RemovalPolicy.DESTROY;
 
     // --- DynamoDB tables ---
-    const projectMapping = new LinearProjectMappingTable(this, 'ProjectMappingTable', { removalPolicy });
-    const userMapping = new LinearUserMappingTable(this, 'UserMappingTable', { removalPolicy });
-    const workspaceRegistry = new LinearWorkspaceRegistryTable(this, 'WorkspaceRegistryTable', { removalPolicy });
-    this.projectMappingTable = projectMapping.table;
-    this.userMappingTable = userMapping.table;
-    this.workspaceRegistryTable = workspaceRegistry.table;
+    this.projectMappingTable = integrationTable(this, 'ProjectMappingTable', { partitionKey: 'linear_project_id', removalPolicy });
+    this.userMappingTable = integrationTable(this, 'UserMappingTable', {
+      partitionKey: 'linear_identity', ttl: true, platformUserIndex: true, removalPolicy,
+    });
+    this.workspaceRegistryTable = integrationTable(this, 'WorkspaceRegistryTable', { partitionKey: 'linear_workspace_id', removalPolicy });
 
     // Dedup table: linear webhook retries collapse to a single processor invoke
     // within the 8h TTL window. Keyed on `{data.id}#{action}#{webhookTimestamp}`.
-    this.webhookDedupTable = new dynamodb.Table(this, 'WebhookDedupTable', {
-      partitionKey: { name: 'dedup_key', type: dynamodb.AttributeType.STRING },
-      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      timeToLiveAttribute: 'ttl',
-      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
-      removalPolicy,
-    });
+    this.webhookDedupTable = webhookDedupTable(this, removalPolicy);
 
     // --- Webhook signing secret (CDK-created placeholder, populated by `bgagent linear setup`) ---
     // Per-workspace OAuth tokens (Phase 2.0b-O2) live in `bgagent-linear-oauth-<slug>`
@@ -295,36 +309,10 @@ export class LinearIntegration extends Construct {
       ],
     };
 
-    // --- Task creation environment (matches TaskApi / SlackIntegration pattern) ---
-    const createTaskEnv: Record<string, string> = {
-      TASK_TABLE_NAME: props.taskTable.tableName,
-      TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
-      TASK_RETENTION_DAYS: String(props.taskRetentionDays ?? DEFAULT_TASK_RETENTION_DAYS),
-    };
-    if (props.repoTable) {
-      createTaskEnv.REPO_TABLE_NAME = props.repoTable.tableName;
-    }
-    if (props.orchestratorFunctionArn) {
-      createTaskEnv.ORCHESTRATOR_FUNCTION_ARN = props.orchestratorFunctionArn;
-    }
-    if (props.guardrailId && props.guardrailVersion) {
-      createTaskEnv.GUARDRAIL_ID = props.guardrailId;
-      createTaskEnv.GUARDRAIL_VERSION = props.guardrailVersion;
-    }
-    if (props.attachmentsBucket) {
-      createTaskEnv.ATTACHMENTS_BUCKET_NAME = props.attachmentsBucket.bucketName;
-    }
-    if (props.budgetTable) {
-      createTaskEnv.BUDGET_TABLE_NAME = props.budgetTable.tableName;
-      createTaskEnv.USER_POOL_ID = props.userPool.userPoolId;
-    }
+    const createTaskEnv = taskCreationEnvironment(props);
 
-    // --- Cognito Authorizer (for /linear/link) ---
-    const cognitoAuthorizer = new apigw.CognitoUserPoolsAuthorizer(this, 'LinearCognitoAuthorizer', {
-      cognitoUserPools: [props.userPool],
-    });
     const cognitoAuthOptions: apigw.MethodOptions = {
-      authorizer: cognitoAuthorizer,
+      authorizer: props.linkAuthorizer,
       authorizationType: apigw.AuthorizationType.COGNITO,
     };
     const noneAuthOptions: apigw.MethodOptions = {
@@ -438,14 +426,7 @@ export class LinearIntegration extends Construct {
     // refresh.
     webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
       actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
-      resources: [
-        Stack.of(this).formatArn({
-          service: 'secretsmanager',
-          resource: 'secret',
-          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-          resourceName: 'bgagent-linear-oauth-*',
-        }),
-      ],
+      resources: [secretArnPattern(this, 'bgagent-linear-oauth-*')],
     }));
     // RFC #249 Phase 1: grant the vault token data-plane calls when an identity
     // vault is wired. The SM grant above stays regardless — it is the fallback
@@ -453,50 +434,9 @@ export class LinearIntegration extends Construct {
     if (props.identityVault) {
       props.identityVault.grantMintToken(webhookProcessorFn);
     }
-    props.taskTable.grantReadWriteData(webhookProcessorFn);
-    props.taskEventsTable.grantReadWriteData(webhookProcessorFn);
-    if (props.repoTable) {
-      props.repoTable.grantReadData(webhookProcessorFn);
-    }
-    if (props.budgetTable) {
-      props.budgetTable.grantReadData(webhookProcessorFn);
-      webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
-        actions: ['cognito-idp:AdminListGroupsForUser'],
-        resources: [props.userPool.userPoolArn],
-      }));
-    }
-    if (props.orchestratorFunctionArn) {
-      webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
-        actions: ['lambda:InvokeFunction'],
-        resources: [props.orchestratorFunctionArn],
-      }));
-    }
-    if (props.guardrailId) {
-      webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
-        actions: ['bedrock:ApplyGuardrail'],
-        resources: [
-          Stack.of(this).formatArn({
-            service: 'bedrock',
-            resource: 'guardrail',
-            resourceName: props.guardrailId,
-          }),
-        ],
-      }));
-    }
-    // No bedrock:InvokeModel grant: this processor never calls a model directly.
-    // Its only Bedrock use is ApplyGuardrail above, to screen third-party text and
-    // attachment bytes before they reach an agent. All model inference happens
-    // inside the agent runtime, under the agent's own role.
-    //
-    // Issue descriptions can carry markdown `![alt](https://…)` images, which
-    // `extractImageUrlAttachments` (linear-webhook-processor.ts) turns into
-    // URL attachments. `createTaskCore` then uploads the screened bytes to
-    // `ATTACHMENTS_BUCKET_NAME`, mirroring the TaskApi/Slack paths. Without
-    // grantPut + grantDelete here, that upload fails closed with 503.
-    if (props.attachmentsBucket) {
-      props.attachmentsBucket.grantPut(webhookProcessorFn);
-      props.attachmentsBucket.grantDelete(webhookProcessorFn);
-    }
+    // No bedrock:InvokeModel grant: this processor never calls a model directly. It screens third-party text and attachment
+    // bytes (ApplyGuardrail). It stores the screened bytes and deletes them when the task is not created.
+    grantTaskCreation(webhookProcessorFn, props);
     // Agent-session channel (flag on only): nudges, the session → task pointer
     // and the compute stop for a session `stop`.
     grantAgentSessionAccess(webhookProcessorFn, this.webhookDedupTable, props.agentSessions);
@@ -531,14 +471,7 @@ export class LinearIntegration extends Construct {
     // CLI owns the lifecycle of these secrets.
     webhookFn.addToRolePolicy(new iam.PolicyStatement({
       actions: ['secretsmanager:GetSecretValue'],
-      resources: [
-        Stack.of(this).formatArn({
-          service: 'secretsmanager',
-          resource: 'secret',
-          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-          resourceName: 'bgagent-linear-oauth-*',
-        }),
-      ],
+      resources: [secretArnPattern(this, 'bgagent-linear-oauth-*')],
     }));
     webhookProcessorFn.grantInvoke(webhookFn);
 
@@ -582,14 +515,7 @@ export class LinearIntegration extends Construct {
     // documented prefix — same wildcard the webhook Lambdas already use.
     removeWorkspaceFn.addToRolePolicy(new iam.PolicyStatement({
       actions: ['secretsmanager:DeleteSecret'],
-      resources: [
-        Stack.of(this).formatArn({
-          service: 'secretsmanager',
-          resource: 'secret',
-          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-          resourceName: 'bgagent-linear-oauth-*',
-        }),
-      ],
+      resources: [secretArnPattern(this, 'bgagent-linear-oauth-*')],
     }));
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -668,6 +594,12 @@ export class LinearIntegration extends Construct {
       ], true);
     }
   }
+
+  public grantFeedback(fn: LambdaFunction, options: { readonly writeBack: boolean }): void {
+    grantTrackerFeedback(
+      fn, this.workspaceRegistryTable, 'LINEAR_WORKSPACE_REGISTRY_TABLE_NAME', 'bgagent-linear-oauth-*', options.writeBack,
+    );
+  }
 }
 
 type AgentSessionsProps = NonNullable<LinearIntegrationProps['agentSessions']>;
@@ -693,7 +625,7 @@ function agentSessionProcessorEnv(agentSessions: AgentSessionsProps | undefined)
  */
 function grantAgentSessionAccess(
   processorFn: lambda.NodejsFunction,
-  webhookDedupTable: dynamodb.ITable,
+  dedupTable: dynamodb.ITable,
   agentSessions: AgentSessionsProps | undefined,
 ): void {
   if (!agentSessions) return;
@@ -710,7 +642,7 @@ function grantAgentSessionAccess(
   // lag. PutItem only — the console-claim GetItem grant already covers the read.
   processorFn.addToRolePolicy(new iam.PolicyStatement({
     actions: ['dynamodb:PutItem'],
-    resources: [webhookDedupTable.tableArn],
+    resources: [dedupTable.tableArn],
   }));
   // Session `stop` shuts the task's compute down, like DELETE /tasks/{id}.
   // Same scoping as TaskApi's cancel Lambda, one statement per configured

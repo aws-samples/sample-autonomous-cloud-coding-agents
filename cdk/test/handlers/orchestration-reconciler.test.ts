@@ -2930,6 +2930,38 @@ describe('orchestration-reconciler handler — an iteration on a failed sub-issu
     expect(store.meta.rollup_posted_at).toBeUndefined();
   });
 
+  test('a dependent that is refused for good when the recovery starts it has its own dependents skipped in the same run', async () => {
+    // A → B → C. The fix on A puts B and C back to waiting and starts B, which
+    // the guardrail refuses. B never becomes a task, so no event comes for C.
+    const store = orchestrationStore([
+      { sub_issue_id: 'A', child_status: 'failed', child_task_id: 'TA', child_branch_name: 'branch-A' },
+      { sub_issue_id: 'B', depends_on: ['A'], child_status: 'skipped' },
+      { sub_issue_id: 'C', depends_on: ['B'], child_status: 'skipped' },
+    ], { rollup_posted_at: SETTLED_AT });
+    createTaskCoreMock.mockResolvedValue({
+      statusCode: 400, body: '{"error":{"message":"Task description was blocked by content policy."}}',
+    });
+
+    await handler(iteration(true));
+
+    expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+    expect(store.status('A')).toBe('succeeded');
+    expect(store.row('B')).toMatchObject({
+      child_status: 'failed', failure_reason: expect.stringContaining('Blocked by content policy'),
+    });
+    // Put back to waiting by the recovery, then skipped: not left as it was.
+    const writtenToC = ddbSend.mock.calls
+      .map(([cmd]) => cmd as StoreCommand)
+      .filter((cmd) => cmd._type === 'Update' && (cmd.input.Key as { sub_issue_id: string }).sub_issue_id === 'C')
+      .map((cmd) => (cmd.input.ExpressionAttributeValues as StoreRow)[':s']);
+    expect(writtenToC).toEqual(['blocked', 'skipped']);
+    expect(store.status('C')).toBe('skipped');
+    // The epic has ended again, and the panel of this run says so.
+    expect(upsertStatusCommentMock.mock.calls.at(-1)![2]).toContain('finished with failures');
+    expect(store.meta.rollup_posted_at).toBeDefined();
+    expect(store.meta.rollup_posted_at).not.toBe(SETTLED_AT);
+  });
+
   test('one that only answered a question leaves the node failed, its dependent skipped and the epic settled', async () => {
     // Nothing was fixed: the branch is where the failed run left it.
     const store = settledWithFailure();

@@ -337,6 +337,7 @@ describe('downloadScreenAndStoreLinearAttachments', () => {
     expect(records).toHaveLength(1);
     expect(records[0].type).toBe('file');
     expect(records[0].content_type).toBe('text/x-log');
+    expect(records[0].s3_key).toMatch(/^attachments\/user-1\/task-1\/u-l-9c8b-uuid-[0-9a-f]+\/9c8b-uuid$/);
     expect(screenTextFileMock).toHaveBeenCalled();
   });
 

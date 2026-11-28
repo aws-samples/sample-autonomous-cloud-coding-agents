@@ -9,8 +9,8 @@ You maintain the **Python agent runtime** bundled into the CDK-deployed image: p
 ```bash
 mise //agent:quality         # lint, format, type-check, dead code, pytest
 mise //agent:security        # agent-scoped security checks
-cd agent && uv run pytest -v # verbose single run
-cd agent && uv run pytest tests/test_progress_writer.py -v
+mise //agent:testf -- -v     # pytest without coverage: the whole suite, verbose
+mise //agent:testf -- tests/test_progress_writer.py -v
 ```
 
 Root `mise run build` includes `//agent:quality` in parallel with `//cdk:build`. Its test step (`mise //agent:test`) writes a JUnit report to `agent/test-reports/junit.xml`, which git and the image build ignore; `build.yml` uploads it when the build job fails.
@@ -20,8 +20,8 @@ The lint step of `//agent:quality` (`lint:fix`) applies ruff's automatic fixes a
 ## Testing
 
 - **Full quality gate:** `mise //agent:quality`
-- **Verbose pytest:** `cd agent && uv run pytest -v`
-- **Single file:** `cd agent && uv run pytest tests/test_hooks.py -k test_name`
+- **Verbose pytest:** `mise //agent:testf -- -v`
+- **Single file:** `mise //agent:testf -- tests/test_hooks.py -k test_name`
 - **With coverage:** see `agent/mise.toml` / `pyproject.toml` for project defaults
 
 | Code | Test location |
@@ -52,6 +52,19 @@ Unit tests cannot reach AWS through botocore. `tests/conftest.py` removes the cr
 | `agent/tests_emulator/` | WRITE | Emulator-backed tests: real agent code against a local AWS Emulator. The unit run does not collect them: `mise run test:integration` from the repository root (needs Docker). Rules and known differences from AWS: [scripts/aws-emulator/README.md](../scripts/aws-emulator/README.md). |
 | `agent/README.md` | WRITE | Env vars, PAT notes |
 | `cli/src/commands/watch.ts` | WRITE (if event schema changes) | Event consumer |
+
+## Recipes
+
+The tables under "Where to make changes" in [../AGENTS.md](../AGENTS.md#where-to-make-changes) and in the [developer guide](../docs/guides/DEVELOPER_GUIDE.md#where-to-make-changes) say where the code is. A recipe lists what has to change together.
+
+### Add a workflow
+
+1. The file `agent/workflows/<domain>/<name>-vN.yaml`, whose `id` is that path below `agent/workflows/` without the extension. `agent/tests/test_workflow_tree_valid.py` validates every file of the tree against the rules of [docs/design/WORKFLOWS.md](../docs/design/WORKFLOWS.md#validation-rules).
+2. Its system prompt: a module in `agent/src/prompts/` and an entry in `_PROMPTS` (`agent/src/prompts/__init__.py`). Without the entry the task runs on a default prompt, with a warning in the log.
+3. Its descriptor in `DESCRIPTORS` (`cdk/src/handlers/shared/workflows.ts`): task creation refuses a `workflow_ref` that the table does not hold, and `cdk/test/handlers/shared/workflows.test.ts` holds the table and the files in step.
+4. The places keyed by a workflow's id. In the agent: `_NO_CLARIFICATION_WORKFLOW_IDS` in `agent/src/runner.py` (a writeable workflow that is not listed is offered the `request_clarification` tool; add the id, because the platform acts on the answer to a question only for `coding/new-task-v1`: `cdk/src/handlers/shared/clarify-resume.ts`) and `_PRINCIPAL_BY_ID` in `agent/src/workflow/loader.py` (the Cedar principal; `new_task` for an id that is not there). On the platform, for a workflow whose work goes into pull requests: the ids that `taskFacts` counts as coding work (`cdk/src/handlers/shared/scoreboard.ts`), and the row "Coding task" of `docs/design/OBSERVABILITY.md`.
+5. No table lists the workflows that work on an existing pull request: such a workflow has `pr_number` among the `all_of` of its `required_inputs`. The agent reads that from the file (`uses_pull_request` on `Workflow`, `agent/src/workflow/models.py`), the orchestrator from the descriptor (`workflowUsesPr` in `cdk/src/handlers/shared/workflows.ts`).
+6. A workflow that users select gets its row in the table of [Workflows](../docs/guides/USER_GUIDE.md#workflows) in the user guide.
 
 ## Code style
 
@@ -99,11 +112,11 @@ def test_a():
 
 - ✅ **Always:** Add tests under `agent/tests/` for behavior changes; update `agent/README.md` for new env vars; emit structured progress events for operator-visible milestones
 - ⚠️ **Ask first:** Changes to agent–orchestrator contract, Dockerfile base image, new system dependencies in `pyproject.toml`
-- 🚫 **Never:** Bump `cedarpy` without bumping `@cedar-policy/cedar-wasm` and refreshing `contracts/cedar-parity/` fixtures; edit only `agent/` and skip `mise //agent:quality` before PR
+- 🚫 **Never:** Edit only `agent/` and skip `mise //agent:quality` before PR
 
 ## Common mistakes
 
-- **Cedar parity** — `cedarpy==4.12.2` (agent) and `@cedar-policy/cedar-wasm` 4.12.0 (cdk) must move together. See [cdk/AGENTS.md](../cdk/AGENTS.md) and `docs/design/CEDAR_HITL_GATES.md` §15.6.
+- **Built-in Cedar rules** — a rule added to `policies/*.cedar` needs a row in `BUILTIN_RULES` of `tests/test_policy_builtin_rules.py` and in the rule table of [`docs/guides/USER_GUIDE.md`](../docs/guides/USER_GUIDE.md#rule-ids); a soft rule also needs an entry in `RULE_ID_ALLOWLIST` of `cdk/src/handlers/shared/approval-metrics.ts`. A `cedarpy` bump is judged by `tests/test_policy_builtin_rules.py`, `tests/test_cedarpy_annotations_contract.py` and `tests/test_policy_three_outcome.py`.
 - **Claude Code CLI lockstep (#215)** — `claude-agent-sdk` (`pyproject.toml`) bundles a Claude Code CLI, and `Dockerfile` installs the same CLI from npm; the two must be the same version. Move both pins in one commit: `tests/test_claude_cli_lockstep.py` fails when they differ and names the version to use.
 - **Image instrumentation list** — `Dockerfile` sets `OTEL_PYTHON_DISABLED_INSTRUMENTATIONS` to the list the pinned `aws-opentelemetry-distro` applies in its agent observability mode, with `requests` and `urllib3` always in it (they would copy trace context and baggage into requests to Linear and Atlassian). An update of the distro can change that list: `tests/test_image_instrumentation.py` fails then and prints the instruction to write.
 - **Contract-owned constant** — a constant that `contracts/constants.json` owns (the names in `OWNED_PYTHON_NAMES` in `scripts/check-constants-sync.ts`) may only be assigned a plain read of its contract key, optionally inside one conversion such as `int(...)`, in any file under `src/`. A literal, arithmetic on the value or another key fails `mise run check:constants-sync`. A new owned constant also needs a row in `_OWNED` in `tests/test_constants_parity.py`; the check fails until it has one. Details: [`contracts/constants.md`](../contracts/constants.md).
@@ -112,5 +125,5 @@ def test_a():
 - **Forgotten consumer** — Progress event schema changes need `cli/src/commands/watch.ts` and `test_progress_writer.py` updates.
 - **Image bundle** — CDK deploys this tree; root `mise run build` always runs agent quality.
 - **Un-attributed AWS SDK client (#319)** — build clients via `aws_session.tenant_client`/`tenant_resource` (tenant-scoped) or `aws_session.platform_client` (unscoped, still attributed); a naked `boto3.client(...)` silently drops solution attribution. ruff `TID251` fails the lint on `boto3.client`, `boto3.resource` and any boto3 or botocore session in `src/` and `scripts/` outside `src/aws_session.py` (the list is `banned-api` in `pyproject.toml`).
-- **Importing a process entrypoint (#254)** — `server.py` (uvicorn loads it) and `entrypoint.py` (batch mode runs it; it is otherwise a re-export shim kept for tests) are started, not imported: importing `server` builds the FastAPI app and runs its start-up checks, and importing `entrypoint` reloads `config`. ruff `TID251` fails the lint on any import of `server` or `entrypoint` in `src/` and `scripts/` (the same `banned-api` table); tests are exempt, and so is `src/aws_session.py`, whose file-wide `TID251` exemption for boto3 covers this ban too. Import the name from the module that defines it, or move what both need into a module both can import.
+- **Importing a process entrypoint (#254)** — `server.py` (uvicorn loads it) and `entrypoint.py` (batch mode runs it; the ECS boot command imports `run_task_from_payload` from it) are not imported by agent code: importing `server` builds the FastAPI app and runs its start-up checks. ruff `TID251` fails the lint on any import of `server` or `entrypoint` in `src/` and `scripts/` (the same `banned-api` table); tests are exempt, and so is `src/aws_session.py`, whose file-wide `TID251` exemption for boto3 covers this ban too. Import the name from the module that defines it, or move what both need into a module both can import.
 - **Git in tests (#855)** — `tests/conftest.py` removes the repository variables git hands to hooks (`GIT_DIR`, `GIT_INDEX_FILE`, …) and switches off user and system git config for the whole session. Build test repositories under `tmp_path` (`git -C` / `cwd=`) and give their commits an identity in that repository's own config or via `GIT_AUTHOR_*` / `GIT_COMMITTER_*`; no git configuration is inherited from the host. Other host state still reaches git, such as an exported `GIT_AUTHOR_NAME` or the user's global ignore file, so a test must not count on its absence. A git command run in a directory that is not a repository fails instead of adopting the checkout or a repository around the temp directory.

@@ -23,6 +23,17 @@ import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import { TaskApi, type TaskApiProps } from '../../src/constructs/task-api';
 
+/** The repo table and the guardrail that every TaskApi takes. */
+function repoTableAndGuardrail(stack: Stack): Pick<TaskApiProps, 'repoTable' | 'guardrailId' | 'guardrailVersion'> {
+  return {
+    repoTable: new dynamodb.Table(stack, 'RepoTable', {
+      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
+    }),
+    guardrailId: 'gr-abc123',
+    guardrailVersion: '1',
+  };
+}
+
 function createStack(overrides?: Partial<TaskApiProps>, withUploads = false): { stack: Stack; template: Template } {
   const app = new App();
   const stack = new Stack(app, 'TestStack');
@@ -37,6 +48,7 @@ function createStack(overrides?: Partial<TaskApiProps>, withUploads = false): { 
   });
 
   new TaskApi(stack, 'TaskApi', {
+    ...repoTableAndGuardrail(stack),
     taskTable,
     taskEventsTable,
     ...(withUploads && {
@@ -52,7 +64,7 @@ function createStack(overrides?: Partial<TaskApiProps>, withUploads = false): { 
   return { stack, template };
 }
 
-function createStackWithWebhooks(overrides?: Partial<TaskApiProps>): { stack: Stack; template: Template } {
+function createStackWithWebhooks(overrides?: Partial<TaskApiProps>, withAttachments = false): { stack: Stack; template: Template } {
   const app = new App();
   const stack = new Stack(app, 'TestStack');
 
@@ -70,9 +82,11 @@ function createStackWithWebhooks(overrides?: Partial<TaskApiProps>): { stack: St
   });
 
   new TaskApi(stack, 'TaskApi', {
+    ...repoTableAndGuardrail(stack),
     taskTable,
     taskEventsTable,
     webhookTable,
+    ...(withAttachments && { attachmentsBucket: new s3.Bucket(stack, 'AttachmentsBucket') }),
     ...overrides,
   });
 
@@ -95,6 +109,7 @@ function createStackWithBudget(): { stack: Stack; template: Template } {
     sortKey: { name: 'period', type: dynamodb.AttributeType.STRING },
   });
   new TaskApi(stack, 'TaskApi', {
+    ...repoTableAndGuardrail(stack),
     taskTable,
     taskEventsTable,
     budgetTable,
@@ -118,6 +133,7 @@ function createStackWithAttachments(overrides?: Partial<TaskApiProps>): { stack:
     partitionKey: { name: 'user_id', type: dynamodb.AttributeType.STRING },
   });
   new TaskApi(stack, 'TaskApi', {
+    ...repoTableAndGuardrail(stack),
     taskTable,
     taskEventsTable,
     attachmentsBucket: new s3.Bucket(stack, 'AttachmentsBucket'),
@@ -148,6 +164,7 @@ function createStackWithWebhooksAndApiKeys(): { stack: Stack; template: Template
   });
 
   new TaskApi(stack, 'TaskApi', {
+    ...repoTableAndGuardrail(stack),
     taskTable,
     taskEventsTable,
     webhookTable,
@@ -512,26 +529,8 @@ describe('TaskApi construct', () => {
     });
   });
 
-  test('createTask Lambda has REPO_TABLE_NAME when repoTable is provided', () => {
-    const app = new App();
-    const stack = new Stack(app, 'RepoStack');
-    const taskTable = new dynamodb.Table(stack, 'TaskTable', {
-      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
-    });
-    const taskEventsTable = new dynamodb.Table(stack, 'TaskEventsTable', {
-      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'event_id', type: dynamodb.AttributeType.STRING },
-    });
-    const repoTable = new dynamodb.Table(stack, 'RepoTable', {
-      partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING },
-    });
-    new TaskApi(stack, 'TaskApi', {
-      taskTable,
-      taskEventsTable,
-      repoTable,
-    });
-    const template = Template.fromStack(stack);
-    template.hasResourceProperties('AWS::Lambda::Function', {
+  test('createTask Lambda has REPO_TABLE_NAME', () => {
+    baseTemplate.hasResourceProperties('AWS::Lambda::Function', {
       Environment: {
         Variables: Match.objectLike({
           REPO_TABLE_NAME: Match.anyValue(),
@@ -540,12 +539,8 @@ describe('TaskApi construct', () => {
     });
   });
 
-  test('createTask Lambda has guardrail env vars when provided', () => {
-    const { template } = createStack({
-      guardrailId: 'gr-abc123',
-      guardrailVersion: '1',
-    });
-    template.hasResourceProperties('AWS::Lambda::Function', {
+  test('createTask Lambda has guardrail env vars', () => {
+    baseTemplate.hasResourceProperties('AWS::Lambda::Function', {
       Environment: {
         Variables: Match.objectLike({
           GUARDRAIL_ID: 'gr-abc123',
@@ -645,9 +640,11 @@ describe('TaskApi construct', () => {
 
 describe('TaskApi construct with webhooks', () => {
   let template: Template;
+  let attachmentsTemplate: Template;
 
   beforeAll(() => {
     template = createStackWithWebhooks().template;
+    attachmentsTemplate = createStackWithWebhooks(undefined, true).template;
   });
 
   test('creates webhook API resources', () => {
@@ -727,6 +724,30 @@ describe('TaskApi construct with webhooks', () => {
       },
     });
   });
+
+  type Statement = { Action: string | string[]; Resource: unknown };
+  /** The S3 statements in the policy of a function's role. */
+  function s3Statements(stackTemplate: Template, functionName: string): Statement[] {
+    const policies = Object.entries(stackTemplate.findResources('AWS::IAM::Policy'))
+      .filter(([id]) => id.startsWith(`TaskApi${functionName}ServiceRoleDefaultPolicy`));
+    expect(policies).toHaveLength(1);
+    return (policies[0][1].Properties.PolicyDocument.Statement as Statement[])
+      .filter(statement => JSON.stringify(statement.Action).includes('"s3:'));
+  }
+
+  test.each(['CreateTaskFn', 'WebhookCreateTaskFn'])('%s may store and delete inline attachments, on objects of the bucket only', name => {
+    const statements = s3Statements(attachmentsTemplate, name);
+    const actions = statements.flatMap(statement => statement.Action);
+    expect(actions).toEqual(expect.arrayContaining(['s3:PutObject', 's3:DeleteObject*']));
+    expect(actions.filter(action => !/^s3:(PutObject|Abort|DeleteObject)/.test(action))).toEqual([]);
+    for (const statement of statements) {
+      expect(statement.Resource).toEqual({ 'Fn::Join': ['', [{ 'Fn::GetAtt': [expect.stringMatching(/^AttachmentsBucket/), 'Arn'] }, '/*']] });
+    }
+  });
+
+  test.each(['CreateTaskFn', 'WebhookCreateTaskFn'])('%s gets no S3 grant without an attachments bucket', name => {
+    expect(s3Statements(template, name)).toEqual([]);
+  });
 });
 
 describe('TaskApi construct — confirm-uploads admission cap', () => {
@@ -765,11 +786,10 @@ describe('TaskApi construct — nudge endpoint (Phase 2)', () => {
       sortKey: { name: 'nudge_id', type: dynamodb.AttributeType.STRING },
     });
     new TaskApi(stack, 'TaskApi', {
+      ...repoTableAndGuardrail(stack),
       taskTable,
       taskEventsTable,
       taskNudgesTable,
-      guardrailId: 'gr-abc',
-      guardrailVersion: '1',
     });
     nudgeTemplate = Template.fromStack(stack);
   });
@@ -813,19 +833,19 @@ describe('TaskApi construct — nudge endpoint (Phase 2)', () => {
     });
   });
 
-  test('nudge Lambda has guardrail env vars when provided', () => {
+  test('nudge Lambda has guardrail env vars', () => {
     nudgeTemplate.hasResourceProperties('AWS::Lambda::Function', {
       Environment: {
         Variables: Match.objectLike({
           NUDGES_TABLE_NAME: Match.anyValue(),
-          GUARDRAIL_ID: 'gr-abc',
+          GUARDRAIL_ID: 'gr-abc123',
           GUARDRAIL_VERSION: '1',
         }),
       },
     });
   });
 
-  test('nudge Lambda has bedrock:ApplyGuardrail permission when guardrail configured', () => {
+  test('nudge Lambda has bedrock:ApplyGuardrail permission', () => {
     nudgeTemplate.hasResourceProperties('AWS::IAM::Policy', {
       PolicyDocument: {
         Statement: Match.arrayWith([
@@ -853,11 +873,10 @@ describe('TaskApi construct — nudge endpoint (Phase 2)', () => {
       sortKey: { name: 'nudge_id', type: dynamodb.AttributeType.STRING },
     });
     new TaskApi(stack, 'TaskApi', {
+      ...repoTableAndGuardrail(stack),
       taskTable,
       taskEventsTable,
       taskNudgesTable,
-      guardrailId: 'gr-abc',
-      guardrailVersion: '1',
       nudgeRateLimitPerMinute: 25,
     });
     const template = Template.fromStack(stack);
@@ -886,6 +905,7 @@ describe('TaskApi construct — trace endpoint (design §10.1)', () => {
     });
     const traceBucket = new s3.Bucket(stack, 'TraceBucket');
     new TaskApi(stack, 'TaskApi', {
+      ...repoTableAndGuardrail(stack),
       taskTable,
       taskEventsTable,
       traceArtifactsBucket: traceBucket,
@@ -1010,6 +1030,7 @@ describe('MicroVM approval wake wiring', () => {
       ...(sortKey && { sortKey: { name: sortKey, type: dynamodb.AttributeType.STRING } }),
     });
     new TaskApi(stack, 'Api', {
+      ...repoTableAndGuardrail(stack),
       taskTable: table('Tasks'),
       taskEventsTable: table('Events', 'event_id'),
       taskApprovalsTable: table('Approvals', 'request_id'),
@@ -1054,5 +1075,51 @@ describe('MicroVM approval wake wiring', () => {
       expect(resource.Properties.Timeout).toBe(15);
       expect(resource.Properties.Environment.Variables.MICROVM_IMAGE_IDENTIFIER).toBeUndefined();
     }
+  });
+});
+
+describe('TaskApi construct — repo table and guardrail of each function', () => {
+  type Statement = { Action: string | string[]; Effect: string; Resource: unknown };
+  let template: Template;
+
+  beforeAll(() => {
+    const stack = new Stack(new App(), 'WiringStack');
+    const table = (id: string, partitionKey: string, sortKey?: string) => new dynamodb.Table(stack, id, {
+      partitionKey: { name: partitionKey, type: dynamodb.AttributeType.STRING },
+      ...(sortKey && { sortKey: { name: sortKey, type: dynamodb.AttributeType.STRING } }),
+    });
+    // Webhooks, presigned uploads and nudges together: all four functions that screen input.
+    new TaskApi(stack, 'TaskApi', {
+      ...repoTableAndGuardrail(stack),
+      taskTable: table('TaskTable', 'task_id'),
+      taskEventsTable: table('TaskEventsTable', 'task_id', 'event_id'),
+      webhookTable: table('WebhookTable', 'webhook_id'),
+      taskNudgesTable: table('TaskNudgesTable', 'task_id', 'nudge_id'),
+      attachmentsBucket: new s3.Bucket(stack, 'AttachmentsBucket'),
+      userConcurrencyTable: table('UserConcurrencyTable', 'user_id'),
+    });
+    template = Template.fromStack(stack);
+  });
+
+  /** Properties of the one resource of a type whose logical id starts with the prefix. */
+  function resourceOf(type: string, idPrefix: string): Record<string, any> {
+    const found = Object.entries(template.findResources(type)).filter(([id]) => id.startsWith(`TaskApi${idPrefix}`));
+    expect(found).toHaveLength(1);
+    return found[0][1].Properties;
+  }
+  const environment = (name: string): Record<string, unknown> => resourceOf('AWS::Lambda::Function', name).Environment.Variables;
+  const statements = (name: string): Statement[] => resourceOf('AWS::IAM::Policy', `${name}ServiceRoleDefaultPolicy`).PolicyDocument.Statement;
+
+  test.each(['CreateTaskFn', 'WebhookCreateTaskFn', 'ConfirmUploadsFn', 'NudgeTaskFn'])('%s gets the guardrail and may apply it', name => {
+    expect(environment(name)).toMatchObject({ GUARDRAIL_ID: 'gr-abc123', GUARDRAIL_VERSION: '1' });
+    const applied = statements(name).filter(statement => statement.Action === 'bedrock:ApplyGuardrail');
+    expect(applied.map(statement => JSON.stringify(statement.Resource))).toEqual([expect.stringContaining(':guardrail/gr-abc123')]);
+    expect(applied.map(statement => statement.Effect)).toEqual(['Allow']);
+  });
+
+  test.each(['CreateTaskFn', 'WebhookCreateTaskFn'])('%s gets the repo table and may read it', name => {
+    expect(environment(name).REPO_TABLE_NAME).toEqual({ Ref: expect.stringMatching(/^RepoTable/) });
+    const read = statements(name).filter(statement => JSON.stringify(statement.Resource).includes('"RepoTable'));
+    expect(read.flatMap(statement => statement.Action)).toEqual(expect.arrayContaining(['dynamodb:GetItem']));
   });
 });

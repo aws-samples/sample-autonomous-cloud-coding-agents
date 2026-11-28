@@ -30,6 +30,7 @@ import * as sm from 'aws-cdk-lib/aws-secretsmanager';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
+import { FeedbackTracker } from './integration-parts';
 
 /** DLQ message retention for persistent-failure records (days). */
 const DLQ_RETENTION_DAYS = 14;
@@ -47,7 +48,7 @@ const FANOUT_MEMORY_MB = 256;
  * Properties for `FanOutConsumer` — the Phase 1b §8.9 fan-out plane
  * consumer that reads `TaskEventsTable` via DynamoDB Streams and
  * dispatches interesting events to non-interactive channels (Slack,
- * GitHub PR comments, email).
+ * GitHub PR comments).
  */
 export interface FanOutConsumerProps {
   /** The TaskEventsTable whose stream this consumer reads from. Must
@@ -58,8 +59,7 @@ export interface FanOutConsumerProps {
    * TaskTable — the GitHub dispatcher needs read access to resolve
    * repo + pr_number + existing github_comment_id for a task, and
    * write access to persist the comment_id + etag after an upsert.
-   * Optional: if omitted, the GitHub dispatcher skips (log-only) and
-   * Slack / Email continue to run as stubs.
+   * Optional: if omitted, the GitHub dispatcher skips (log-only).
    */
   readonly taskTable?: dynamodb.ITable;
 
@@ -90,21 +90,11 @@ export interface FanOutConsumerProps {
   readonly slackSecretArnPattern?: string;
 
   /**
-   * LinearWorkspaceRegistryTable — the Linear dispatcher reads this to
-   * resolve per-workspace OAuth tokens at comment-post time. Optional:
-   * when omitted, the dispatcher logs and skips so a deployment without
-   * Linear onboarding doesn't accumulate dangling IAM grants.
+   * The trackers whose issues the dispatchers comment on. Each one grants the
+   * fan-out Lambda what its dispatcher needs to resolve a per-workspace token;
+   * the dispatcher of a tracker that is left out logs and skips.
    */
-  readonly linearWorkspaceRegistryTable?: dynamodb.ITable;
-
-  /**
-   * Secrets Manager ARN-prefix pattern for per-workspace Linear OAuth
-   * bundles. Mirrors ``slackSecretArnPattern`` shape — typically
-   * ``bgagent-linear-oauth-*``. Required when ``linearWorkspaceRegistryTable``
-   * is set; without it the dispatcher would resolve the registry row but
-   * fail at the SM GetSecretValue call.
-   */
-  readonly linearOauthSecretArnPattern?: string;
+  readonly trackers?: readonly FeedbackTracker[];
 
   /**
    * Linear native agent-session channel (ADR-018 Phase 2). When true, sets
@@ -114,27 +104,6 @@ export interface FanOutConsumerProps {
    * IAM. Default false.
    */
   readonly linearAgentSessionsEnabled?: boolean;
-
-  /**
-   * JiraWorkspaceRegistryTable — the Jira dispatcher reads this to resolve
-   * per-tenant OAuth tokens at comment-post time (issue #573). Optional:
-   * when omitted, the dispatcher logs and skips so a deployment without
-   * Jira onboarding doesn't accumulate dangling IAM grants. Mirrors
-   * ``linearWorkspaceRegistryTable``.
-   */
-  readonly jiraWorkspaceRegistryTable?: dynamodb.ITable;
-
-  /**
-   * Secrets Manager ARN-prefix pattern for per-tenant Jira OAuth bundles.
-   * Mirrors ``linearOauthSecretArnPattern`` — typically
-   * ``bgagent-jira-oauth-*``. Required when ``jiraWorkspaceRegistryTable``
-   * is set; without it the dispatcher would resolve the registry row but
-   * fail at the SM GetSecretValue call. GetSecretValue + PutSecretValue
-   * because the resolver rotates an expiring token in place (the fan-out
-   * Lambda is trusted stack code, same as the orchestrator + webhook
-   * processor).
-   */
-  readonly jiraOauthSecretArnPattern?: string;
 
   /**
    * Maximum batch size delivered to the Lambda per invocation.
@@ -247,55 +216,12 @@ export class FanOutConsumer extends Construct {
       }));
     }
 
-    // Linear dispatcher plumbing. Same guarded shape as Slack/GitHub:
-    // a deployment without Linear onboarding gets no IAM grants and
-    // the dispatcher logs-and-skips on missing env. The registry table
-    // tells us per-workspace OAuth-secret ARN; the secret holds the
-    // access token that ``postIssueComment`` uses to drive
-    // ``commentCreate`` GraphQL.
-    if (props.linearWorkspaceRegistryTable) {
-      props.linearWorkspaceRegistryTable.grantReadData(this.fn);
-      this.fn.addEnvironment(
-        'LINEAR_WORKSPACE_REGISTRY_TABLE_NAME',
-        props.linearWorkspaceRegistryTable.tableName,
-      );
-    }
-    if (props.linearOauthSecretArnPattern) {
-      this.fn.addToRolePolicy(new iam.PolicyStatement({
-        // GetSecretValue + PutSecretValue: the resolver may rotate the
-        // OAuth token (writes the refreshed bundle back to SM) — same
-        // grants the LinearIntegration's webhook-processor Lambda holds
-        // for the same reason.
-        actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
-        resources: [props.linearOauthSecretArnPattern],
-      }));
-    }
+    // A tracker's dispatcher posts the final-status comment with a per-workspace token,
+    // and stores the token it rotates. A tracker that is not passed gets no grant.
+    for (const tracker of props.trackers ?? []) tracker.grantFeedback(this.fn, { writeBack: true });
 
     if (props.linearAgentSessionsEnabled) {
       this.fn.addEnvironment('LINEAR_AGENT_SESSIONS_ENABLED', 'true');
-    }
-
-    // Jira dispatcher plumbing (issue #573). Same guarded shape as Linear:
-    // a deployment without Jira onboarding gets no IAM grants and the
-    // dispatcher logs-and-skips on missing env. The registry table resolves
-    // the per-tenant OAuth-secret ARN; the secret holds the access token
-    // ``postIssueCommentAdf`` uses to POST the final-status comment via the
-    // Jira REST v3 API.
-    if (props.jiraWorkspaceRegistryTable) {
-      props.jiraWorkspaceRegistryTable.grantReadData(this.fn);
-      this.fn.addEnvironment(
-        'JIRA_WORKSPACE_REGISTRY_TABLE_NAME',
-        props.jiraWorkspaceRegistryTable.tableName,
-      );
-    }
-    if (props.jiraOauthSecretArnPattern) {
-      this.fn.addToRolePolicy(new iam.PolicyStatement({
-        // GetSecretValue + PutSecretValue: resolving an expiring token
-        // refreshes it in place — same grants the orchestrator + Jira
-        // webhook-processor Lambdas hold.
-        actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
-        resources: [props.jiraOauthSecretArnPattern],
-      }));
     }
 
     // Alarm on any record landing in the DLQ. Notifications are

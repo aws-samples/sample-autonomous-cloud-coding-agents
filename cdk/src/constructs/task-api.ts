@@ -24,14 +24,13 @@ import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
-import { Runtime, Architecture, type LayerVersion } from 'aws-cdk-lib/aws-lambda';
+import { Runtime, Architecture } from 'aws-cdk-lib/aws-lambda';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
-import { CEDAR_WASM_MIN_LAMBDA_MEMORY_MB } from './cedar-wasm-layer';
 
 /** Default task-record retention used for TTL computation (days). */
 const DEFAULT_TASK_RETENTION_DAYS = 90;
@@ -121,25 +120,16 @@ export interface TaskApiProps {
   readonly taskApprovalsTable?: dynamodb.ITable;
 
   /**
-   * Cedar-wasm Lambda layer (CedarWasmLayer.layer). Required by the
-   * handlers that parse blueprint policies (`GetPoliciesFn`,
-   * `CreateTaskFn`). Attached only when all approval-gate plumbing
-   * (TaskApprovalsTable, this layer, blueprint / cedar_policies on
-   * RepoTable) is present.
-   */
-  readonly cedarWasmLayer?: LayerVersion;
-
-  /**
    * Per-task per-minute nudge rate limit.
    * @default 10
    */
   readonly nudgeRateLimitPerMinute?: number;
 
   /**
-   * The DynamoDB repo config table. When provided, task creation checks
-   * that the target repository is onboarded before accepting the task.
+   * The DynamoDB repo config table. Task creation checks that the target
+   * repository is onboarded before accepting the task.
    */
-  readonly repoTable?: dynamodb.ITable;
+  readonly repoTable: dynamodb.ITable;
 
   /**
    * The DynamoDB webhook table. When provided, webhook endpoints are created.
@@ -191,12 +181,12 @@ export interface TaskApiProps {
   /**
    * Bedrock Guardrail ID for screening task input.
    */
-  readonly guardrailId?: string;
+  readonly guardrailId: string;
 
   /**
    * Bedrock Guardrail version for screening task input.
    */
-  readonly guardrailVersion?: string;
+  readonly guardrailVersion: string;
 
   /**
    * Number of days to retain completed task and event records before DynamoDB TTL deletes them.
@@ -252,8 +242,8 @@ export interface TaskApiProps {
   readonly lambdaMicrovmImageArn?: string;
 
   /**
-   * S3 bucket for task attachments. When provided, the create-task Lambda
-   * gets PutObject/DeleteObject grants and the bucket name as env var.
+   * S3 bucket for task attachments. When provided, the task-creation Lambdas
+   * (API and webhook) get PutObject/DeleteObject grants and the bucket name as env var.
    */
   readonly attachmentsBucket?: s3.IBucket;
 
@@ -367,6 +357,13 @@ function signedWebhookXssAlarm(scope: Construct, webAcl: wafv2.CfnWebACL, paths:
   });
 }
 
+/** Inline attachments: store the screened file, remove it when task creation fails after the upload. */
+function grantInlineAttachmentStorage(fn: lambda.NodejsFunction, bucket?: s3.IBucket): void {
+  if (!bucket) return;
+  bucket.grantPut(fn);
+  bucket.grantDelete(fn);
+}
+
 /**
  * CDK construct that creates the Task API — an API Gateway REST API backed by
  * Cognito User Pool authentication and Lambda handler integrations.
@@ -408,13 +405,17 @@ export class TaskApi extends Construct {
   public readonly appClientId: string;
 
   /**
+   * The Cognito authorizer of this API, for the constructs that add a Cognito route to it.
+   */
+  public readonly cognitoAuthorizer: apigw.IAuthorizer;
+
+  /**
    * Raised when many XSS-shaped bodies reach the signed webhook routes, where
    * the WAF counts rather than blocks them. Undefined when no webhook route is
    * deployed.
    */
   public readonly webhookXssCountedAlarm?: cloudwatch.Alarm;
 
-  // eslint-disable-next-line complexity -- predates the ceiling (55; 53 when it landed); must not grow
   constructor(scope: Construct, id: string, props: TaskApiProps) {
     super(scope, id);
 
@@ -590,7 +591,7 @@ export class TaskApi extends Construct {
     });
 
     // --- Cognito Authorizer ---
-    const cognitoAuthorizer = new apigw.CognitoUserPoolsAuthorizer(this, 'Authorizer', {
+    this.cognitoAuthorizer = new apigw.CognitoUserPoolsAuthorizer(this, 'Authorizer', {
       cognitoUserPools: [this.userPool],
     });
 
@@ -601,7 +602,7 @@ export class TaskApi extends Construct {
     });
 
     const cognitoAuthOptions: apigw.MethodOptions = {
-      authorizer: cognitoAuthorizer,
+      authorizer: this.cognitoAuthorizer,
       authorizationType: apigw.AuthorizationType.COGNITO,
       requestValidator,
     };
@@ -645,16 +646,12 @@ export class TaskApi extends Construct {
 
     // --- Lambda handlers ---
     const createTaskEnv: Record<string, string> = { ...commonEnv };
-    if (props.repoTable) {
-      createTaskEnv.REPO_TABLE_NAME = props.repoTable.tableName;
-    }
+    createTaskEnv.REPO_TABLE_NAME = props.repoTable.tableName;
     if (props.orchestratorFunctionArn) {
       createTaskEnv.ORCHESTRATOR_FUNCTION_ARN = props.orchestratorFunctionArn;
     }
-    if (props.guardrailId && props.guardrailVersion) {
-      createTaskEnv.GUARDRAIL_ID = props.guardrailId;
-      createTaskEnv.GUARDRAIL_VERSION = props.guardrailVersion;
-    }
+    createTaskEnv.GUARDRAIL_ID = props.guardrailId;
+    createTaskEnv.GUARDRAIL_VERSION = props.guardrailVersion;
     if (props.attachmentsBucket) {
       createTaskEnv.ATTACHMENTS_BUCKET_NAME = props.attachmentsBucket.bucketName;
     }
@@ -817,9 +814,7 @@ export class TaskApi extends Construct {
     }
 
     // Repo table read for onboarding gate
-    if (props.repoTable) {
-      props.repoTable.grantReadData(createTaskFn);
-    }
+    props.repoTable.grantReadData(createTaskFn);
     if (props.budgetTable) {
       props.budgetTable.grantReadData(createTaskFn);
       props.budgetTable.grantReadData(listTasksFn);
@@ -843,24 +838,18 @@ export class TaskApi extends Construct {
     }
 
     // Grant createTask permission to apply the guardrail
-    if (props.guardrailId) {
-      createTaskFn.addToRolePolicy(new iam.PolicyStatement({
-        actions: ['bedrock:ApplyGuardrail'],
-        resources: [
-          Stack.of(this).formatArn({
-            service: 'bedrock',
-            resource: 'guardrail',
-            resourceName: props.guardrailId,
-          }),
-        ],
-      }));
-    }
+    createTaskFn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['bedrock:ApplyGuardrail'],
+      resources: [
+        Stack.of(this).formatArn({
+          service: 'bedrock',
+          resource: 'guardrail',
+          resourceName: props.guardrailId,
+        }),
+      ],
+    }));
 
-    // Grant create-task Lambda put/delete on attachments bucket for inline upload + cleanup
-    if (props.attachmentsBucket) {
-      props.attachmentsBucket.grantPut(createTaskFn);
-      props.attachmentsBucket.grantDelete(createTaskFn);
-    }
+    grantInlineAttachmentStorage(createTaskFn, props.attachmentsBucket);
 
     // --- Confirm-uploads Lambda (presigned upload flow) ---
     let confirmUploadsFn: lambda.NodejsFunction | undefined;
@@ -873,10 +862,8 @@ export class TaskApi extends Construct {
       if (props.orchestratorFunctionArn) {
         confirmUploadsEnv.ORCHESTRATOR_FUNCTION_ARN = props.orchestratorFunctionArn;
       }
-      if (props.guardrailId && props.guardrailVersion) {
-        confirmUploadsEnv.GUARDRAIL_ID = props.guardrailId;
-        confirmUploadsEnv.GUARDRAIL_VERSION = props.guardrailVersion;
-      }
+      confirmUploadsEnv.GUARDRAIL_ID = props.guardrailId;
+      confirmUploadsEnv.GUARDRAIL_VERSION = props.guardrailVersion;
 
       confirmUploadsFn = new lambda.NodejsFunction(this, 'ConfirmUploadsFn', {
         entry: path.join(handlersDir, 'confirm-uploads.ts'),
@@ -903,18 +890,16 @@ export class TaskApi extends Construct {
         }));
       }
 
-      if (props.guardrailId) {
-        confirmUploadsFn.addToRolePolicy(new iam.PolicyStatement({
-          actions: ['bedrock:ApplyGuardrail'],
-          resources: [
-            Stack.of(this).formatArn({
-              service: 'bedrock',
-              resource: 'guardrail',
-              resourceName: props.guardrailId,
-            }),
-          ],
-        }));
-      }
+      confirmUploadsFn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['bedrock:ApplyGuardrail'],
+        resources: [
+          Stack.of(this).formatArn({
+            service: 'bedrock',
+            resource: 'guardrail',
+            resourceName: props.guardrailId,
+          }),
+        ],
+      }));
     }
 
     // Collect all Lambda functions for cdk-nag suppressions
@@ -1010,10 +995,8 @@ export class TaskApi extends Construct {
         NUDGES_TABLE_NAME: props.taskNudgesTable.tableName,
         NUDGE_RATE_LIMIT_PER_MINUTE: String(props.nudgeRateLimitPerMinute ?? 10),
       };
-      if (props.guardrailId && props.guardrailVersion) {
-        nudgeTaskEnv.GUARDRAIL_ID = props.guardrailId;
-        nudgeTaskEnv.GUARDRAIL_VERSION = props.guardrailVersion;
-      }
+      nudgeTaskEnv.GUARDRAIL_ID = props.guardrailId;
+      nudgeTaskEnv.GUARDRAIL_VERSION = props.guardrailVersion;
 
       const nudgeTaskFn = new lambda.NodejsFunction(this, 'NudgeTaskFn', {
         entry: path.join(handlersDir, 'nudge-task.ts'),
@@ -1028,18 +1011,16 @@ export class TaskApi extends Construct {
       props.taskTable.grantReadData(nudgeTaskFn);
       props.taskNudgesTable.grantReadWriteData(nudgeTaskFn);
 
-      if (props.guardrailId) {
-        nudgeTaskFn.addToRolePolicy(new iam.PolicyStatement({
-          actions: ['bedrock:ApplyGuardrail'],
-          resources: [
-            Stack.of(this).formatArn({
-              service: 'bedrock',
-              resource: 'guardrail',
-              resourceName: props.guardrailId,
-            }),
-          ],
-        }));
-      }
+      nudgeTaskFn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['bedrock:ApplyGuardrail'],
+        resources: [
+          Stack.of(this).formatArn({
+            service: 'bedrock',
+            resource: 'guardrail',
+            resourceName: props.guardrailId,
+          }),
+        ],
+      }));
 
       const nudge = taskById.addResource('nudge');
       nudge.addMethod('POST', new apigw.LambdaIntegration(nudgeTaskFn, { allowTestInvoke: false }), cognitoAuthOptions);
@@ -1047,11 +1028,8 @@ export class TaskApi extends Construct {
       allFunctions.push(nudgeTaskFn);
     }
 
-    // --- Cedar HITL approval endpoints (§7.1, §7.2, §7.6, §7.7) ---
-    // Activated only when the approvals table is provided. The layer
-    // attachment on GetPoliciesFn is conditional on the cedar-wasm
-    // layer being supplied — without it the handler cannot parse
-    // policies and the route is skipped.
+    // --- Cedar HITL approval endpoints (§7.1, §7.2, §7.7) ---
+    // Activated only when the approvals table is provided.
     if (props.taskApprovalsTable) {
       const approvalEnv: Record<string, string> = {
         ...commonEnv,
@@ -1150,52 +1128,6 @@ export class TaskApi extends Construct {
       );
 
       allFunctions.push(approveTaskFn, denyTaskFn, getPendingFn);
-
-      // GetPoliciesFn — GET /repos/{repo_id}/policies. Requires the
-      // cedar-wasm layer to parse blueprint policy text.
-      if (props.cedarWasmLayer && props.repoTable) {
-        const getPoliciesEnv: Record<string, string> = {
-          ...approvalEnv,
-          REPO_TABLE_NAME: props.repoTable.tableName,
-        };
-        const getPoliciesFn = new lambda.NodejsFunction(this, 'GetPoliciesFn', {
-          entry: path.join(handlersDir, 'get-policies.ts'),
-          handler: 'handler',
-          runtime: Runtime.NODEJS_24_X,
-          architecture: Architecture.ARM_64,
-          environment: getPoliciesEnv,
-          bundling: {
-            ...commonBundling,
-            // Keep cedar-wasm in the layer, not the function bundle.
-            // esbuild externalizes the import at build time; the layer
-            // provides it at runtime.
-            externalModules: [
-              ...(commonBundling.externalModules ?? []),
-              '@cedar-policy/cedar-wasm',
-              '@cedar-policy/cedar-wasm/nodejs',
-            ],
-          },
-          layers: [props.cedarWasmLayer],
-          // Cedar-wasm needs ≥512 MB per the §15.2 task 10 note; also
-          // the wasm binary is ~4 MB which pushes init time.
-          memorySize: CEDAR_WASM_MIN_LAMBDA_MEMORY_MB,
-          timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
-        });
-        props.taskApprovalsTable.grantReadData(getPoliciesFn);
-        props.repoTable.grantReadData(getPoliciesFn);
-        // Allow the rate-limit Update path on TaskApprovalsTable.
-        props.taskApprovalsTable.grantWriteData(getPoliciesFn);
-
-        const repos = this.api.root.addResource('repos');
-        const repoById = repos.addResource('{repo_id}');
-        const policies = repoById.addResource('policies');
-        policies.addMethod(
-          'GET',
-          new apigw.LambdaIntegration(getPoliciesFn, { allowTestInvoke: false }),
-          cognitoAuthOptions,
-        );
-        allFunctions.push(getPoliciesFn);
-      }
     }
 
     // --- Platform API key infrastructure (only when apiKeyTable is provided) ---
@@ -1366,9 +1298,7 @@ export class TaskApi extends Construct {
       // Webhook task creation needs same grants as createTask
       props.taskTable.grantReadWriteData(webhookCreateTaskFn);
       props.taskEventsTable.grantReadWriteData(webhookCreateTaskFn);
-      if (props.repoTable) {
-        props.repoTable.grantReadData(webhookCreateTaskFn);
-      }
+      props.repoTable.grantReadData(webhookCreateTaskFn);
       if (props.budgetTable) {
         props.budgetTable.grantReadData(webhookCreateTaskFn);
         webhookCreateTaskFn.addToRolePolicy(new iam.PolicyStatement({
@@ -1384,18 +1314,18 @@ export class TaskApi extends Construct {
         }));
       }
 
-      if (props.guardrailId) {
-        webhookCreateTaskFn.addToRolePolicy(new iam.PolicyStatement({
-          actions: ['bedrock:ApplyGuardrail'],
-          resources: [
-            Stack.of(this).formatArn({
-              service: 'bedrock',
-              resource: 'guardrail',
-              resourceName: props.guardrailId,
-            }),
-          ],
-        }));
-      }
+      webhookCreateTaskFn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['bedrock:ApplyGuardrail'],
+        resources: [
+          Stack.of(this).formatArn({
+            service: 'bedrock',
+            resource: 'guardrail',
+            resourceName: props.guardrailId,
+          }),
+        ],
+      }));
+
+      grantInlineAttachmentStorage(webhookCreateTaskFn, props.attachmentsBucket);
 
       // Secrets Manager grants — prefix-scoped
       const secretArnPrefix = Stack.of(this).formatArn({

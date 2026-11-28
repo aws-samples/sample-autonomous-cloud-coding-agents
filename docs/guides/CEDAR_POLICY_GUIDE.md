@@ -17,12 +17,13 @@ Both tiers use the same Cedar syntax. The annotation is all that differs.
 
 ## Where rules live
 
-A repository's rules come from its `Blueprint` construct (`security.cedarPolicies`, an array of Cedar policy strings) and from any registry Cedar policy modules attached to it. They are appended to the platform's built-in rules. Each string declares its own tier:
+A repository's rules come from its `Blueprint` construct (`security.cedarPolicies`, an array of Cedar policy strings) and from any registry Cedar policy modules attached to it. The same array can be written without a deploy: `bgagent repo onboard <owner/repo> --cedar-policy-file <path>` takes one rule file per flag, each file is one entry with one tier, and the files given replace the stored rules. The rules are appended to the platform's built-in rules. Each string declares its own tier:
 
 ```ts
-new Blueprint(this, 'PaymentsBlueprint', {
+// cdk/src/blueprints/definitions.ts, in resolveBlueprintDefinitions
+definitions.push({
+  id: 'PaymentsBlueprint',
   repo: 'acme/payments-api',
-  repoTable,
   security: {
     cedarPolicies: [
       `@tier("hard")
@@ -48,7 +49,7 @@ new Blueprint(this, 'PaymentsBlueprint', {
 - The soft rule asks for approval with a 900-second limit. The task's approval window can shorten it. The default gives 300 seconds, `--approval-timeout 600` gives 600, and `--approval-timeout 3600` gives 900. The remaining task lifetime can shorten the window further.
 - Disabling built-in soft rules and capping `--pre-approve` scopes per repository are not supported yet.
 
-`bgagent policies list --repo owner/repo` lists the built-in rules and the repository's inline Blueprint rules. To see the additional rules the agent loads at task start, inspect the registry modules referenced by `assets.cedarPolicyModules`. The built-in rules are in [`hard_deny.cedar`](../../agent/policies/hard_deny.cedar) and [`soft_deny.cedar`](../../agent/policies/soft_deny.cedar).
+The built-in rules are in [`hard_deny.cedar`](../../agent/policies/hard_deny.cedar) and [`soft_deny.cedar`](../../agent/policies/soft_deny.cedar). `bgagent repo show <owner/repo> --output json` prints what the repository's record holds: its inline rules (`cedar_policies`) and the registry modules it pins (`cedar_policy_modules`). To see the additional rules the agent loads at task start, inspect those modules. What counts is the record, not the Blueprint: a module list that the Blueprint leaves out stays pinned, and is detached with `assets: { cedarPolicyModules: [] }` and a deploy, or with `bgagent repo onboard <owner/repo> --unset cedar_policy_modules`.
 
 ## Vocabulary
 
@@ -66,7 +67,7 @@ Every tool call the agent makes is evaluated as a Cedar `(principal, action, res
 
 | Annotation | Required? | Values | Purpose |
 |---|---|---|---|
-| `@rule_id("...")` | **Yes on tiered rules** | Unique kebab/snake-case identifier | Names a rule in approval requests, audit events, and `bgagent policies show --rule X`. The engine rejects duplicate IDs at task start. |
+| `@rule_id("...")` | **Yes on tiered rules** | Unique kebab/snake-case identifier | Names a rule in approval requests and audit events. The engine rejects duplicate IDs at task start. |
 | `@tier("hard"\|"soft")` | **Yes on named rules** | Exactly one of `"hard"` or `"soft"` | Selects the tier. All rules in one Blueprint entry must use the same tier. |
 | `@approval_timeout_s("N")` | No | Integer seconds ≥ 30 | Caps the task's approval window when this soft rule matches. The task default is 300 seconds and `--approval-timeout` can set it to at most 3600 seconds. Values below 120 seconds trigger a warning and values below 30 seconds fail validation. |
 | `@severity("low"\|"medium"\|"high")` | No | One of three | Displayed in the approval prompt. Default: `medium`. |
@@ -141,7 +142,7 @@ If a hard-deny rule matches, any soft-deny matches are ignored — hard-deny sho
 
 ## What fails at task start
 
-The blueprint loader runs a probe Cedar evaluation before the task is admitted. Any of the following cause task-start failure with a clear error, never silent fall-through:
+The agent's policy engine loads the rules and runs a probe Cedar evaluation when the agent starts, after the task has been accepted. Any of the following cause task-start failure with a clear error, never silent fall-through:
 
 - Malformed Cedar syntax.
 - Duplicate `@rule_id` across hard + soft tiers.
@@ -150,7 +151,7 @@ The blueprint loader runs a probe Cedar evaluation before the task is admitted. 
 - `@approval_timeout_s` below the 30 s floor or non-integer.
 - Combined hard + soft Cedar text exceeding 64 KB.
 
-Fix the Blueprint, redeploy, resubmit.
+Fix the Blueprint and redeploy, or fix the rule file and run `bgagent repo onboard` again with every rule file of the repository (the files given replace the stored rules); then resubmit.
 
 ## Capacity and UX budgets
 
@@ -159,12 +160,14 @@ Fix the Blueprint, redeploy, resubmit.
 
 ## Testing policies before shipping
 
-Every repo blueprint is covered by **cross-engine parity fixtures** in [`contracts/cedar-parity/`](../../contracts/cedar-parity/). Before shipping a non-trivial rule change, drop a golden-file fixture that pins the expected `(decision, matching_rule_ids)` for a representative `(policies, input)` pair. Both the Python `cedarpy` engine and the TypeScript `@cedar-policy/cedar-wasm` engine run it — divergence fails CI. See the directory's README for the fixture schema.
+The agent's `PolicyEngine` is the only engine that loads and evaluates rules, so test your rules with it:
 
-For unit coverage of your own rules without the cross-engine guarantee, add a case to [`agent/tests/test_policy.py`](../../agent/tests/test_policy.py) using `PolicyEngine.evaluate_tool_use(...)`.
+- Keep each entry in a file, and pass that file to `bgagent repo onboard --cedar-policy-file` or its text to the Blueprint's `security.cedarPolicies` (for example with `fs.readFileSync`), so that what is tested is what is stored.
+- Add a case beside [`agent/tests/test_blueprint_cedar_routing.py`](../../agent/tests/test_blueprint_cedar_routing.py), which loads this guide's own example. Construct `PolicyEngine(task_type="new_task", repo="owner/repo", blueprint_policies=[...])` with the same text and assert on `evaluate_tool_use(...)`. If the rules cannot be loaded, construction raises the error a task would report at start.
+- Registry modules attached to the repository share the 64 KB budget and the rule-id space with the repository's own entries. They are not part of such a test unless their text is added to the list, and `bgagent repo onboard` does not count them when it checks the size of the rule files.
 
 ## Where to look next
 
 - [`docs/design/CEDAR_HITL_GATES.md`](../design/CEDAR_HITL_GATES.md) — full design: engine internals, fail-closed posture, late-approval races, concurrency.
 - [`agent/policies/hard_deny.cedar`](../../agent/policies/hard_deny.cedar) + [`agent/policies/soft_deny.cedar`](../../agent/policies/soft_deny.cedar) — the built-in rule set, good starting point for copy-paste.
-- [User guide — Approval gates](./USER_GUIDE.md#approval-gates-cedar-hitl) — the CLI side (`bgagent pending` / `approve` / `deny` / `policies`).
+- [User guide — Approval gates](./USER_GUIDE.md#approval-gates-cedar-hitl) — the CLI side (`bgagent pending` / `approve` / `deny`).

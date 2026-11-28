@@ -94,6 +94,16 @@ function scan() {
   };
 }
 
+/** Whether a regular file is at `path`: no when nothing is there, and a path that cannot be looked at stops the script. */
+function isFile(path) {
+  try {
+    return lstatSync(path).isFile();
+  } catch (err) {
+    if (err.code === 'ENOENT' || err.code === 'ENOTDIR') return false;
+    throw err;
+  }
+}
+
 // Tracked files only; the .semgrep/ fixtures trigger by design.
 let tracked;
 try {
@@ -102,6 +112,10 @@ try {
   cannotRun(`git ls-files failed: ${String(err.stderr ?? err.message).trim()}`);
 }
 const candidates = tracked.split('\0').filter((f) => f && !f.startsWith('.semgrep/'));
+// Bytes that are not valid UTF-8 decode to U+FFFD, and the decoded name is then
+// not the file's own: the file cannot be read under it, so the check stops.
+const notUtf8 = candidates.find((f) => f.includes('\uFFFD'));
+if (notUtf8) cannotRun(`a tracked file name holds U+FFFD, which is what bytes that are not valid UTF-8 decode to, so the check cannot tell which file it names: ${notUtf8} (the name as decoded)`);
 if (!candidates.some((f) => SOURCE_EXT.test(f))) cannotRun('git lists no tracked source file here. Run from the repository root.');
 
 const { found, scanned } = scan();
@@ -111,8 +125,10 @@ const { found, scanned } = scan();
 // Markdown by name or not: it picks its files by more than the name. No file is
 // left out for its content: semgrep reads a source file that holds a NUL byte.
 // A symbolic link and a submodule are left out: neither is a file, and semgrep
-// does not read through a link.
-const files = candidates.filter((f) => (!MARKDOWN.test(f) || scanned.has(f)) && lstatSync(f).isFile());
+// does not read through a link. So is a tracked path with no file behind it in
+// the working tree, deleted or under a directory that is now a file: git still
+// lists it, and there is nothing to read.
+const files = candidates.filter((f) => (!MARKDOWN.test(f) || scanned.has(f)) && isFile(f));
 const malformed = [];
 const unbound = [];
 let suppressions = 0;

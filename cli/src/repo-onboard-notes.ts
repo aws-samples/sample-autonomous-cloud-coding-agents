@@ -32,8 +32,7 @@ export function buildRepoOnboardNotes(input: RepoOnboardNotesInput): readonly st
   const notes: string[] = [
     'This command writes RepoTable only. With no per-repo overrides, tasks inherit the '
     + `platform compute backend (${input.defaultComputeType ?? 'agentcore'}) and GitHubTokenSecretArn (IAM for those is granted at CDK deploy).`,
-    'For Cedar policies, egress rules, custom runtime/token IAM, and durable lifecycle, '
-    + 'prefer a CDK Blueprint construct and `mise //cdk:deploy`.',
+    'Egress domains, and IAM for a custom runtime or token secret, still need a CDK deploy.',
   ];
 
   const computeType = input.config.compute_type ?? input.defaultComputeType ?? 'agentcore';

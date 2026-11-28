@@ -17,9 +17,6 @@
  *  SOFTWARE.
  */
 
-import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
-import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
-import { DeleteCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { resolveSoleActiveJiraTenant } from './shared/jira-tenant-registry';
 import {
@@ -28,10 +25,10 @@ import {
   verifyJiraRequestForTenant,
 } from './shared/jira-verify';
 import { logger } from './shared/logger';
-import { makeClient, makeDocClient } from './shared/ua';
+import { makeDocClient } from './shared/ua';
+import { dedupAndDispatch, jsonResponse } from './shared/webhook-dispatch';
 
 const ddb = makeDocClient();
-const lambdaClient = makeClient(LambdaClient);
 
 const WEBHOOK_SECRET_ARN = process.env.JIRA_WEBHOOK_SECRET_ARN!;
 const DEDUP_TABLE_NAME = process.env.JIRA_WEBHOOK_DEDUP_TABLE_NAME!;
@@ -230,69 +227,19 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       ? commentId!
       : payload.timestamp ?? 'unknown';
     const dedupKey = `${issueKey}#${webhookEvent}#${dedupDiscriminator}`;
-    const nowSeconds = Math.floor(Date.now() / 1000);
-    try {
-      await ddb.send(new PutCommand({
-        TableName: DEDUP_TABLE_NAME,
-        Item: {
-          dedup_key: dedupKey,
-          created_at: new Date().toISOString(),
-          ttl: nowSeconds + DEDUP_TTL_SECONDS,
-        },
-        ConditionExpression: 'attribute_not_exists(dedup_key)',
-      }));
-    } catch (err) {
-      if (err instanceof ConditionalCheckFailedException) {
-        logger.info('Jira webhook dedup hit — skipping reprocess', { dedup_key: dedupKey });
-        return jsonResponse(200, { ok: true, deduped: true });
-      }
-      throw err;
-    }
-
-    try {
-      await lambdaClient.send(new InvokeCommand({
-        FunctionName: PROCESSOR_FUNCTION_NAME,
-        InvocationType: 'Event',
-        Payload: new TextEncoder().encode(
-          JSON.stringify({ raw_body: event.body, verified_via_stack_wide: verifiedViaStackWide }),
-        ),
-      }));
-    } catch (invokeErr) {
-      logger.error('Failed to invoke Jira webhook processor', {
-        error: invokeErr instanceof Error ? invokeErr.message : String(invokeErr),
-        issue_id: issueId,
-        issue_key: issueKey,
-        webhookEvent,
-      });
-      // Roll back the dedup row so a future Atlassian retry can dispatch.
-      // Without this, all retries hit the dedup TTL and silently drop.
-      try {
-        await ddb.send(new DeleteCommand({
-          TableName: DEDUP_TABLE_NAME,
-          Key: { dedup_key: dedupKey },
-        }));
-      } catch (cleanupErr) {
-        logger.warn('Failed to roll back Jira webhook dedup row after invoke failure', {
-          error: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
-          dedup_key: dedupKey,
-        });
-      }
-      return jsonResponse(500, { error: 'Dispatch failed' });
-    }
-
-    return jsonResponse(200, { ok: true });
+    return await dedupAndDispatch({
+      label: 'Jira',
+      dedupTableName: DEDUP_TABLE_NAME,
+      dedupKey,
+      ttlSeconds: DEDUP_TTL_SECONDS,
+      processorFunctionName: PROCESSOR_FUNCTION_NAME,
+      payload: { raw_body: event.body, verified_via_stack_wide: verifiedViaStackWide },
+      logFields: { issue_id: issueId, issue_key: issueKey, webhookEvent },
+    });
   } catch (err) {
     logger.error('Jira webhook handler failed', {
       error: err instanceof Error ? err.message : String(err),
     });
     return jsonResponse(500, { error: 'Internal server error' });
   }
-}
-
-function jsonResponse(statusCode: number, body: Record<string, unknown>): APIGatewayProxyResult {
-  return {
-    statusCode,
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  };
 }

@@ -1,8 +1,7 @@
 // Built-in hard-deny policy set for Cedar HITL engine.
 //
-// Hard-deny is ABSOLUTE: no --pre-approve scope and no blueprint `disable:`
-// directive can bypass these rules. See docs/design/CEDAR_HITL_GATES.md
-// §12.5 and decision #8.
+// Hard-deny is ABSOLUTE: no --pre-approve scope can bypass these rules.
+// See docs/design/CEDAR_HITL_GATES.md §12.5 and decision #8.
 //
 // Every rule in this file MUST carry @tier("hard") + @rule_id annotations.
 // Adding a rule here expands the set of categorically-forbidden agent

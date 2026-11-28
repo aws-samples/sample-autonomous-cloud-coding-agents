@@ -1,20 +1,12 @@
-"""Unit tests for pure functions in entrypoint.py."""
+"""Unit tests for entrypoint.py and for pure functions of the modules behind it."""
 
 import os
 import tempfile
 
 import pytest
 
-from entrypoint import (
-    _build_system_prompt,
-    _discover_project_config,
-    assemble_prompt,
-    build_config,
-    format_bytes,
-    redact_secrets,
-    slugify,
-    truncate,
-)
+from config import build_config
+from context import assemble_prompt
 from models import (
     GitHubIssue,
     HydratedContext,
@@ -23,6 +15,24 @@ from models import (
     RepoSetup,
     TaskConfig,
 )
+from prompt_builder import build_system_prompt as _build_system_prompt
+from prompt_builder import discover_project_config as _discover_project_config
+from shell import redact_secrets, slugify, truncate
+from telemetry import format_bytes
+
+# ---------------------------------------------------------------------------
+# entrypoint
+# ---------------------------------------------------------------------------
+
+
+class TestEntrypoint:
+    def test_exposes_main_and_run_task_from_payload(self):
+        """Batch mode runs ``main``; the ECS boot command imports ``run_task_from_payload``."""
+        from entrypoint import main, run_task_from_payload
+
+        assert callable(main)
+        assert callable(run_task_from_payload)
+
 
 # ---------------------------------------------------------------------------
 # AGENT_WORKSPACE
@@ -30,24 +40,17 @@ from models import (
 
 
 class TestAgentWorkspace:
-    def test_defaults_to_workspace(self, monkeypatch):
-        monkeypatch.delenv("AGENT_WORKSPACE", raising=False)
-        # Re-import to pick up the env change
-        import importlib
-
-        import entrypoint
-
-        importlib.reload(entrypoint)
-        assert entrypoint.AGENT_WORKSPACE == "/workspace"
-
     def test_reads_env_var(self, monkeypatch):
-        monkeypatch.setenv("AGENT_WORKSPACE", "/mnt/workspace")
         import importlib
 
-        import entrypoint
+        import config
 
-        importlib.reload(entrypoint)
-        assert entrypoint.AGENT_WORKSPACE == "/mnt/workspace"
+        with monkeypatch.context() as env:
+            env.setenv("AGENT_WORKSPACE", "/mnt/workspace")
+            importlib.reload(config)
+            workspace = config.AGENT_WORKSPACE
+        importlib.reload(config)  # the tests that follow get the module as the environment has it
+        assert workspace == "/mnt/workspace"
 
 
 # ---------------------------------------------------------------------------

@@ -341,12 +341,12 @@ describe.each(['agentcore', 'ecs', 'lambda-microvm'] as const)('%s network extra
         const create = resource.Properties.Create;
         const serialized = typeof create === 'string' ? create
           : create['Fn::Join'][1].map((part: unknown) => typeof part === 'string' ? part : 'table-name').join('');
-        return JSON.parse(serialized).parameters.Item;
+        return JSON.parse(serialized).parameters;
       });
     expect(repositories).toHaveLength(2);
     for (const blueprint of BLUEPRINTS) {
-      const row = repositories.find(item => item.repo.S === blueprint.repo)!;
-      expect(row.egress_allowlist).toEqual({
+      const write = repositories.find(parameters => parameters.Key.repo.S === blueprint.repo)!;
+      expect(write.ExpressionAttributeValues[':egress_allowlist']).toEqual({
         L: blueprint.networking!.egressAllowlist!.map(S => ({ S })),
       });
     }

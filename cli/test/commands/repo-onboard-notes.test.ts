@@ -31,7 +31,7 @@ describe('buildRepoOnboardNotes', () => {
     });
 
     expect(notes.some((n) => n.includes('RepoTable only'))).toBe(true);
-    expect(notes.some((n) => n.includes('CDK Blueprint'))).toBe(true);
+    expect(notes).toContain('Egress domains, and IAM for a custom runtime or token secret, still need a CDK deploy.');
     expect(notes.some((n) => n.startsWith('WARNING:'))).toBe(false);
   });
 

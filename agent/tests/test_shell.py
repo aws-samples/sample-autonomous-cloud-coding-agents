@@ -12,6 +12,7 @@ import pytest
 
 from shell import (
     is_transient_cmd_failure,
+    put_log_event,
     redact_secrets,
     run_cmd,
     run_cmd_with_backoff,
@@ -744,3 +745,56 @@ class TestCommandEnvironment:
         monkeypatch.setenv("PYTHONPATH", _INSTRUMENTATION)
 
         assert self._seen_by_a_command(stream=False) == {}
+
+
+class _StubLogs:
+    """CloudWatch Logs as far as ``put_log_event`` uses it: a stream can be created once."""
+
+    class exceptions:
+        class ResourceAlreadyExistsException(Exception):
+            pass
+
+    def __init__(self):
+        self.streams: dict[tuple[str, str], list[dict]] = {}
+
+    def create_log_stream(self, *, logGroupName, logStreamName):
+        if (logGroupName, logStreamName) in self.streams:
+            raise self.exceptions.ResourceAlreadyExistsException(logStreamName)
+        self.streams[logGroupName, logStreamName] = []
+
+    def put_log_events(self, *, logGroupName, logStreamName, logEvents):
+        self.streams[logGroupName, logStreamName].extend(logEvents)
+
+
+class TestPutLogEvent:
+    def test_creates_the_stream_and_puts_one_event_on_it_per_call(self, monkeypatch):
+        monkeypatch.setenv("AWS_REGION", "eu-west-1")
+        monkeypatch.setenv("AWS_DEFAULT_REGION", "eu-central-1")
+        logs = _StubLogs()
+        started = int(time.time() * 1000)
+
+        with patch("aws_session.platform_client", return_value=logs) as client_for:
+            put_log_event("/abca/application", "metrics/t-1", "first")
+            # The stream exists now: CreateLogStream answers ResourceAlreadyExistsException.
+            put_log_event("/abca/application", "metrics/t-1", "second")
+
+        client_for.assert_called_with("logs", region_name="eu-west-1")
+        ((stream, events),) = logs.streams.items()
+        assert stream == ("/abca/application", "metrics/t-1")
+        assert [event["message"] for event in events] == ["first", "second"]
+        assert all(started <= event["timestamp"] <= int(time.time() * 1000) for event in events)
+
+    @pytest.mark.parametrize("call", ["create_log_stream", "put_log_events"])
+    def test_failure_other_than_an_existing_stream_reaches_the_caller(self, call, monkeypatch):
+        monkeypatch.setenv("AWS_DEFAULT_REGION", "eu-central-1")
+        logs = _StubLogs()
+
+        with (
+            patch("aws_session.platform_client", return_value=logs) as client_for,
+            patch.object(logs, call, side_effect=RuntimeError("denied")),
+            pytest.raises(RuntimeError, match="denied"),
+        ):
+            put_log_event("/abca/application", "metrics/t-1", "lost")
+
+        client_for.assert_called_once_with("logs", region_name="eu-central-1")
+        assert not any(logs.streams.values())

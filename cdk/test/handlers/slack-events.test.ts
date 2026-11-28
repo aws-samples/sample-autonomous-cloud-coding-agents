@@ -134,14 +134,13 @@ describe('slack-events handler', () => {
     expect(result.statusCode).toBe(401);
   });
 
-  test('answers url_verification during initial setup when signing secret missing', async () => {
+  test('answers url_verification with a 500 and no challenge when signing secret missing', async () => {
     smSend.mockImplementation(() => Promise.resolve({ SecretString: undefined }));
     invalidateSlackSecretCache(process.env.SLACK_SIGNING_SECRET_ARN!);
     const body = JSON.stringify({ type: 'url_verification', challenge: 'initial' });
-    // No signature provided — pre-setup flow
     const result = await handler(makeEvent(body, {}));
-    expect(result.statusCode).toBe(200);
-    expect(JSON.parse(result.body)).toEqual({ challenge: 'initial' });
+    expect(result.statusCode).toBe(500);
+    expect(JSON.parse(result.body)).toEqual({ error: 'Internal configuration error' });
   });
 
   test('rejects non-url_verification when signing secret missing', async () => {
@@ -153,7 +152,7 @@ describe('slack-events handler', () => {
   });
 
   test('refuses an unsigned url_verification when the signing secret is scheduled for deletion', async () => {
-    // Not "not populated yet": the secret exists and cannot be read, so the
+    // The secret exists and cannot be read, so the
     // request cannot be verified and must not be answered.
     smSend.mockImplementation(() => Promise.reject(Object.assign(
       new Error("You can't perform this operation on the secret because it was marked for deletion."),

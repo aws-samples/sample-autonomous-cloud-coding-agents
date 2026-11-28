@@ -83,7 +83,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       await lambdaClient.send(new InvokeCommand({
         FunctionName: PROCESSOR_FUNCTION_NAME,
         InvocationType: 'Event',
-        Payload: new TextEncoder().encode(JSON.stringify(payload)),
+        Payload: new TextEncoder().encode(JSON.stringify({ ...payload, source: 'slash' })),
       }));
     } catch (err) {
       logger.error('Failed to invoke Slack command processor', {

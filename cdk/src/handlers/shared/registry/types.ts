@@ -175,8 +175,7 @@ export type MalformedReason =
  * side — `buildSkillMd` emits every value through a YAML dumper that
  * quotes/escapes newlines, so no discovery field can smuggle a shadowing key;
  * surfacing a genuine parse failure here is about not masking corruption, not
- * about the injection defense. Mirrors `RegistryRecordMalformedError` in
- * `agent/src/registry/client.py`.
+ * about the injection defense.
  */
 export class RegistryRecordMalformedError extends Error {
   constructor(

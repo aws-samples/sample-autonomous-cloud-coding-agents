@@ -17,6 +17,8 @@
  *  SOFTWARE.
  */
 
+import * as fs from 'fs';
+import * as path from 'path';
 import {
   APPROVAL_METRIC_MILESTONES,
   METRIC_NAMESPACE,
@@ -27,14 +29,14 @@ import {
   normalizeRuleId,
   outcomeFromMilestone,
 } from '../../../src/handlers/shared/approval-metrics';
-import { BUILTIN_SOFT_DENY_POLICIES } from '../../../src/handlers/shared/builtin-policies';
-import { parseRules } from '../../../src/handlers/shared/cedar-policy';
 
 describe('approval-metrics: RULE_ID_ALLOWLIST', () => {
   // Only a soft-deny rule asks for an approval. One the platform ships must keep its own
   // name in the metric: listed nowhere, it would count as "other" and be logged as unknown.
   test('holds every soft-deny rule the platform ships', () => {
-    const shipped = parseRules(BUILTIN_SOFT_DENY_POLICIES).filter((rule) => rule.tier === 'soft').map((rule) => rule.rule_id);
+    const cedar = fs.readFileSync(path.join(__dirname, '..', '..', '..', '..', 'agent', 'policies', 'soft_deny.cedar'), 'utf8');
+    const uncommented = cedar.split('\n').filter((line) => !line.trimStart().startsWith('//')).join('\n');
+    const shipped = [...uncommented.matchAll(/@\s*rule_id\s*\(\s*"([^"]+)"\s*\)/g)].map((match) => match[1]).filter((ruleId) => ruleId !== 'base_permit');
 
     expect(shipped).toContain('force_push_any');
     expect(shipped.filter((ruleId) => !RULE_ID_ALLOWLIST.has(ruleId))).toEqual([]);

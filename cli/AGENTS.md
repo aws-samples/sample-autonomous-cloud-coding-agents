@@ -18,11 +18,11 @@ mise //cli:eslint:check     # ESLint without --fix: reports only; a warning fail
 ## Testing
 
 - **Full suite:** `cd cli && mise run test` or `mise //cli:build`. The coverage floors apply; they count every file in `src/`, tested or not.
-- **Single file:** `cd cli && npx jest --coverage=false test/commands/status.test.ts`
-- **Pattern:** `cd cli && npx jest --coverage=false --testPathPatterns=auth`
+- **Single file:** `mise //cli:testf -- test/commands/status.test.ts`
+- **Pattern:** `mise //cli:testf -- auth`
 - **Types:** `mise //cli:typecheck`. Jest only transpiles the tests (ts-jest), so this task is what type-checks `test/`; the build, `mise run lint` and the `cli-typecheck` commit hook run it. A fixture has to match the type from `src/types.ts` it is declared with.
 
-Without `--coverage=false` a partial run fails on the coverage floors after its tests pass.
+`testf` runs without coverage, and with `--ci` as the suite does (see **Snapshots** below). A partial run with plain `npx jest` fails on the coverage floors after its tests pass.
 
 Mock `ApiClient` in command tests; reset `process.exitCode` in `beforeEach`/`afterEach` (commands set exit codes — see `status.test.ts`).
 
@@ -30,7 +30,7 @@ The suite is sealed off from the machine it runs on (`test/setup/`):
 
 - **No home, no AWS identity** — `HOME` is an empty scratch directory and every `AWS_*` and `BGAGENT_*` variable is removed before the first test, so no test sees `~/.bgagent`, `~/.aws` or `~/.cdk.json`. A test that needs a config creates a directory and points `BGAGENT_CONFIG_DIR` at it (see `test/config.test.ts`).
 - **No network** — a connection to anything but loopback throws `cli tests must not open network connections…`. Mock the client or `fetch` call that sends the request; do not add hosts to the list.
-- **Snapshots** — the suite runs with `--ci`, which fails on a missing or changed snapshot instead of writing it. To add or update one on purpose: `npx jest --coverage=false -u <file>`, then commit the snapshot.
+- **Snapshots** — the suite runs with `--ci`, which fails on a missing or changed snapshot instead of writing it. To add or update one on purpose: `mise //cli:testf -- -u <file>`, then commit the snapshot.
 
 ## Primary locations
 
@@ -43,6 +43,18 @@ The suite is sealed off from the machine it runs on (`test/setup/`):
 | `cli/src/types.ts` | WRITE | API types (mirror of `cdk/.../types.ts`) |
 | `cli/test/` | WRITE | Jest tests |
 | `cli/test/emulator/` | WRITE | Emulator-backed tests (`*.emulator.ts`): real CLI code against a local AWS Emulator. Not part of the unit run: `mise run test:integration` from the repository root (needs Docker). Rules and known differences from AWS: [scripts/aws-emulator/README.md](../scripts/aws-emulator/README.md). |
+
+## Recipes
+
+The tables under "Where to make changes" in [../AGENTS.md](../AGENTS.md#where-to-make-changes) and in the [developer guide](../docs/guides/DEVELOPER_GUIDE.md#where-to-make-changes) say where the code is. A recipe lists what has to change together.
+
+### Add a command
+
+1. `cli/src/commands/<name>.ts`: a `make<Name>Command()` factory (see **New command** under Code style).
+2. Its registration in `cli/src/bin/bgagent.ts`, with `program.addCommand(...)`.
+3. For each request to the API, a method on `ApiClient` (`cli/src/api-client.ts`) with its types in `cli/src/types.ts`, the mirror of `cdk/src/handlers/shared/types.ts` (`mise run check:types-sync`).
+4. `cli/test/commands/<name>.test.ts`, with `ApiClient` mocked.
+5. The command in `docs/guides/USER_GUIDE.md` ("Using the CLI") and in `cli/README.md`.
 
 ## Code style
 

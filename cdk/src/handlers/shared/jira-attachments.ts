@@ -43,16 +43,15 @@
  * Tests: cdk/test/handlers/shared/jira-attachments.test.ts
  */
 
-import { PutObjectCommand, DeleteObjectsCommand, type S3Client } from '@aws-sdk/client-s3';
-import { screenImage, screenTextFile, AttachmentScreeningError, type ScreeningConfig } from './attachment-screening';
-import { estimateImageTokensFromBuffer } from './image-tokens';
+import type { S3Client } from '@aws-sdk/client-s3';
+import type { ScreeningConfig } from './attachment-screening';
+import { deleteStoredObjects, screenAndStore } from './attachment-store';
 import { extractDescriptionMarkdown } from './jira-adf';
 import { resolveJiraOauthToken } from './jira-oauth-resolver';
 import { logger } from './logger';
 import { isBotAuthoredComment } from './orchestration-comment-trigger';
-import { ATTACHMENT_OBJECT_KEY_PREFIX } from './storage-names';
-import { createAttachmentRecord, type PassedAttachmentRecord } from './types';
-import { isAllowedMimeType, isValidFilename, validateMagicBytes, MAX_ATTACHMENT_SIZE_BYTES, MAX_TOTAL_ATTACHMENT_SIZE_BYTES, MAX_ATTACHMENTS_PER_TASK } from './validation';
+import type { PassedAttachmentRecord } from './types';
+import { isAllowedMimeType, isValidFilename, MAX_ATTACHMENT_SIZE_BYTES, MAX_TOTAL_ATTACHMENT_SIZE_BYTES, MAX_ATTACHMENTS_PER_TASK } from './validation';
 
 /**
  * Safe Jira attachment id: digits/letters/`-`/`_` only. Jira attachment ids are
@@ -144,7 +143,6 @@ interface SelectedAttachment {
   readonly filename: string;
   readonly mimeType: string;
   readonly size: number;
-  readonly isImage: boolean;
 }
 
 /** File extension to fall back to when a filename can't be made safe. */
@@ -235,7 +233,7 @@ function selectAttachments(
       continue;
     }
     runningTotal += size;
-    selected.push({ id, filename: safeFilename(rawFilename, mimeType, index++), mimeType, size, isImage });
+    selected.push({ id, filename: safeFilename(rawFilename, mimeType, index++), mimeType, size });
   }
 
   return { selected, skipped };
@@ -422,132 +420,29 @@ export async function downloadScreenAndStoreJiraAttachments(
         );
       }
 
-      // The declared metadata MIME already passed the allowlist; confirm the
-      // bytes actually match it (blocks a masquerading/polyglot payload).
-      if (!validateMagicBytes(content, att.mimeType)) {
-        throw new JiraAttachmentError(
-          `Attachment '${att.filename}' content does not match its declared type '${att.mimeType}'.`,
-        );
-      }
-
-      // Screen through the same Bedrock Guardrail pipeline as inline/URL
-      // attachments. Any block or screening failure is fail-closed.
-      let screenResult;
-      try {
-        screenResult = att.isImage
-          ? await screenImage(content, att.mimeType, att.filename, ctx.screeningConfig)
-          : await screenTextFile(content, att.mimeType, att.filename, ctx.screeningConfig);
-      } catch (err) {
-        if (err instanceof AttachmentScreeningError) {
-          throw new JiraAttachmentError(
-            `Attachment '${att.filename}' was blocked by content screening: ${err.message}`,
-            { cause: err },
-          );
-        }
-        // Not a verdict on the file: the screening call itself failed (throttled,
-        // denied). The SDK's text can name the role and the account, and this
-        // error's message is posted on the Jira issue, so it stays in the log.
-        logger.error('Screening call failed for Jira attachment', {
-          jira_cloud_id: ctx.cloudId,
-          attachment_filename: att.filename,
-          error: err instanceof Error ? err.message : String(err),
-        });
-        throw new JiraAttachmentError(
-          `Attachment '${att.filename}' could not be screened: the content screening service is unavailable.`,
-          { cause: err },
-        );
-      }
-
-      if (screenResult.screening.status === 'blocked') {
-        throw new JiraAttachmentError(
-          `Attachment '${att.filename}' was blocked by content policy: ${screenResult.screening.categories.join(', ')}`,
-        );
-      }
-
-      // Upload the cleaned bytes under the same key layout as the inline/URL
-      // paths so downstream hydration/authorization is uniform.
-      const attachmentId = att.id;
-      const s3Key = `${ATTACHMENT_OBJECT_KEY_PREFIX}${ctx.userId}/${ctx.taskId}/${attachmentId}/${att.filename}`;
-      let putResult;
-      try {
-        putResult = await ctx.s3Client.send(new PutObjectCommand({
-          Bucket: ctx.bucketName,
-          Key: s3Key,
-          Body: screenResult.content,
-          ContentType: att.mimeType,
-        }));
-      } catch (s3Err) {
-        logger.error('S3 upload failed for Jira attachment', {
-          jira_cloud_id: ctx.cloudId,
-          attachment_filename: att.filename,
-          s3_key: s3Key,
-          error: s3Err instanceof Error ? s3Err.message : String(s3Err),
-          metric_type: 'jira_attachment_upload_failure',
-        });
-        throw new JiraAttachmentError(
-          `Attachment '${att.filename}' could not be stored.`,
-          { cause: s3Err },
-        );
-      }
-      uploadedKeys.push(s3Key);
-
-      const tokenEstimate = att.isImage
-        ? estimateImageTokensFromBuffer(screenResult.content, att.mimeType)
-        : undefined;
-
-      records.push(createAttachmentRecord({
-        attachment_id: attachmentId,
-        type: att.isImage ? 'image' : 'file',
-        content_type: att.mimeType,
+      // The declared MIME type already passed the allowlist, in selectAttachments.
+      records.push(await screenAndStore({
+        surface: 'Jira',
+        content,
+        mimeType: att.mimeType,
+        attachmentId: att.id,
         filename: att.filename,
-        s3_key: s3Key,
-        s3_version_id: putResult.VersionId ?? 'unversioned',
-        size_bytes: screenResult.content.length,
-        screening: { status: 'passed', screened_at: new Date().toISOString() },
-        checksum_sha256: screenResult.checksum,
-        ...(tokenEstimate !== undefined && { token_estimate: tokenEstimate }),
-      }) as PassedAttachmentRecord);
-
-      logger.info('Jira attachment downloaded, screened, and stored', {
-        jira_cloud_id: ctx.cloudId,
-        attachment_filename: att.filename,
-        s3_key: s3Key,
-      });
+        displayName: att.filename,
+        store: ctx,
+        uploadedKeys,
+        logFields: { jira_cloud_id: ctx.cloudId },
+        fail: (message, cause) => new JiraAttachmentError(message, cause === undefined ? undefined : { cause }),
+      }));
     }
   } catch (err) {
     // Fail-closed: a mid-batch failure must not orphan the objects already
     // uploaded this batch. Best-effort delete (the 90-day lifecycle is the
     // backstop) before re-throwing so the caller still rejects the task.
-    await deleteS3Objects(ctx.s3Client, ctx.bucketName, uploadedKeys);
+    await deleteStoredObjects(ctx.s3Client, ctx.bucketName, uploadedKeys, 'Jira');
     throw err;
   }
 
   return records;
-}
-
-/**
- * Best-effort deletion of S3 objects by key. Never throws — cleanup failure is
- * logged and left to the bucket's lifecycle policy. Mirrors
- * `create-task-core.cleanupOrphanedAttachments`.
- */
-async function deleteS3Objects(s3Client: S3Client, bucketName: string, keys: readonly string[]): Promise<void> {
-  if (keys.length === 0) return;
-  try {
-    const result = await s3Client.send(new DeleteObjectsCommand({
-      Bucket: bucketName,
-      Delete: { Objects: keys.map((Key) => ({ Key })) },
-    }));
-    if (result.Errors && result.Errors.length > 0) {
-      logger.error('Partial cleanup of Jira attachment objects — some remain', {
-        failed_keys: result.Errors.map((e) => e.Key),
-      });
-    }
-  } catch (err) {
-    logger.error('Cleanup of Jira attachment objects failed (90-day lifecycle is backstop)', {
-      keys,
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
 }
 
 /** Delete previously-stored pre-screened Jira attachment objects (exported for
@@ -557,7 +452,7 @@ export async function cleanupPreScreenedAttachments(
   bucketName: string,
   records: readonly PassedAttachmentRecord[],
 ): Promise<void> {
-  await deleteS3Objects(s3Client, bucketName, records.map((r) => r.s3_key).filter((k): k is string => Boolean(k)));
+  await deleteStoredObjects(s3Client, bucketName, records.map((r) => r.s3_key).filter((k): k is string => Boolean(k)), 'Jira');
 }
 
 /** A rendered issue comment folded into the task context. */

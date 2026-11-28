@@ -17,8 +17,9 @@
  *  SOFTWARE.
  */
 
-import { Command } from 'commander';
+import { Command, Option } from 'commander';
 import { assertComputeSubstrateDeployed, defaultComputeType } from '../compute-substrate';
+import { DEPLOYMENT_FEATURES_OUTPUT, featureNotDeployedError, publishedFeatureNames } from '../deployment-profile';
 import { CliError } from '../errors';
 import { assertModelIdUsable } from '../model-id';
 import { DEFAULT_STACK_NAME, redactSecretArn, resolveOperatorContext } from '../operator-context';
@@ -31,9 +32,11 @@ import {
   listRepoConfigs,
   loadRepoConfig,
   type RepoConfigRow,
+  type RepoSettings,
 } from '../repo-lookup';
 import { offboardRepo, onboardRepo } from '../repo-onboard';
 import { buildRepoOnboardNotes } from '../repo-onboard-notes';
+import { REPO_SETTINGS } from '../repo-settings';
 import { getStackOutput, getStackOutputs } from '../stack-outputs';
 
 /**
@@ -54,6 +57,10 @@ const STATUS_COLUMN_WIDTH = 10;
 const COMPUTE_COLUMN_WIDTH = 12;
 const MODEL_COLUMN_WIDTH = 28;
 const FIELD_LABEL_WIDTH = 28;
+
+function collect(value: string, previous: readonly string[] = []): readonly string[] {
+  return [...previous, value];
+}
 
 export function makeRepoCommand(): Command {
   const repo = new Command('repo')
@@ -162,26 +169,52 @@ export function makeRepoCommand(): Command {
       }),
   );
 
+  const columns = Object.keys(REPO_SETTINGS);
+  const onboard = new Command('onboard')
+    .description('Register a repository, or change its per-repo settings, in RepoTable (no deploy). '
+      + 'Always activates the repository, also when only --unset is given.')
+    .argument('<owner/repo>', 'Repository identifier')
+    .option('--region <region>', 'AWS region (defaults to configured region or AWS_REGION)')
+    .option('--stack-name <name>', 'CloudFormation stack name', DEFAULT_STACK_NAME);
+  for (const setting of Object.values(REPO_SETTINGS)) {
+    if (setting?.list) onboard.option(setting.flag, setting.description, collect);
+    else if (setting) onboard.option(setting.flag, setting.description);
+  }
   repo.addCommand(
-    new Command('onboard')
-      .description('Register or re-activate a repository in RepoTable (operator path; CDK Blueprint is canonical)')
-      .argument('<owner/repo>', 'Repository identifier')
-      .option('--region <region>', 'AWS region (defaults to configured region or AWS_REGION)')
-      .option('--stack-name <name>', 'CloudFormation stack name', DEFAULT_STACK_NAME)
-      .option('--compute-type <type>', 'Compute substrate: agentcore, ecs, or lambda-microvm')
-      .option('--runtime-arn <arn>', 'Override AgentCore runtime ARN (agentcore only)')
-      .option('--model <model-id>', 'Foundation model ID override')
-      .option('--token-secret-arn <arn>', 'Per-repo GitHub token Secrets Manager ARN')
-      .option('--max-turns <n>', 'Default max turns for tasks', parseInt)
-      .option('--poll-interval <ms>', 'Default agent poll interval in milliseconds', parseInt)
+    onboard
+      .option(
+        '--unset <column>',
+        `Remove a per-repo setting so that the platform default applies again: ${columns.join(', ')}. Repeatable`,
+        collect,
+        [] as readonly string[],
+      )
       .option('--output <format>', 'Output format: text or json', 'text')
       .action(async (repoId: string, opts) => {
         assertRepoFormat(repoId);
-        if (opts.computeType
-          && opts.computeType !== 'agentcore'
-          && opts.computeType !== 'ecs'
-          && opts.computeType !== 'lambda-microvm') {
-          throw new CliError("--compute-type must be 'agentcore', 'ecs', or 'lambda-microvm'.");
+        const given: Record<string, unknown> = {};
+        for (const [column, setting] of Object.entries(REPO_SETTINGS)) {
+          if (!setting) continue;
+          const option = new Option(setting.flag);
+          const raw = opts[option.attributeName()];
+          const raws: readonly string[] = raw === undefined ? [] : setting.list ? raw : [raw];
+          if (raws.length === 0) continue;
+          const values = raws.map((entry) => setting.parse(entry));
+          if (values.includes(undefined)) {
+            throw new CliError(`${option.long} must not be empty (use --unset ${column} to remove the setting).`);
+          }
+          if (setting.maxBytes !== undefined) {
+            const bytes = Buffer.byteLength(values.join(''));
+            if (bytes > setting.maxBytes) {
+              throw new CliError(`${option.long}: ${bytes} bytes exceed the limit of ${setting.maxBytes}.`);
+            }
+          }
+          given[column] = setting.list ? values : values[0];
+        }
+        const set = given as RepoSettings;
+        for (const column of opts.unset) {
+          if (!columns.includes(column)) {
+            throw new CliError(`--unset '${column}' is not a per-repo setting. Valid names: ${columns.join(', ')}.`);
+          }
         }
 
         const { region, stackName } = resolveOperatorContext(opts);
@@ -194,6 +227,7 @@ export function makeRepoCommand(): Command {
           BedrockModelIds: grantedModelIds,
           ComputeDeploymentMode: computeDeploymentMode,
           ComputeTypes: computeTypes,
+          [DEPLOYMENT_FEATURES_OUTPUT]: deployedFeatures,
         } = await getStackOutputs(region, stackName, [
           'RepoTableName',
           'RuntimeArn',
@@ -203,29 +237,31 @@ export function makeRepoCommand(): Command {
           'BedrockModelIds',
           'ComputeDeploymentMode',
           'ComputeTypes',
+          DEPLOYMENT_FEATURES_OUTPUT,
         ]);
         if (!tableName) {
           throw new CliError(
             `Stack '${stackName}' is missing output 'RepoTableName'. Re-deploy the CDK stack.`,
           );
         }
+        // A registry pin fails every task of the repository on a stack without the registry. A stack without the output predates it.
+        if ((set.mcp_servers || set.cedar_policy_modules || set.skills)
+          && deployedFeatures !== null && !publishedFeatureNames(deployedFeatures).includes('agentRegistry')) {
+          throw featureNotDeployedError('agentRegistry', stackName);
+        }
         const deployment = { stackName, computeSubstrate, computeDeploymentMode, computeTypes };
         // Check explicit input early; onboardRepo also checks any stored override.
-        assertComputeSubstrateDeployed({ ...deployment, computeType: opts.computeType });
+        assertComputeSubstrateDeployed({ ...deployment, computeType: set.compute_type });
 
         // Same reasoning as the substrate gate above: reuse an output already
         // fetched, and fail here rather than let a task die at turn 0 with an
         // AccessDenied that names nothing.
         //
-        // Trimmed HERE, not just inside the guard: validating a trimmed copy while
-        // writing the raw value means a trailing space passes the check and lands in
-        // the RepoTable, where it matches no real profile id. The granted set is
-        // trimmed for the same reason — `resolveBedrockModelIds` validates
-        // `trim().length` but stores the entry untrimmed, so an untrimmed grant would
-        // make the exact-match check falsely reject a model it just listed.
-        const modelId = opts.model?.trim() || undefined;
+        // The granted set is trimmed as the model id is — `resolveBedrockModelIds`
+        // validates `trim().length` but stores the entry untrimmed, so an untrimmed
+        // grant would make the exact-match check falsely reject a model it just listed.
         assertModelIdUsable({
-          modelId,
+          modelId: set.model_id,
           deployedGeo,
           stackName,
           ...(grantedModelIds && {
@@ -233,28 +269,27 @@ export function makeRepoCommand(): Command {
           }),
         });
 
-        const config = await onboardRepo(region, tableName, repoId, {
-          computeType: opts.computeType,
-          deployment,
-          runtimeArn: opts.runtimeArn,
-          modelId,
-          githubTokenSecretArn: opts.tokenSecretArn,
-          maxTurns: opts.maxTurns,
-          pollIntervalMs: opts.pollInterval,
+        const { config, previous } = await onboardRepo(region, tableName, repoId, { deployment, set, unset: opts.unset });
+        const change = !previous ? 'onboarded' : previous.status === 'removed' ? 're-activated' : 'updated';
+        const replaced = Object.entries(set).flatMap(([column, value]) => {
+          const stored = previous?.[column as keyof RepoSettings];
+          return Array.isArray(value) && Array.isArray(stored) && stored.length > 0
+            ? [`${column}: stored entries replaced (${stored.length} before, ${value.length} now).`]
+            : [];
         });
-        const notes = buildRepoOnboardNotes({
+        const notes = [...replaced, ...buildRepoOnboardNotes({
           config,
           platformRuntimeArn,
           platformGithubTokenSecretArn,
           defaultComputeType: defaultComputeType(deployment),
-        });
+        })];
 
         if (opts.output === 'json') {
-          console.log(JSON.stringify({ repo: redactRepoRow(config), notes }, null, 2));
+          console.log(JSON.stringify({ repo: redactRepoRow(config), change, notes }, null, 2));
           return;
         }
 
-        console.log(`Repository '${repoId}' onboarded (status: ${config.status}).`);
+        console.log(`Repository '${repoId}' ${change} (status: ${config.status}).`);
         console.log();
         for (const note of notes) {
           console.log(note);

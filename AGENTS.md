@@ -38,7 +38,7 @@ The date is the first day on which the entry no longer applies. From that day th
 
 Package commands: [cdk/AGENTS.md](./cdk/AGENTS.md), [cli/AGENTS.md](./cli/AGENTS.md), [web/AGENTS.md](./web/AGENTS.md), [agent/AGENTS.md](./agent/AGENTS.md), [docs/AGENTS.md](./docs/AGENTS.md).
 
-Run `mise tasks --all` for the full list. Prefer mise tasks over raw `jest`, `tsc`, or `cdk` for full suites; package guides show targeted `npx jest` / `uv run pytest` for single files.
+Run `mise tasks --all` for the full list. Prefer mise tasks over raw `jest`, `tsc`, or `cdk`. For one file, cdk, cli, web and agent each have a focused test task: `mise //<package>:testf -- <path>`, with the path relative to the package directory (the package guides show examples).
 
 ## Git workflow
 
@@ -73,6 +73,7 @@ Branch names: `(feat|fix|chore|docs)/<issue-number>-short-description` (e.g. `do
 | ADRs | `docs/decisions/` | `mise //docs:sync` | [docs/AGENTS.md](./docs/AGENTS.md) |
 | Deployment profiles / regional capabilities | `cdk/src/deployment/`, `contracts/deployment-capabilities.json` | **`cli/src/deployment-capabilities.ts`**, `cli/src/deployment-profile.ts`, `docs/guides/DEPLOYMENT_GUIDE.md#deployment-profiles`, `contracts/deployment-profile-vectors/` — the profile cases that the cdk and cli test suites both run | [cdk/AGENTS.md](./cdk/AGENTS.md), [cli/AGENTS.md](./cli/AGENTS.md) |
 | Bootstrap policies (CloudFormation execution role), bootstrap preflight | `cdk/src/bootstrap/` | `cdk/bootstrap/` — generated: run `mise //cdk:bootstrap:generate`, never edit by hand; the golden JSON in `docs/design/DEPLOYMENT_ROLES.md`; the hash snapshot `cdk/test/bootstrap/__snapshots__/version.test.ts.snap`; `REQUIRED_BOOTSTRAP_VERSION` in `cli/src/setup-account.ts` when the bundle version moves | [cdk/AGENTS.md](./cdk/AGENTS.md), [cli/AGENTS.md](./cli/AGENTS.md) |
+| Tracker integration (a system like Linear or Jira) | `cdk/src/constructs/<name>-integration.ts`, `cdk/src/handlers/<name>-*.ts`, `cli/src/commands/<name>.ts` | The steps of the recipe [Add a tracker integration](./cdk/AGENTS.md#add-a-tracker-integration): stack wiring, shared types, task-table index, feature catalog, bootstrap policy, resource ceiling | [cdk/AGENTS.md](./cdk/AGENTS.md), [cli/AGENTS.md](./cli/AGENTS.md) |
 | Solution User-Agent (#319) | `agent/src/ua.py`, `cdk/src/handlers/shared/ua.ts`, `cli/src/ua.ts` (keep the three identical) | `contracts/ua-vectors.json` — the solution id and the sanitizer vectors that all three test suites load | [agent/AGENTS.md](./agent/AGENTS.md), [cdk/AGENTS.md](./cdk/AGENTS.md), [cli/AGENTS.md](./cli/AGENTS.md) |
 | Monorepo CI / tasks | `mise.toml`, `scripts/`, `.github/workflows/` | `cdk/test/scripts/` — the jest suites of the gate scripts; `mise run check:scripts` type-checks the `.ts` ones | — |
 
@@ -94,7 +95,7 @@ Branch names: `(feat|fix|chore|docs)/<issue-number>-short-description` (e.g. `do
 - **Shell script that fails shellcheck** — `mise run check:shell` runs shellcheck over every `*.sh` file that git tracks or would add. The task is part of `mise run drift-prevention`, so of the build, and of `mise run security`, so of the push hook. The commit hook runs it when a `*.sh` file is staged. A new script that git does not ignore is checked before its first `git add`. A scratch script with a warning therefore fails the build and the push hook until it is fixed, removed or ignored. Errors and warnings fail (`--severity=warning`); `info` and `style` notes are not reported. The task reads no `.shellcheckrc` and no `SHELLCHECK_OPTS`. Fix the finding; for a false positive, put `# shellcheck disable=SC<code> # <reason>` on the line above the command.
 - **Optional feature read from context, or catalog edited in one place** — new optional modules belong in `DeploymentFeatures` (`cdk/src/deployment/features.ts`) and are gated in `AgentStack` from that selection, not with a fresh `tryGetContext`. Regional data lives in `contracts/deployment-capabilities.json`; mirror it into `cli/src/deployment-capabilities.ts` (parity test), and update `lastVerified` only when the AgentCore Regions page was checked again. The date records the last check of that page, not of the Lambda MicroVM Regions ([Regional availability](./docs/guides/DEPLOYMENT_GUIDE.md#regional-availability)). See [ADR-024](./docs/decisions/ADR-024-deployment-profiles.md).
 - **Broken link or misplaced image in Markdown** — `mise //docs:link-check` checks the relative links of every Markdown file in the repository, tracked or new (READMEs, `AGENTS.md` files and plugin skills included), and `mise //docs:build` fails on a broken link or anchor of the rendered site. An image shown in a mirrored doc must be a file in `docs/imgs/`, or `mise //docs:sync` fails. See [docs/AGENTS.md](./docs/AGENTS.md).
-- **Package-specific pitfalls** — API type drift, CDK test bundling, Cedar parity, generated docs: see package `AGENTS.md` files.
+- **Package-specific pitfalls** — API type drift, CDK test bundling, generated docs: see package `AGENTS.md` files.
 
 ## Tech stack
 
@@ -102,7 +103,7 @@ Branch names: `(feat|fix|chore|docs)/<issue-number>-short-description` (e.g. `do
 - **TypeScript compiler checks** (cdk, cli, web; `src/` and `test/`) — `strict`, plus `noImplicitOverride` (a member that overrides one of its base class needs the `override` modifier) and `noFallthroughCasesInSwitch`; unreachable code and unused labels are errors
 - **AWS CDK** `aws-cdk-lib` 2.x · `@aws-cdk/aws-bedrock-alpha`, `@aws-cdk/aws-bedrock-agentcore-alpha`, `cdk-nag`
 - **Test / lint** — Jest 30 (cdk, cli), Vitest (web), ESLint flat config (`cdk/eslint.config.mjs`, `cli/eslint.config.mjs`, `web/eslint.config.mjs`), Ruff (agent)
-- **Cedar** — `@cedar-policy/cedar-wasm` 4.12.0 (cdk) + `cedarpy==4.12.2` (agent); must bump together, with `contracts/cedar-parity/engines/versions.json`, which names the pair (`cdk/test/constructs/cedar-wasm-layer.test.ts` fails on any other pin)
+- **Cedar** — `cedarpy==4.12.2` in the agent is the only Cedar engine, pinned exactly; `agent/tests/test_cedarpy_annotations_contract.py` names the version, so a bump is a change made by hand
 - **Tooling** — mise, Yarn workspaces, prek hooks, Starlight docs sync
 
 ## Repository structure

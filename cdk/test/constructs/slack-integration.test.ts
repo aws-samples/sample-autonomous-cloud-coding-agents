@@ -45,6 +45,7 @@ describe('SlackIntegration construct', () => {
     new SlackIntegration(stack, 'SlackIntegration', {
       api,
       userPool,
+      linkAuthorizer: new apigw.CognitoUserPoolsAuthorizer(stack, 'TestAuthorizer', { cognitoUserPools: [userPool] }),
       taskTable,
       taskEventsTable,
     });
@@ -55,6 +56,19 @@ describe('SlackIntegration construct', () => {
   test('creates three Slack DynamoDB tables (installation + user mapping + channel mapping)', () => {
     // TaskTable + TaskEventsTable + SlackInstallation + SlackUserMapping + SlackChannelMapping = 5
     template.resourceCountIs('AWS::DynamoDB::Table', 5);
+  });
+
+  // The logical IDs of a deployed stack: under another ID or key the table is replaced and its rows are lost.
+  test.each<[string, string, string | undefined, string[]]>([
+    ['SlackIntegrationInstallationTableFEA78EC1', 'team_id', 'ttl', []],
+    ['SlackIntegrationUserMappingTable72394219', 'slack_identity', 'ttl', ['PlatformUserIndex']],
+    ['SlackIntegrationChannelMappingTable498891AF', 'channel_id', undefined, []],
+  ])('table %s: partition key %s, TTL attribute %s, indexes %j, DeletionPolicy Delete', (logicalId, partitionKey, ttlAttribute, indexNames) => {
+    const table = template.toJSON().Resources[logicalId];
+    expect(table).toMatchObject({ Type: 'AWS::DynamoDB::Table', DeletionPolicy: 'Delete' });
+    expect(table.Properties.KeySchema).toEqual([{ AttributeName: partitionKey, KeyType: 'HASH' }]);
+    expect(table.Properties.TimeToLiveSpecification?.AttributeName).toBe(ttlAttribute);
+    expect((table.Properties.GlobalSecondaryIndexes ?? []).map((index: { IndexName: string }) => index.IndexName)).toEqual(indexNames);
   });
 
   test('command processor receives the channel-mapping table env var', () => {
@@ -89,6 +103,19 @@ describe('SlackIntegration construct', () => {
     });
     template.hasResourceProperties('AWS::ApiGateway::Resource', {
       PathPart: 'interactions',
+    });
+  });
+
+  test('POST on link is behind the authorizer handed to the construct, the only one in the stack', () => {
+    const authorizers = Object.keys(template.findResources('AWS::ApiGateway::Authorizer'));
+    expect(authorizers).toEqual([expect.stringMatching(/^TestAuthorizer/)]);
+    const resources = Object.keys(template.findResources('AWS::ApiGateway::Resource', { Properties: { PathPart: 'link' } }));
+    expect(resources).toHaveLength(1);
+    template.hasResourceProperties('AWS::ApiGateway::Method', {
+      HttpMethod: 'POST',
+      ResourceId: { Ref: resources[0] },
+      AuthorizationType: 'COGNITO_USER_POOLS',
+      AuthorizerId: { Ref: authorizers[0] },
     });
   });
 

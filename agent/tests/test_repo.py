@@ -1512,16 +1512,6 @@ class TestPushCapabilityPreflight:
             resolved_workflow={"id": "default/agent-v1", "version": "1.0.0"},
         )
 
-    def test_unloadable_workflow_is_gated(self, monkeypatch):
-        # The post-hooks then fall back to opening a PR, which pushes.
-        from workflow import WorkflowValidationError
-
-        def _broken(workflow_id):
-            raise WorkflowValidationError("bad file")
-
-        monkeypatch.setattr("workflow.load_workflow", _broken)
-        self._raises(monkeypatch, _DENIED_403, resolved_workflow={"id": "x/y-v1", "version": "1"})
-
     def test_fine_grained_token_passes_on_the_servers_verdict(self, monkeypatch):
         # GitHub returns no X-OAuth-Scopes header for a fine-grained PAT; the dry
         # run reads no scopes, so it passes on the server's verdict alone.

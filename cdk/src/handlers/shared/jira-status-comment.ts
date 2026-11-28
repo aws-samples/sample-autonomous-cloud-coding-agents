@@ -129,14 +129,3 @@ export function renderJiraFinalStatusComment(
   paragraphs.push([{ text: `task ${args.taskId}`, em: true }]);
   return paragraphs;
 }
-
-/** Plain-text equivalent for the channel adapter's string comment contract. */
-export function renderJiraFinalStatusText(args: JiraFinalStatusInput): string {
-  return renderJiraFinalStatusComment(args)
-    .map((block) => ('code' in block
-      ? ['```', block.code, '```'].join('\n')
-      : block
-        .map((run) => run.href ? `[${run.text}](${run.href})` : run.text)
-        .join('')))
-    .join('\n');
-}

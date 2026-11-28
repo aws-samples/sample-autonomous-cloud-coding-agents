@@ -65,9 +65,9 @@ Agent Registry has no namespace concept, so ABCA folds `kind/namespace/name` int
 
 ## 4. Ports & adapters
 
-- **`RegistryClient` port** — substrate-neutral verbs (`publish`, `getRecord`, `listRecords`, `resolve`), one per language: TypeScript (`cdk/src/handlers/shared/registry/client.ts`) for handlers/orchestrator, Python (`agent/src/registry/client.py`, read-only) for the agent. **Nothing upstream imports the AWS SDK directly.**
-- **`AgentRegistryClient`** — the one implementation per language (`agent-registry-client.ts` / `agent_registry_client.py`). Owns: the native-vs-`CUSTOM` descriptor decision, the runtime-data convention, Option-A name encode/decode, the async-record polling, and the multi-call publish (§6).
-- **Stays ABCA-side (substrate-agnostic):** the `registry://` grammar (`ref.ts` / `ref.py`, mirrored by the `contracts/registry-resolution/` parity corpus), **semver resolution** (`resolver.ts` / `resolver.py` — Agent Registry stores a plain version string, so ranking is always in code), the orchestrator resolve-step, and the agent loaders.
+- **`RegistryClient` port** — substrate-neutral verbs (`publish`, `getRecord`, `listRecords`, `resolve`) in TypeScript (`cdk/src/handlers/shared/registry/client.ts`), for handlers/orchestrator. **Nothing upstream imports the AWS SDK directly.**
+- **`AgentRegistryClient`** — the one implementation (`agent-registry-client.ts`). Owns: the native-vs-`CUSTOM` descriptor decision, the runtime-data convention, Option-A name encode/decode, the async-record polling, and the multi-call publish (§6).
+- **Stays ABCA-side (substrate-agnostic):** the `registry://` grammar (`ref.ts`, pinned by the `contracts/registry-resolution/` corpus), **semver resolution** (`resolver.ts` — Agent Registry stores a plain version string, so ranking is always in code), the orchestrator resolve-step, and the agent loaders.
 - **Ceded to Agent Registry (not built):** MCP/A2A schema validation, hybrid search, EventBridge notifications, CloudTrail audit, and the governance *state machine* (§6). ABCA still *drives* that state machine — see the multi-call publish.
 
 ## 5. Provisioning
@@ -84,7 +84,7 @@ Agent Registry is enabled by default for compatibility. Customers that cannot us
 cdk deploy --context enableAgentRegistry=false
 ```
 
-The boolean or string value `false` omits the registry nested stack, registry API, IAM grants, `AGENT_REGISTRY_ID`, and registry outputs. Blueprints without `registry://` references continue to run normally. If a Blueprint still contains a registry reference, task startup fails closed with an error directing the operator to remove the references or deploy with `enableAgentRegistry=true`.
+The boolean or string value `false` omits the registry nested stack, registry API, IAM grants, `AGENT_REGISTRY_ID`, and registry outputs. Repositories without `registry://` references continue to run normally. If a repository's record still holds a registry reference (`bgagent repo show <owner/repo>` prints the record, and deleting a list from the Blueprint leaves it there), task startup fails closed with an error directing the operator to detach the list, with `assets: { <list>: [] }` and a deploy or with `bgagent repo onboard <owner/repo> --unset <column>`, or to deploy with `enableAgentRegistry=true`.
 
 The string form is case-sensitive: use lowercase `true` or `false`. Any other value fails synthesis with an actionable validation error.
 
@@ -189,7 +189,7 @@ registry://<kind>/<namespace>/<name>@<constraint>
   constraint = [\^~]?MAJOR.MINOR.PATCH[-prerelease]   # exact / caret / tilde only
 ```
 
-The strict grammar is implemented by `parseRef` (TS) and `parse_ref` (Python), kept in lockstep by the `contracts/registry-resolution/` parity corpus (dual-runner, mirroring `contracts/cedar-parity/`).
+The strict grammar is implemented by `parseRef` (`cdk/src/handlers/shared/registry/ref.ts`) and pinned by the `contracts/registry-resolution/` corpus.
 
 > **Note — two grammars in the tree.** The workflow validator's `_REGISTRY_REF` (`agent/src/workflow/validator.py`) is a deliberately *looser* acceptance check that also admits the legacy 2-segment illustrative form used by `contracts/workflow-validation/`. The strict grammar above is authoritative for #246 and is what resolution enforces.
 
@@ -220,7 +220,7 @@ For the length of a task that loads a registry `mcp_server`, the file is platfor
 ## 12. Test plan
 
 - **Resolver unit tests** (`cdk/test/handlers/shared/registry-resolver.test.ts`): semver match for exact/`^`/`~`; highest-version selection; prerelease ranking; no-match.
-- **Grammar parity corpus** (`contracts/registry-resolution/`): annotated `(ref) → verdict` fixtures run against **both** the Python `parse_ref` and the TS `parseRef`.
+- **Grammar corpus** (`contracts/registry-resolution/`): annotated `(ref) → verdict` fixtures run against `parseRef`.
 - **Adapter tests** (`agent-registry-client.test.ts`): 3-call publish, native runtime embedding, `CUSTOM` round-trip, immutability, resolve status-filter + semver + deprecation warning.
 - **Handler tests**: publish auth/validation/`409`, resolve `422` reasons, list grouping, show.
 - **Construct tests**: `registry.test.ts` (Provider wiring + IAM).

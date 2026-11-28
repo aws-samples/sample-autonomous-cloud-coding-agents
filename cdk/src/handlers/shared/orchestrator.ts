@@ -38,7 +38,7 @@ import { loadRepoConfig, type BlueprintConfig, type ComputeType } from './repo-c
 import { resolveUrlAttachments } from './resolve-url-attachments';
 import { APPROVAL_GATE_CAP_MAX, APPROVAL_GATE_CAP_MIN, type AgentAttachmentPayload, type AttachmentRecord, type TaskRecord } from './types';
 import { makeClient, makeDocClient } from './ua';
-import { computeTtlEpoch, DEFAULT_MAX_TURNS } from './validation';
+import { boundRepoLimit, computeTtlEpoch, DEFAULT_MAX_TURNS } from './validation';
 
 const ddb = makeDocClient();
 
@@ -420,8 +420,8 @@ export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintCo
     compute_type: resolveRepositoryBackend(repoConfig?.compute_type, process.env.DEPLOYED_COMPUTE_TYPE),
     runtime_arn: repoConfig?.runtime_arn ?? RUNTIME_ARN,
     model_id: repoConfig?.model_id,
-    max_turns: repoConfig?.max_turns,
-    max_budget_usd: repoConfig?.max_budget_usd,
+    max_turns: boundRepoLimit('max_turns', repoConfig?.max_turns, log),
+    max_budget_usd: boundRepoLimit('max_budget_usd', repoConfig?.max_budget_usd, log),
     memory_token_budget: repoConfig?.memory_token_budget,
     system_prompt_overrides: repoConfig?.system_prompt_overrides,
     github_token_secret_arn: repoConfig?.github_token_secret_arn ?? process.env.GITHUB_TOKEN_SECRET_ARN,
@@ -801,8 +801,8 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
 
   // Registry cedar_policy_module assets (#246, PR 3) reach the agent through the
   // SAME cedar_policies payload field as inline blueprint policies, so they are
-  // byte-identical from the PolicyEngine's view (the cedar-parity contract holds
-  // by construction). Inline blueprint policies come first, then resolved modules.
+  // byte-identical from the PolicyEngine's view. Inline blueprint policies come
+  // first, then resolved modules.
   //
   // Fail-closed: a pinned module whose cedar_text is empty/whitespace must fail
   // the task, not be silently dropped — a dropped policy is usually a *deny* rule,

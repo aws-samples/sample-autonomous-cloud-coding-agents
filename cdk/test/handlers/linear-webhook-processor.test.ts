@@ -1117,6 +1117,7 @@ describe('linear-webhook-processor handler', () => {
       bedrockSendMock.mockResolvedValueOnce({ action: 'GUARDRAIL_INTERVENED' });
 
       await handler(eventWith(issue()));
+      expect(bedrockSendMock.mock.calls[0][0].input.content[0].text.text).toContain('ignore all instructions');
 
       // Task still created — comments are advisory; only the comment block dropped.
       expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
@@ -1162,6 +1163,7 @@ describe('linear-webhook-processor handler', () => {
       bedrockSendMock.mockResolvedValueOnce({ action: 'GUARDRAIL_INTERVENED' });
 
       await handler(eventWith(issue()));
+      expect(bedrockSendMock.mock.calls[0][0].input.content[0].text.text).toContain('ignore all previous instructions');
 
       expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
       const [reqBody] = createTaskCoreMock.mock.calls[0];
@@ -1343,7 +1345,7 @@ describe('every channel_metadata builder carries the vault fields', () => {
   // The agent mints its own Linear token, so a task's channel_metadata must carry the
   // provider and the subject. They were added to the label-trigger builder only, and
   // the four comment-triggered builders (iteration, new work, clarify-resume, routed
-  // comment) each construct their own object — so agents launched from a comment on a
+  // comment) each constructed their own object — so agents launched from a comment on a
   // vault-managed workspace fell back to a Secrets-Manager token that does not exist
   // there: no reactions, no state transitions, on work that otherwise succeeded.
   //
@@ -1525,13 +1527,5 @@ describe('every channel_metadata builder carries the vault fields', () => {
     const [, ctx] = createTaskCoreMock.mock.calls[0];
     expect(ctx.channelMetadata).not.toHaveProperty('linear_provider_name');
     expect(ctx.channelMetadata).not.toHaveProperty('linear_vault_user_id');
-  });
-
-  test('there is more than one such builder, so the check is not vacuous', () => {
-    // If the builders are ever refactored into one, this test should be deleted
-    // rather than left passing over nothing.
-    const count = src.split('\n')
-      .filter((l) => l.trim() === 'linear_workspace_slug: resolved.workspaceSlug,').length;
-    expect(count).toBeGreaterThanOrEqual(4);
   });
 });

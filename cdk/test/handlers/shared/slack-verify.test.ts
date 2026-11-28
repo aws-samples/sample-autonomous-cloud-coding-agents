@@ -54,10 +54,8 @@ describe('getSlackSecret', () => {
   });
 
   test('rethrows the same error for a secret that is not a bot token', async () => {
-    // The signing secret and the OAuth credentials are read by ARN. Absent
-    // means "not populated yet" to their callers, and in that state the
-    // events endpoint answers a url_verification without a signature: a
-    // signing secret that cannot be read must stay an error.
+    // The signing secret and the OAuth credentials are read by ARN: one that
+    // cannot be read stays an error.
     smSendMock.mockRejectedValueOnce(Object.assign(
       new Error("You can't perform this operation on the secret because it was marked for deletion."),
       { name: 'InvalidRequestException' },

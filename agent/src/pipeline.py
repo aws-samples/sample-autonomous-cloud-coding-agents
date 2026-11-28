@@ -15,7 +15,7 @@ from pydantic import ValidationError
 
 import memory as agent_memory
 import task_state
-from channel_mcp import configure_channel_mcp, strip_linear_mcp_servers
+from channel_mcp import strip_linear_mcp_servers
 from config import (
     AGENT_WORKSPACE,
     DEFAULT_WORKFLOW_ID,
@@ -340,18 +340,13 @@ def _execute_agent_step(
         hydrated=hydrated,
         progress=progress,
         trajectory=trajectory,
-        # Pre-populate the products the pipeline already built so the
-        # clone_repo/hydrate_context handlers reuse them idempotently rather
-        # than redo setup or rebuild the prompt the pipeline already injected
-        # attachment context into.
+        # The products the pipeline already built, for the run_agent handler.
         setup=setup,
         system_prompt=system_prompt,
         user_prompt=prompt,
     )
     # Drive only the agentic step through the runner; clone, context assembly,
-    # and post-hooks stay on the inline path. only_kinds keeps the runner from
-    # re-running the deterministic steps the pipeline already owns (double clone
-    # / double PR).
+    # and post-hooks stay on the inline path.
     result = run_workflow(wf, ctx, only_kinds={"run_agent"})
 
     if ctx.agent_result is None:
@@ -596,7 +591,7 @@ def _apply_post_hook_gates(
     Decision (issue #301 acceptance criteria): the inline post-hook path
     CONSULTS each declared ``verify_build`` / ``verify_lint`` step's ``gate``
     through the runner's ``gate_status`` — the single place gate semantics live —
-    rather than routing the post-hooks through the runner's step handlers.
+    rather than routing the post-hooks through the runner.
     Routing through the runner would also change failure-path side effects (a
     gating ``verify_build`` with ``on_failure: fail`` stops the runner *before*
     ``ensure_pr``, stranding committed work with no PR), which is the broader
@@ -614,8 +609,7 @@ def _apply_post_hook_gates(
       (identical to ``gate_status`` with ``gate=None``).
     - An undeclared ``verify_lint`` never gates (legacy: lint is not used for
       terminal status unless a workflow opts in by declaring the step).
-    - ``workflow is None`` (post-hook reload failed) falls back to the legacy
-      gating for both, so a corrupt file cannot strand the agent's work.
+    - ``workflow is None`` falls back to the legacy gating for both.
     """
     from workflow import gate_status
 
@@ -669,7 +663,7 @@ def _step_milestone(workflow: Workflow | None, kind: str, phase: str, progress) 
     agent straight to ``pr_created``, and a watcher cannot tell that the build is
     running (the console's "Checking" stage). The name is the runner's: the
     step's ``name``, else its ``kind``. Nothing is emitted for a step the
-    workflow does not declare, or when the workflow could not be reloaded.
+    workflow does not declare.
     """
     step = next((s for s in workflow.steps if s.kind == kind), None) if workflow else None
     if step is not None:
@@ -1346,7 +1340,6 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
             #
             # Resolve the per-channel access token from Secrets Manager first
             # (react_task_started/comment_task_started read the env var it sets).
-            # configure_channel_mcp DOES need setup.repo_dir, so it stays below.
             if config.channel_source == "linear":
                 resolve_linear_api_token(config.channel_metadata)
             elif config.channel_source == "jira":
@@ -1408,22 +1401,15 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
 
             system_prompt = build_system_prompt(config, setup, hc, system_prompt_overrides)
 
-            # Channel-specific MCP wiring. Must happen before
-            # discover_project_config so the scan picks up the file we just
-            # wrote — and after the clone, since it writes .mcp.json into the
-            # repo dir. (Token resolution + the 👀/start ACK moved earlier so
-            # the user gets immediate feedback; see the Early ACK block above.)
-            configure_channel_mcp(setup.repo_dir, config.channel_source)
             # ADR-016 ENFORCEMENT: strip any Linear MCP server a repo may have
             # COMMITTED to its own .mcp.json before the SDK reads it — the prompt
             # prohibition ("you have no Linear tools") is not a security boundary,
             # and we export LINEAR_API_TOKEN + load project settings under
-            # bypassPermissions. Runs for every channel (defense-in-depth); never
-            # matches Jira's own entry.
+            # bypassPermissions. Runs for every channel (defense-in-depth).
             strip_linear_mcp_servers(setup.repo_dir)
 
             # Registry assets (#246): merge resolved mcp_server configs into
-            # .mcp.json alongside the channel MCP entry, before the project scan.
+            # .mcp.json, before the project scan.
             # Fail-closed (#246 Option C): apply_resolved_assets raises
             # RegistryAssetLoadError for any condition that would leave a pinned
             # asset unloaded (missing repo_dir, empty/invalid runtime, structurally
@@ -1529,33 +1515,17 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
             # declared gates (#301) the workflow declares.
             #
             # ``read_only`` comes from ``config`` — build_config already computed
-            # it (with its own fail-soft fallback) and it drove Cedar during the
-            # run, so reusing it keeps the post-hook on the SAME verdict rather
-            # than re-deriving a possibly-divergent one. The workflow file is
-            # reloaded for the ensure_pr STRATEGY and the verify-step GATES, and
-            # that reload is wrapped in the same WorkflowValidationError fallback
-            # build_config uses (config.py): this code path runs AFTER run_agent
-            # has already mutated / committed the tree, so a load failure here
-            # must NOT strand the work as FAILED with no PR — it falls back to
-            # the default "create" strategy + legacy regression-only gating and
-            # still opens the PR (PR review #296 finding #5).
-            from workflow import WorkflowValidationError, load_workflow
+            # it and it drove Cedar during the run. The ensure_pr STRATEGY and the
+            # verify-step GATES come from the workflow: the loader is memoized, so
+            # this is the object build_config loaded.
+            from workflow import load_workflow
 
             workflow_read_only = config.read_only
-            _workflow = None
-            try:
-                _workflow = load_workflow(
-                    (config.resolved_workflow or {}).get("id", DEFAULT_WORKFLOW_ID)
-                )
-                # The rule the push preflight in repo.setup_repo applies too.
-                ensure_pr_strategy = _workflow.ensure_pr_strategy
-            except WorkflowValidationError as exc:
-                log(
-                    "WARN",
-                    f"post-hook workflow reload failed ({exc}); defaulting ensure_pr "
-                    "strategy to 'create' so the agent's work is not stranded",
-                )
-                ensure_pr_strategy = "create"
+            _workflow = load_workflow(
+                (config.resolved_workflow or {}).get("id", DEFAULT_WORKFLOW_ID)
+            )
+            # The rule the push preflight in repo.setup_repo applies too.
+            ensure_pr_strategy = _workflow.ensure_pr_strategy
 
             # A REPO-FUL workflow whose primary terminal outcome is an ARTIFACT
             # clones the repo for context but produces a document, not a PR. Skip
@@ -1577,7 +1547,7 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
             # Workflow.delivers_repo_artifact (the resolved requires_repo, as in
             # build_config: a coding workflow may leave the line out), which the push
             # preflight in repo.setup_repo applies too, so a task it skips never pushes.
-            artifact_workflow = bool(_workflow and _workflow.delivers_repo_artifact)
+            artifact_workflow = _workflow.delivers_repo_artifact
             artifact_uri: str | None = None  # set by the artifact branch below
 
             # Clarify-before-spend (UX #4): a writeable, PR-producing task
@@ -2057,7 +2027,7 @@ def run_task_from_payload(payload: dict) -> dict:
     orchestrator payload (via the #502 S3 pointer). Previously the ECS boot
     command hand-listed a subset of ``run_task`` kwargs and silently dropped the
     rest — most visibly ``channel_source``/``channel_metadata``, whose absence
-    meant no Linear/Jira reactions and no channel MCP on ECS, plus ``build_command``,
+    meant no Linear/Jira reactions on ECS, plus ``build_command``,
     ``cedar_policies``, ``base_branch``/``merge_branches``, ``attachments``, etc.
 
     This maps the payload to ``run_task``'s real signature so no field can be

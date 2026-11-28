@@ -476,16 +476,12 @@ def _task_pushes(config: TaskConfig) -> bool:
     PR (``Workflow.delivers_repo_artifact``). A workflow whose ``ensure_pr`` step
     uses the ``resolve`` strategy only looks up the existing PR
     (``Workflow.ensure_pr_strategy``). Both are the rules the pipeline's post-hooks
-    use. When the workflow cannot be loaded the post-hooks fall back to opening a
-    PR, which pushes, so the check runs."""
+    use."""
     if config.read_only:
         return False
-    from workflow import WorkflowValidationError, load_workflow
+    from workflow import load_workflow
 
-    try:
-        workflow = load_workflow((config.resolved_workflow or {}).get("id", "coding/new-task-v1"))
-    except WorkflowValidationError:
-        return True
+    workflow = load_workflow((config.resolved_workflow or {}).get("id", "coding/new-task-v1"))
     return not (workflow.delivers_repo_artifact or workflow.ensure_pr_strategy == "resolve")
 
 

@@ -319,7 +319,7 @@ export function createHandlers(baseUrl: string, data: MockData, { latencyMs = 0 
         return error(400, 'VALIDATION_ERROR', 'Provide issue_number or task_description.');
       }
       if (body.repo === MOCK_NOT_ONBOARDED_REPO) {
-        return error(422, 'REPO_NOT_ONBOARDED', `Repository '${body.repo}' is not onboarded. Register it with a Blueprint before submitting tasks.`);
+        return error(422, 'REPO_NOT_ONBOARDED', `Repository '${body.repo}' is not onboarded. Register it with 'bgagent repo onboard' or a Blueprint before submitting tasks.`);
       }
       const now = new Date();
       const created = createSimulatedTask(data, {

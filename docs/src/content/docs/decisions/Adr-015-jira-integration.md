@@ -25,7 +25,7 @@ Build a **parity-level Jira Cloud integration** that mirrors Linear file-for-fil
 - **Migration fallback.** A tenant with no Forge configuration keeps the original 3LO REST writer. Once any app configuration exists, proxy/auth/permission failures never fall back to 3LO, because doing so would silently attribute a write to the setup user.
 - **Deterministic terminal feedback.** The shared DynamoDB Streams fan-out consumer owns the single terminal Jira comment, including crash and timeout outcomes.
 
-The channel selection in `agent/src/channel_mcp.py` becomes a small dispatch registry (`CHANNEL_MCP_BUILDERS`) rather than a hardcoded Linear gate, so adding a channel is an entry, not a rewrite.
+The channel selection in `agent/src/channel_mcp.py` becomes a small dispatch registry (`CHANNEL_MCP_BUILDERS`) rather than a hardcoded Linear gate, so adding a channel is an entry, not a rewrite. *(2026-11-26: the registry and its one entry, the non-functional Jira placeholder, were removed; `channel_mcp.py` keeps the Linear scrub.)*
 
 ### Outbound is REST through Forge, not MCP
 

@@ -9,6 +9,7 @@ import time
 from typing import TYPE_CHECKING
 
 from config import AGENT_WORKSPACE
+from shell import put_log_event
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -54,32 +55,8 @@ def _emit_metrics_to_cloudwatch(json_payload: dict) -> None:
         return
 
     try:
-        import contextlib
-
-        from aws_session import platform_client
-
-        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
-        client = platform_client("logs", region_name=region)
-
         task_id = json_payload.get("task_id", "unknown")
-        log_stream = f"metrics/{task_id}"
-
-        # Create the log stream (ignore if it already exists)
-        with contextlib.suppress(client.exceptions.ResourceAlreadyExistsException):
-            client.create_log_stream(logGroupName=log_group, logStreamName=log_stream)
-
-        client.put_log_events(
-            logGroupName=log_group,
-            logStreamName=log_stream,
-            logEvents=[
-                {
-                    "timestamp": int(time.time() * 1000),
-                    "message": json.dumps(json_payload),
-                }
-            ],
-        )
-    except ImportError:
-        print("[metrics] boto3 not available — skipping CloudWatch write", flush=True)
+        put_log_event(log_group, f"metrics/{task_id}", json.dumps(json_payload))
     except Exception as e:
         exc_type = type(e).__name__
         print(f"[metrics] CloudWatch Logs write failed (best-effort): {exc_type}: {e}", flush=True)

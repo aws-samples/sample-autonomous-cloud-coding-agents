@@ -68,8 +68,6 @@ Then apply principal-architect judgment over the diff:
 - **Correctness & contracts** — Logic, edge cases, race conditions. If shared API shapes in
   `cdk/src/handlers/shared/types.ts` changed, confirm `cli/src/types.ts` was kept in sync, and
   `web/src/core/api/types.ts` where the console mirrors the type.
-  If a Cedar engine pin moved, confirm *both* `cedarpy` and `@cedar-policy/cedar-wasm` moved
-  together and parity fixtures were refreshed.
 - **Security & least privilege** — IAM scoping, Cedar HITL gates, secrets handling, path-
   traversal guards, input validation. Fail closed.
 - **Bootstrap policy coverage (CDK deploy IAM)** — When the PR adds or changes constructs,

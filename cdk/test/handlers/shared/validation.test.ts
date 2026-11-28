@@ -19,6 +19,7 @@
 
 import { createAttachmentRecord } from '../../../src/handlers/shared/types';
 import {
+  boundRepoLimit,
   computeTtlEpoch,
   decodePaginationToken,
   encodePaginationToken,
@@ -358,6 +359,44 @@ describe('validateMaxBudgetUsd', () => {
     expect(validateMaxBudgetUsd('5')).toBeNull();
     expect(validateMaxBudgetUsd(true)).toBeNull();
     expect(validateMaxBudgetUsd({})).toBeNull();
+  });
+});
+
+describe('boundRepoLimit', () => {
+  const warn = jest.fn();
+
+  test.each([
+    ['max_turns', 0],
+    ['max_turns', -1],
+    ['max_turns', NaN],
+    ['max_turns', 0.5],
+    ['max_budget_usd', 0],
+    ['max_budget_usd', -5],
+  ] as const)('%s %p counts as not set', (column, value) => {
+    expect(boundRepoLimit(column, value, { warn })).toBeUndefined();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(`${column} is not a positive number; the platform default applies`, { original: value });
+  });
+
+  test.each([
+    ['max_turns', 1000, 500, 1, 500],
+    ['max_turns', 2.9, 2, 1, 500],
+    ['max_budget_usd', 0.001, 0.01, 0.01, 100],
+    ['max_budget_usd', 250, 100, 0.01, 100],
+  ] as const)('%s %p is held to %p', (column, value, clamped, min, max) => {
+    expect(boundRepoLimit(column, value, { warn })).toBe(clamped);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(`${column} clamped to safe range`, { original: value, clamped, min, max });
+  });
+
+  test.each<['max_turns' | 'max_budget_usd', unknown]>([
+    ['max_turns', 50],
+    ['max_turns', undefined],
+    ['max_turns', '50'],
+    ['max_budget_usd', 5],
+  ])('%s %p passes unchanged, without a warning', (column, value) => {
+    expect(boundRepoLimit(column, value as number | undefined, { warn })).toBe(value);
+    expect(warn).not.toHaveBeenCalled();
   });
 });
 

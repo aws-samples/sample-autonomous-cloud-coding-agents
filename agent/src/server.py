@@ -10,7 +10,6 @@ DynamoDB via ``task_state`` + ``ProgressWriter``.
 """
 
 import asyncio
-import contextlib as _ctx_for_debug
 import json
 import logging
 import os
@@ -43,7 +42,7 @@ from models import TaskResult
 from observability import propagate_correlation_context
 from pipeline import run_task
 from shared_constants import SHARED_CONSTANTS
-from shell import redact_secrets
+from shell import put_log_event, redact_secrets
 
 
 def _emit_stdout_line(stamped: str) -> None:
@@ -154,20 +153,7 @@ def _warn_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) -
     reported on stdout only, like a failed debug write.
     """
     try:
-        from aws_session import platform_client
-
-        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
-        client = platform_client("logs", region_name=region)
-
-        stream = f"server_warn/{task_id or 'server'}"
-        with _ctx_for_debug.suppress(client.exceptions.ResourceAlreadyExistsException):
-            client.create_log_stream(logGroupName=log_group, logStreamName=stream)
-
-        client.put_log_events(
-            logGroupName=log_group,
-            logStreamName=stream,
-            logEvents=[{"timestamp": int(_time_for_debug.time() * 1000), "message": stamped}],
-        )
+        put_log_event(log_group, f"server_warn/{task_id or 'server'}", stamped)
     except Exception as _exc:
         print(
             f"[server/warn/self] CloudWatch write failed: {type(_exc).__name__}: {_exc}",
@@ -178,20 +164,7 @@ def _warn_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) -
 def _debug_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) -> None:
     """Blocking CloudWatch write — only called from a background thread."""
     try:
-        from aws_session import platform_client
-
-        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
-        client = platform_client("logs", region_name=region)
-
-        stream = f"server_debug/{task_id or 'server'}"
-        with _ctx_for_debug.suppress(client.exceptions.ResourceAlreadyExistsException):
-            client.create_log_stream(logGroupName=log_group, logStreamName=stream)
-
-        client.put_log_events(
-            logGroupName=log_group,
-            logStreamName=stream,
-            logEvents=[{"timestamp": int(_time_for_debug.time() * 1000), "message": stamped}],
-        )
+        put_log_event(log_group, f"server_debug/{task_id or 'server'}", stamped)
     except Exception as _exc:
         # Never let debug logging break the request path.
         print(
@@ -276,38 +249,6 @@ async def lifespan(_application: FastAPI):
 app = FastAPI(title="Background Agent", version="1.0.0", lifespan=lifespan)
 
 
-def _extract_workload_access_token(request: Request) -> str:
-    """Read AgentCore's workload access token off the inbound request.
-
-    AgentCore Runtime delivers the token on `/invocations` requests under
-    one of two header spellings (both observed on a single request via
-    diagnostic logging):
-      1. ``WorkloadAccessToken`` — the SDK's documented header in
-         ``bedrock_agentcore.runtime.models::ACCESS_TOKEN_HEADER``.
-      2. ``x-amzn-bedrock-agentcore-runtime-workload-accesstoken`` —
-         undocumented but present on the wire; included for forward
-         compatibility.
-
-    The token must be propagated explicitly into the pipeline thread (see
-    ``_run_task_background``) because Python ``ContextVar`` is per-thread,
-    not per-request — the SDK's bundled ``_build_request_context``
-    middleware sets it in the request handler's async context, but our
-    pipeline runs in a separate ``threading.Thread`` spawned by
-    ``_spawn_background``. The new thread sees a fresh empty ContextVar
-    unless we re-set it on entry.
-
-    See aws/bedrock-agentcore-sdk-python#219 for the upstream tracking
-    issue (per-thread ContextVar) and the workaround pattern in
-    ``awslabs/agentcore-samples`` 07-Outbound_Auth_3LO_ECS_Fargate.
-    """
-    return (
-        request.headers.get("WorkloadAccessToken")
-        or request.headers.get("x-amzn-bedrock-agentcore-runtime-workload-accesstoken")
-        or request.headers.get("x-amzn-bedrock-agentcore-workload-access-token")
-        or ""
-    )
-
-
 class InvocationRequest(BaseModel):
     input: dict[str, Any]
 
@@ -380,42 +321,12 @@ def _run_task_background(
     channel_metadata: dict[str, str] | None = None,
     trace: bool = False,
     user_id: str = "",
-    workload_access_token: str = "",
     attachments: list[dict] | None = None,
     resolved_assets: list[dict] | None = None,
     microvm_id: str = "",
 ) -> None:
     """Run the agent task in a background thread."""
     global _background_pipeline_failed
-
-    # Re-establish the AgentCore workload-token ContextVar in this thread.
-    # Python ContextVar storage is per-thread, so the request-handler thread's
-    # context (where BedrockAgentCoreApp's _build_request_context would normally
-    # set this) doesn't propagate to here. Without this re-set,
-    # IdentityClient.get_api_key() callers like resolve_linear_api_token()
-    # short-circuit on a None workload token even when the platform delivered
-    # one. See aws/bedrock-agentcore-sdk-python#219 for the upstream design
-    # constraint that motivates this manual propagation.
-    if workload_access_token:
-        # Vestigial path from the parked AgentCore Identity flow. If the
-        # `bedrock-agentcore` SDK is missing or its module structure
-        # changes, fail open: the Linear token resolver falls back to
-        # reading per-workspace Secrets Manager directly, so the agent
-        # can still proceed without this ContextVar set. Catching
-        # (ImportError, AttributeError) here keeps the pipeline alive
-        # instead of bricking the entire task with no diagnostic when
-        # the upstream SDK rearranges modules.
-        try:
-            from bedrock_agentcore.runtime.context import BedrockAgentCoreContext
-
-            BedrockAgentCoreContext.set_workload_access_token(workload_access_token)
-        except (ImportError, AttributeError) as e:
-            _warn_cw(
-                f"bedrock_agentcore workload-token bridge unavailable "
-                f"({type(e).__name__}: {e}); the Linear reactions token will "
-                "resolve via Secrets Manager fallback",
-                task_id=task_id,
-            )
 
     _debug_cw(
         f"_run_task_background ENTERED task_id={task_id!r} "
@@ -627,13 +538,6 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
     if started_at and isinstance(started_at, str):
         os.environ["TASK_STARTED_AT"] = started_at
 
-    # AgentCore-injected workload access token (see _extract_workload_access_token
-    # for full rationale). Threaded into _run_task_background so the pipeline
-    # thread can call BedrockAgentCoreContext.set_workload_access_token() on entry
-    # — without that the IdentityClient.get_api_key path used by
-    # resolve_linear_api_token() returns None.
-    workload_access_token = _extract_workload_access_token(request)
-
     return {
         "repo_url": repo_url,
         "task_description": task_description,
@@ -666,7 +570,6 @@ def _extract_invocation_params(inp: dict, request: Request) -> dict:
         "channel_metadata": channel_metadata,
         "trace": trace,
         "user_id": user_id,
-        "workload_access_token": workload_access_token,
         "attachments": attachments,
     }
 
@@ -677,34 +580,25 @@ def _validate_required_params(params: dict) -> list[str]:
     Returns the list of missing field names (empty list = valid). A repo-bound
     workflow requires ``repo_url``; a repo-less workflow (``requires_repo:false``,
     #248 Phase 3) does not. All non-PR workflows need either an ``issue_number``
-    or ``task_description``; PR workflows (``coding/pr-iteration-v1`` /
-    ``coding/pr-review-v1`` / ``coding/restack-v1``) require ``pr_number``
-    instead and carry no description.
+    or ``task_description``; PR workflows (``Workflow.uses_pull_request``)
+    require ``pr_number`` instead and carry no description.
+
+    A workflow that cannot be loaded gets no verdict here, so the list is empty:
+    the pipeline thread fails the task, because ``config.build_config`` raises
+    the loader's error and ``_run_task_background`` records it.
     """
+    from workflow import WorkflowValidationError, load_workflow
+
     missing: list[str] = []
     workflow_id = (params.get("resolved_workflow") or {}).get("id", "coding/new-task-v1")
-
-    # Repo is mandatory only for repo-bound workflows. Resolve requires_repo from
-    # the workflow itself (authoritative, matches config.build_config); a load
-    # failure fails SAFE — assume a repo is required so a repo-bound task is never
-    # admitted without one.
-    requires_repo = True
     try:
-        from workflow import WorkflowValidationError, load_workflow
-
-        try:
-            requires_repo = load_workflow(workflow_id).resolved_requires_repo
-        except WorkflowValidationError:
-            # Expected failure modes (missing/corrupt/schema-invalid file, or a
-            # future registry-only id) — fail SAFE (repo required). A genuine
-            # programming error is NOT caught here so it surfaces loudly.
-            _warn_cw(f"could not resolve requires_repo for {workflow_id!r}; assuming repo required")
-    except ImportError:
-        _warn_cw(f"workflow loader unavailable for {workflow_id!r}; assuming repo required")
-    if requires_repo and not params.get("repo_url"):
+        workflow = load_workflow(workflow_id)
+    except WorkflowValidationError:
+        return []  # nosemgrep: py-silent-success-masking -- the task fails in build_config
+    if workflow.resolved_requires_repo and not params.get("repo_url"):
         missing.append("repo_url")
 
-    if workflow_id in ("coding/pr-iteration-v1", "coding/pr-review-v1", "coding/restack-v1"):
+    if workflow.uses_pull_request:
         if not params.get("pr_number"):
             missing.append("pr_number")
     else:
@@ -2101,9 +1995,9 @@ def microvm_run(request: Request, body: MicrovmRunHookRequest):
     snapshot's version-frozen env and silently ignore the values the orchestrator
     sent.
 
-    Session/workload headers are absent here (there is no AgentCore Runtime in
+    The session header is absent here (there is no AgentCore Runtime in
     front of this call), so ``_extract_invocation_params`` resolves an empty
-    ``session_id`` / workload token — the same posture the ECS backend already
+    ``session_id`` — the same posture the ECS backend already
     has, per ADR-021 sub-decision 3's identity delta.
 
     Sync ``def`` for the same reason as ``/ready``, and additionally because the

@@ -105,7 +105,7 @@ describe('slack-command-processor handler', () => {
   });
 
   test('slash command without source flag defaults to slash and falls through to default branch', async () => {
-    // Legacy shape: no source field — slash ack lambda forwards raw SlackCommandPayload
+    // A payload from an acknowledger that predates the source field.
     const legacy = {
       command: '/bgagent',
       text: 'unknown_sub',
@@ -118,7 +118,7 @@ describe('slack-command-processor handler', () => {
       trigger_id: '',
       response_url: 'https://hooks.slack.com/cmd/X',
     };
-    await handler(legacy);
+    await handler(legacy as Parameters<typeof handler>[0]);
     // Posted the default "Use @Shoof" hint back to the response_url
     const posted = fetchMock.mock.calls.find(
       ([url, opts]) =>
@@ -377,14 +377,6 @@ describe('slack-command-processor handler', () => {
     expect(putCall![0].input.Item.ttl).toBeLessThanOrEqual(nowSeconds + 600);
     const posted = fetchMock.mock.calls.find(
       ([_url, opts]) => String((opts as { body: string }).body).includes('bgagent slack link'),
-    );
-    expect(posted).toBeTruthy();
-  });
-
-  test('help subcommand replies with usage text', async () => {
-    await handler(slashCommand({ text: 'help' }));
-    const posted = fetchMock.mock.calls.find(
-      ([_url, opts]) => String((opts as { body: string }).body).includes('Using Shoof'),
     );
     expect(posted).toBeTruthy();
   });

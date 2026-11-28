@@ -22,6 +22,7 @@ import { Template, Match } from 'aws-cdk-lib/assertions';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import * as s3 from 'aws-cdk-lib/aws-s3';
 import { JiraIntegration } from '../../src/constructs/jira-integration';
 
 describe('JiraIntegration construct', () => {
@@ -51,14 +52,43 @@ describe('JiraIntegration construct', () => {
     new JiraIntegration(stack, 'JiraIntegration', {
       api,
       userPool,
+      linkAuthorizer: new apigw.CognitoUserPoolsAuthorizer(stack, 'TestAuthorizer', { cognitoUserPools: [userPool] }),
       taskTable,
       taskEventsTable,
       orchestrationTable,
       userConcurrencyTable,
       maxConcurrentTasksPerUser: 7,
+      attachmentsBucket: new s3.Bucket(stack, 'AttachmentsBucket'),
     });
 
     template = Template.fromStack(stack);
+  });
+
+  // The logical IDs of a deployed stack: under another ID or key the table is replaced and its rows are lost.
+  test.each<[string, string, string | undefined, string[]]>([
+    ['JiraIntegrationProjectMappingTable2A2BCC03', 'jira_project_identity', undefined, []],
+    ['JiraIntegrationUserMappingTable50D682D2', 'jira_identity', 'ttl', ['PlatformUserIndex']],
+    ['JiraIntegrationWorkspaceRegistryTableFF87F094', 'jira_cloud_id', undefined, []],
+    ['JiraIntegrationWebhookDedupTable06C09AAB', 'dedup_key', 'ttl', []],
+  ])('table %s: partition key %s, TTL attribute %s, indexes %j, DeletionPolicy Delete', (logicalId, partitionKey, ttlAttribute, indexNames) => {
+    const table = template.toJSON().Resources[logicalId];
+    expect(table).toMatchObject({ Type: 'AWS::DynamoDB::Table', DeletionPolicy: 'Delete' });
+    expect(table.Properties.KeySchema).toEqual([{ AttributeName: partitionKey, KeyType: 'HASH' }]);
+    expect(table.Properties.TimeToLiveSpecification?.AttributeName).toBe(ttlAttribute);
+    expect((table.Properties.GlobalSecondaryIndexes ?? []).map((index: { IndexName: string }) => index.IndexName)).toEqual(indexNames);
+  });
+
+  test('POST on link is behind the authorizer handed to the construct, the only one in the stack', () => {
+    const authorizers = Object.keys(template.findResources('AWS::ApiGateway::Authorizer'));
+    expect(authorizers).toEqual([expect.stringMatching(/^TestAuthorizer/)]);
+    const resources = Object.keys(template.findResources('AWS::ApiGateway::Resource', { Properties: { PathPart: 'link' } }));
+    expect(resources).toHaveLength(1);
+    template.hasResourceProperties('AWS::ApiGateway::Method', {
+      HttpMethod: 'POST',
+      ResourceId: { Ref: resources[0] },
+      AuthorizationType: 'COGNITO_USER_POOLS',
+      AuthorizerId: { Ref: authorizers[0] },
+    });
   });
 
   test('creates one Secrets Manager secret (webhook signing) — OAuth tokens are CLI-created at runtime', () => {
@@ -112,5 +142,15 @@ describe('JiraIntegration construct', () => {
         }),
       },
     });
+  });
+
+  test('the webhook processor may put and delete attachment objects and holds no other S3 access', () => {
+    const statements = Object.entries(template.findResources('AWS::IAM::Policy'))
+      .filter(([logicalId]) => logicalId.startsWith('JiraIntegrationWebhookProcessorFn'))
+      .flatMap(([, policy]) => policy.Properties.PolicyDocument.Statement as Array<{ Action: string | string[]; Resource: unknown }>);
+    const onTheBucket = statements.filter(statement => JSON.stringify(statement.Resource).includes('AttachmentsBucket'));
+    expect(onTheBucket.flatMap(statement => statement.Action)).toEqual(expect.arrayContaining(['s3:PutObject', 's3:DeleteObject*']));
+    const s3Actions = statements.flatMap(statement => statement.Action).filter(action => action.startsWith('s3:'));
+    expect(s3Actions.filter(action => !/^s3:(PutObject|Abort|DeleteObject)/.test(action))).toEqual([]);
   });
 });

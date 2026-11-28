@@ -37,7 +37,7 @@ class TestRunTaskFromPayload:
 
     def test_forwards_every_channel_field_to_the_agent(self):
         # THE regression: channel_source/channel_metadata must reach run_task so
-        # the Linear/Jira reaction + channel MCP fire on ECS.
+        # the Linear/Jira reaction fires on ECS.
         cm = {"linear_issue_id": "iss-1", "linear_oauth_secret_arn": "arn:sm:...:lin"}
         seen = _capture({"channel_source": "linear", "channel_metadata": cm})
         assert seen["channel_source"] == "linear"

@@ -18,28 +18,6 @@
  */
 
 /**
- * Pure renderer for the success reply to an ``@bgagent`` comment-iteration.
- * Its job is to tell an EDIT apart from a QUESTION so the reply doesn't claim an
- * update that never happened.
- *
- * Background: every ``@bgagent`` comment on a PR-bearing issue spawns a
- * ``coding/pr-iteration-v1`` task. When that task completes + builds, the
- * platform replied "✅ Updated — PR #N" UNCONDITIONALLY — even when the comment
- * was a QUESTION ("where is the login page?") and the agent made no commit. That
- * read as a false success: a "✅ Updated" with nothing updated and the question
- * unanswered.
- *
- * The agent now persists ``code_changed`` (did the branch HEAD advance?) and,
- * on a no-change run, ``answer_text`` (its reply to the question). This renderer
- * branches on that:
- *   - code changed (or unknown — back-compat) → "✅ Updated — PR #N." (as before)
- *   - no code changed                         → "💬 <answer>" (no false ✅)
- *
- * Pure + no I/O so both settle paths (the standalone fanout reply and the
- * orchestration reconciler) render identically and it is unit-testable.
- */
-
-/**
  * Max chars of the agent's answer surfaced inline before truncation. Matches the
  * agent's own persist cap (``task_state.py`` stores ``answer_text[:2000]``) so the
  * renderer never silently drops chars the agent already bounded — the agent is the
@@ -244,47 +222,6 @@ function terminalMetaLine(input: MaturingReplyInput): string {
   // approximate one — someone reconciling spend would have no reason to doubt it.
   if (t) parts.push(`total this PR: ${input.runningTotalPartial ? `at least ${t}` : t}`);
   return parts.length ? `_${parts.join(' · ')}_` : '';
-}
-
-export interface IterationReplyInput {
-  /**
-   * Did the iteration advance the PR branch (a real commit landed)?
-   *  - ``true``      → a normal edit; render the "✅ Updated" success.
-   *  - ``false``     → a no-op iteration (a question / nothing to change).
-   *  - ``undefined`` → unknown (pre-fix task, non-PR workflow, or the agent
-   *                    couldn't read the baseline). Treated as ``true`` so
-   *                    behaviour is unchanged for anything that doesn't opt in.
-   */
-  readonly codeChanged?: boolean;
-  /** The PR number, when resolvable (only used on the changed path). */
-  readonly prNumber?: number | null;
-  /** The agent's final answer text, surfaced on the no-change path. */
-  readonly answerText?: string;
-}
-
-/**
- * Render the reply for a SUCCESSFUL (completed + build-passing) iteration.
- * (Failures are rendered by a separate failure-reply renderer that arrives with
- * the activation slice — this is only the success branch, which is where the
- * false-"✅ Updated" lived.)
- */
-export function renderIterationSuccessReply(input: IterationReplyInput): string {
-  const noChange = input.codeChanged === false;
-
-  if (noChange) {
-    const answer = (input.answerText ?? '').trim();
-    if (answer) {
-      return `💬 ${truncate(answer, MAX_ANSWER_CHARS)}`;
-    }
-    // No commit AND no captured answer — be honest that nothing changed rather
-    // than claim an update. (Rare: the agent settled without a result text.)
-    return '💬 No code change was needed — nothing to update on this PR.';
-  }
-
-  // Changed (or unknown → back-compat): the existing success ack.
-  return typeof input.prNumber === 'number'
-    ? `✅ Updated — PR #${input.prNumber}.`
-    : '✅ Updated.';
 }
 
 /** True when this is a no-change iteration (drives the 👀→💬 reaction choice). */

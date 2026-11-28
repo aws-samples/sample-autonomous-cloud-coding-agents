@@ -21,7 +21,6 @@ import {
   isNoChangeIteration,
   isTerminalMaturingReply,
   preservePreviewSuffix,
-  renderIterationSuccessReply,
   renderMaturingReply,
   renderPreviewBlock,
 } from '../../../src/handlers/shared/iteration-reply';
@@ -157,6 +156,11 @@ describe('renderMaturingReply — the edit-in-place states', () => {
     expect(renderMaturingReply({ state: 'answered' })).toContain('No code change was needed');
   });
 
+  test('answered with a long answer → cut at 2000 characters, the ellipsis included', () => {
+    expect(renderMaturingReply({ state: 'answered', answerText: 'x'.repeat(5000) }))
+      .toBe(`💬 ${'x'.repeat(1999)}…`);
+  });
+
   test('failed → ❌ + sanitized reason', () => {
     expect(renderMaturingReply({ state: 'failed', failureReason: 'build failed: tsc error' }))
       .toContain('❌ build failed: tsc error');
@@ -173,64 +177,6 @@ describe('renderMaturingReply — the edit-in-place states', () => {
   test('on_it / working never carry a metadata line', () => {
     expect(renderMaturingReply({ state: 'on_it', costUsd: 1 })).not.toContain('$');
     expect(renderMaturingReply({ state: 'working', costUsd: 1, prNumber: 2 })).not.toContain('$');
-  });
-});
-
-describe('renderIterationSuccessReply — changed (a real edit)', () => {
-  test('code changed + PR number → "✅ Updated — PR #N"', () => {
-    expect(renderIterationSuccessReply({ codeChanged: true, prNumber: 290 }))
-      .toBe('✅ Updated — PR #290.');
-  });
-
-  test('code changed + no PR number → "✅ Updated."', () => {
-    expect(renderIterationSuccessReply({ codeChanged: true, prNumber: null }))
-      .toBe('✅ Updated.');
-  });
-
-  test('codeChanged UNDEFINED (a caller that never sets it) → back-compat "✅ Updated — PR #N"', () => {
-    // The whole point of the back-compat default: anything that doesn't opt in
-    // behaves exactly as before.
-    expect(renderIterationSuccessReply({ prNumber: 178 })).toBe('✅ Updated — PR #178.');
-    expect(renderIterationSuccessReply({})).toBe('✅ Updated.');
-  });
-
-  test('an answer is IGNORED when code changed (the PR link is the signal)', () => {
-    expect(renderIterationSuccessReply({ codeChanged: true, prNumber: 5, answerText: 'irrelevant' }))
-      .toBe('✅ Updated — PR #5.');
-  });
-});
-
-describe('renderIterationSuccessReply — no change (a question)', () => {
-  test('no change + an answer → "💬 <answer>" (NOT a false ✅ Updated)', () => {
-    const r = renderIterationSuccessReply({
-      codeChanged: false,
-      prNumber: 290,
-      answerText: 'The login page is at /login.html, but it is not yet linked from the nav.',
-    });
-    expect(r).toBe('💬 The login page is at /login.html, but it is not yet linked from the nav.');
-    expect(r).not.toContain('Updated');
-    expect(r).not.toContain('290'); // a question reply must not imply a PR update
-  });
-
-  test('no change + NO answer → an honest "no change needed" (still not ✅ Updated)', () => {
-    const r = renderIterationSuccessReply({ codeChanged: false, prNumber: 290 });
-    expect(r).toContain('No code change');
-    expect(r).not.toContain('✅');
-  });
-
-  test('a long answer is truncated with an ellipsis', () => {
-    const long = 'x'.repeat(5000);
-    const r = renderIterationSuccessReply({ codeChanged: false, answerText: long });
-    // Cap is MAX_ANSWER_CHARS=2000 (aligned with the agent's persist cap so the
-    // renderer never drops chars the agent already bounded); '💬 ' prefix + ellipsis.
-    expect(r.length).toBeLessThanOrEqual(2003);
-    expect(r.length).toBeGreaterThan(1700);
-    expect(r.endsWith('…')).toBe(true);
-  });
-
-  test('whitespace-only answer falls back to the honest no-change line', () => {
-    const r = renderIterationSuccessReply({ codeChanged: false, answerText: '   ' });
-    expect(r).toContain('No code change');
   });
 });
 

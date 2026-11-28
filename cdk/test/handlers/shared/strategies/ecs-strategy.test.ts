@@ -159,7 +159,7 @@ describe('EcsComputeStrategy', () => {
       ).rejects.toThrow('ECS RunTask returned no task: arn:test: RESOURCE:ENI');
     });
 
-    test('includes model_id and system_prompt_overrides from blueprintConfig', async () => {
+    test('includes model_id from blueprintConfig; the prompt travels only in the payload', async () => {
       mockSend.mockResolvedValueOnce({
         tasks: [{ taskArn: TASK_ARN }],
       });
@@ -181,8 +181,8 @@ describe('EcsComputeStrategy', () => {
       const envVars = call.input.overrides.containerOverrides[0].environment;
       expect(envVars).toEqual(expect.arrayContaining([
         { name: 'ANTHROPIC_MODEL', value: 'anthropic.claude-sonnet-4-6' },
-        { name: 'SYSTEM_PROMPT_OVERRIDES', value: 'Be concise' },
       ]));
+      expect(envVars.find((e: { name: string }) => e.name === 'SYSTEM_PROMPT_OVERRIDES')).toBeUndefined();
     });
   });
 

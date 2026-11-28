@@ -17,9 +17,7 @@ A workflow file is validated on more than one side of the platform. In Phases
 does not yet exist. This corpus exists **from Phase 1 anyway**, so the
 expected-verdict contract is fixed *before* Phase 4 (#246) adds a second,
 out-of-band publish-path validator (likely in another language). At that point
-both implementations must reproduce every verdict here — exactly the mechanism
-[`contracts/cedar-parity/`](../cedar-parity/README.md) uses for the two Cedar
-engines.
+both implementations must reproduce every verdict here.
 
 This is a neutral location both validators reach into; neither `agent/` nor the
 future registry service owns the contract — it is an agreement *between* them.

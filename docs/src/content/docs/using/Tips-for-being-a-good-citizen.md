@@ -8,7 +8,7 @@ The platform is a shared resource - compute, model tokens, and GitHub API calls 
 
 The agent is only as good as the context it receives. A well-prepared repository leads to faster, higher-quality results.
 
-- **Onboard first** - Repositories must be registered via a Blueprint construct before tasks can target them. If you get a `REPO_NOT_ONBOARDED` error, contact your platform administrator.
+- **Onboard first** - Repositories must be registered with `bgagent repo onboard` or a Blueprint before tasks can target them. If you get a `REPO_NOT_ONBOARDED` error, contact your platform administrator.
 - **Add a CLAUDE.md** - This is the single most impactful thing you can do. The agent loads project configuration from `CLAUDE.md`, `.claude/rules/*.md`, `.claude/settings.json`, and `.mcp.json` in your repository. Use these to document build commands, coding conventions, architecture decisions, and constraints. A good `CLAUDE.md` prevents the agent from guessing and reduces wasted turns. See the [Prompt guide](/sample-autonomous-cloud-coding-agents/customizing/prompt-engineering#repo-level-instructions) for examples.
 - **Keep your PAT aligned** - If tasks fail with `preflight_failed`, the GitHub PAT likely lacks the permissions the task type needs. Check the event's `reason` field and update the secret in Secrets Manager. A task whose error starts `PushCapabilityError:` (not `Pre-flight check failed:`) passed that check, but GitHub refused the token a push when the agent tested it right after cloning, before any work was done: the error names the cause and the fix, such as the token type and the permission to add. See [Repository preparation](/sample-autonomous-cloud-coding-agents/developer-guide/repository-preparation) for the full permissions table.
 
@@ -25,7 +25,7 @@ The quality of your task description directly affects the quality of the output.
 Every task consumes model tokens, compute time, and GitHub API calls. Setting limits upfront prevents runaway costs and keeps the platform available for your teammates.
 
 - **Set turn limits** - Use `--max-turns` (CLI) or `max_turns` (API) to cap the number of agent iterations (1-500). If not specified, the per-repo Blueprint default applies, falling back to the platform default of 100. Start low for simple tasks and increase if needed.
-- **Set cost budgets** - Use `--max-budget` (CLI) or `max_budget_usd` (API) to set a hard cost limit in USD ($0.01-$100). When the budget is reached, the agent stops regardless of remaining turns. If neither the task nor the Blueprint specifies a budget, no cost limit is applied - be intentional about this.
+- **Set cost budgets** - Use `--max-budget` (CLI) or `max_budget_usd` (API) to set a hard cost limit in USD ($0.01-$100). When the budget is reached, the agent stops regardless of remaining turns. If neither the task nor the repository's record specifies a budget, no cost limit is applied - be intentional about this.
 - **Check cost after completion** - The task status includes reported cost. Use this to calibrate your limits for future similar tasks.
 - **Don't waste compute on doomed tasks** - If your PAT is wrong, the repo isn't onboarded, or the PR is closed, the task will fail at pre-flight. Fix the setup before retrying.
 

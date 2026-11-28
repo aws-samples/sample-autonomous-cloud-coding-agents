@@ -68,6 +68,12 @@ interface Options {
   readonly noGit?: boolean;
   /** Symbolic links to make before `git add`: path of the link -> its target. */
   readonly links?: Record<string, string>;
+  /** Files to delete after `git add`, so that git still lists them. */
+  readonly deleted?: readonly string[];
+  /** Directories to replace by a regular file after `git add`, so that git still lists the files under them. */
+  readonly replaced?: readonly string[];
+  /** What a fake git answers `ls-files -z` with, in place of git's own list: it can hold a name that the disk refuses. */
+  readonly gitLists?: Buffer;
 }
 
 /** Run the script in a temp repo holding `files`, with a fake semgrep that reports `findings`. */
@@ -128,6 +134,19 @@ process.stdout.write(${JSON.stringify(JSON.stringify(report))});
     if (!options.noGit) {
       execFileSync('git', ['init', '--quiet'], { cwd: root, env, stdio: 'ignore' });
       execFileSync('git', ['add', '--all'], { cwd: root, env, stdio: 'ignore' });
+    }
+    for (const rel of options.deleted ?? []) fs.rmSync(path.join(root, rel));
+    for (const rel of options.replaced ?? []) {
+      fs.rmSync(path.join(root, rel), { recursive: true });
+      fs.writeFileSync(path.join(root, rel), 'now a file\n');
+    }
+    if (options.gitLists) {
+      // Written after `git init` and `git add`, which need git itself: this one is first on PATH.
+      fs.writeFileSync(
+        path.join(bin, 'git'),
+        `#!${process.execPath}\nprocess.stdout.write(Buffer.from('${options.gitLists.toString('base64')}', 'base64'));\n`,
+        { mode: 0o755 },
+      );
     }
 
     const semgrepArgs = (): string[] => JSON.parse(fs.readFileSync(path.join(bin, 'args.json'), 'utf-8'));
@@ -292,6 +311,33 @@ describe('check-masking-suppression-placement', () => {
       expect(result.stderr).toBe('');
       expect(result.status).toBe(0);
       expect(result.stdout).toContain('0 semgrep suppressions in 2 files name a rule and a reason');
+    });
+
+    test('passes over a tracked file that is deleted in the working tree and not staged', () => {
+      // git lists the deleted file first: the one after it is still read.
+      const result = run(
+        { 'src/a.ts': 'export const x = 1;\n', 'src/b.ts': tsCatch(` // ${WORD}: ${TS_RULE} -- a missing record is this lookup's null contract`) },
+        [['src/b.ts', 5, TS_RULE]],
+        { scanned: ['src/b.ts'], deleted: ['src/a.ts'] },
+      );
+
+      expect(result.stderr).toBe('');
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain('1 semgrep suppressions in 1 files name a rule and a reason');
+      expect(result.stdout).toContain('all 1 silent-success-masking suppressions bind to one of 1 findings');
+    });
+
+    test('passes over a tracked file under a directory that was replaced by a file', () => {
+      const result = run(
+        { 'lib/gone.ts': 'export const x = 1;\n', 'src/b.ts': tsCatch(` // ${WORD}: ${TS_RULE} -- a missing record is this lookup's null contract`) },
+        [['src/b.ts', 5, TS_RULE]],
+        { scanned: ['src/b.ts'], replaced: ['lib'] },
+      );
+
+      expect(result.stderr).toBe('');
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain('1 semgrep suppressions in 1 files name a rule and a reason');
+      expect(result.stdout).toContain('all 1 silent-success-masking suppressions bind to one of 1 findings');
     });
 
     test('reads a file that holds a NUL byte', () => {
@@ -466,6 +512,23 @@ describe('check-masking-suppression-placement', () => {
 
       expect(result.status).toBe(2);
       expect(result.stderr).toContain('git ls-files failed');
+    });
+
+    test('when git lists a file name that is not valid UTF-8', () => {
+      // No UTF-8 text holds the byte 0xff. A disk may refuse such a name, so a fake git lists it.
+      const result = run(files, findings, { gitLists: Buffer.from('src/a.ts\0scripts/b\xff.sh\0', 'latin1') });
+
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain('so the check cannot tell which file it names: scripts/b\uFFFD.sh');
+    });
+
+    test('when a tracked path cannot be looked at', () => {
+      // Only a path with no file behind it is passed over, and lstat refuses a path this long.
+      const result = run(files, findings, { gitLists: Buffer.from(`src/a.ts\0src/${'b'.repeat(5000)}.ts\0`) });
+
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).toBe('');
+      expect(result.stderr).toContain('ENAMETOOLONG');
     });
   });
 });

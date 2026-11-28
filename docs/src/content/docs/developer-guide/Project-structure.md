@@ -36,8 +36,8 @@ Everything that runs on AWS: the CDK stack, Lambda handlers, and DynamoDB table 
 | Change task validation or admission | `cdk/src/handlers/shared/validation.ts`, `cdk/src/handlers/shared/create-task-core.ts` |
 | Modify the orchestration flow | `cdk/src/handlers/orchestrate-task.ts`, `cdk/src/handlers/shared/orchestrator.ts` |
 | Change how context is assembled for the agent | `cdk/src/handlers/shared/context-hydration.ts` |
-| Add a DynamoDB table or modify a schema | `cdk/src/constructs/` (one construct per table) |
-| Onboard repos or change Blueprint behavior | `cdk/src/constructs/blueprint.ts`, `cdk/src/stacks/agent.ts` |
+| Add a DynamoDB table or modify a schema | `cdk/src/constructs/`: one construct per platform table (`*-table.ts`); an integration's tables are declared in its `*-integration.ts`, with the helpers of `integration-parts.ts` |
+| Onboard repos or change Blueprint behavior | `cdk/src/blueprints/definitions.ts` (the repositories), `cdk/src/constructs/blueprint.ts` |
 | Change webhook authentication | `cdk/src/handlers/webhook-authorizer.ts`, `cdk/src/handlers/webhook-create-task.ts` |
 | Add or update tests | `cdk/test/` mirrors `cdk/src/` - each handler and construct has a colocated test file |
 

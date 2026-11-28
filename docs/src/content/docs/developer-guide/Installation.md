@@ -204,7 +204,6 @@ After deployment, the stack emits these outputs (retrieve with `aws cloudformati
 | `BudgetTableName` | DynamoDB table for recurring user/team limits and monthly estimated spend |
 | `WebhookTableName` | DynamoDB table for webhook integrations |
 | `RepoTableName` | DynamoDB table for per-repo Blueprint config |
-| `CedarWasmLayerArn` | Lambda layer ARN for the Cedar WASM policy engine |
 | `TraceArtifactsBucketName` | S3 bucket for agent trace artifacts (7-day lifecycle) |
 | `GitHubTokenSecretArn` | Secrets Manager secret ARN for the GitHub PAT |
 | `OperationalAlertsTopicArn` | ARN of the `OperationalAlerts` topic, the SNS topic that every CloudWatch alarm of the stack notifies (Lambda errors, DLQ depth, monthly budgets, webhook screening, XSS matches on the signed webhook routes) |

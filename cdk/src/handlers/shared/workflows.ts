@@ -290,9 +290,8 @@ export function workflowRequiresRepo(id: string): boolean {
  * computes `needsWrite = !readOnly`, so `false` demands the *broader* token
  * permission set (contents:write), which is the conservative admission posture —
  * never under-checking the token. This is NOT the Cedar write-deny enforcement
- * axis (that is agent-side, keyed off `context.read_only`, and fails closed to
- * read-only for an unknown id in config.build_config); do not "align" this
- * default to `true` to match it — that would weaken the admission check.
+ * axis (that is agent-side, keyed off `context.read_only`); do not change this
+ * default to `true` — that would weaken the admission check.
  * Unknown ids are unreachable here anyway (create-task-core rejects unknown
  * refs with 400; orchestrate-task defaults a missing id to coding/new-task-v1).
  */

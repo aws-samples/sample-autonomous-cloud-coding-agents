@@ -124,15 +124,13 @@ const ddb = makeDocClient();
 
 /**
  * Combined result of a single RepoTable GetItem used by the submit
- * path. ``onboarded`` mirrors the old ``checkRepoOnboarded`` contract
- * (true when a row exists with ``status=active``, false otherwise);
- * ``config`` is the full RepoConfig when onboarded, null otherwise.
+ * path. ``onboarded`` is true when a row exists with ``status=active``,
+ * false otherwise; ``config`` is the full RepoConfig when onboarded,
+ * null otherwise.
  *
- * The submit flow previously issued TWO GetItems on the same key —
- * ``checkRepoOnboarded`` for the gate, then ``loadRepoConfig`` for
- * the blueprint cap. One call now covers both; the convenience
- * ``checkRepoOnboarded`` / ``loadRepoConfig`` helpers below delegate
- * to this so call sites that only want one answer stay readable.
+ * One ``lookupRepo`` call gives the submit flow both the gate verdict
+ * and the blueprint cap; the convenience ``loadRepoConfig`` helper below
+ * delegates to it so call sites that only want the config stay readable.
  */
 export interface RepoLookupResult {
   readonly onboarded: boolean;
@@ -186,19 +184,6 @@ export async function lookupRepo(repo: string): Promise<RepoLookupResult> {
     });
     throw new Error(`Unable to look up repo config for '${repo}': ${String(err)}`);
   }
-}
-
-/**
- * Check if a repository is onboarded (active) in the RepoTable.
- * Thin wrapper over ``lookupRepo`` for call sites that only need the
- * gate verdict (e.g. ``get-policies``). The submit path prefers
- * ``lookupRepo`` directly so it can reuse the RepoConfig payload
- * without a second GetItem.
- * @param repo - the "owner/repo" string.
- */
-export async function checkRepoOnboarded(repo: string): Promise<{ onboarded: boolean }> {
-  const { onboarded } = await lookupRepo(repo);
-  return { onboarded };
 }
 
 /**

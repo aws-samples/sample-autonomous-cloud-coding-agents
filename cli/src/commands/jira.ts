@@ -59,7 +59,7 @@ import {
 import { awaitOauthCallback, CALLBACK_URL, openBrowser, randomState } from '../oauth-callback-server';
 import { promptLine, promptSecret } from '../prompt-secret';
 import { loadActiveRepoConfig } from '../repo-lookup';
-import { findStackOutput } from '../stack-outputs';
+import { findStackOutput, requireStackOutputs } from '../stack-outputs';
 import { makeClient, makeDocClient } from '../ua';
 
 /** Default label that triggers an ABCA task when applied to a Jira issue. */
@@ -482,23 +482,13 @@ export function makeJiraCommand(): Command {
         const stackName = opts.stackName;
 
         // ─── Stack outputs ───────────────────────────────────────────────
-        const [
-          workspaceRegistryTable,
-          webhookSecretArn,
-        ] = await Promise.all([
-          findStackOutput(region, stackName, 'JiraWorkspaceRegistryTableName'),
-          findStackOutput(region, stackName, 'JiraWebhookSecretArn'),
-        ]);
-
-        const missing: string[] = [];
-        if (!workspaceRegistryTable) missing.push('JiraWorkspaceRegistryTableName');
-        if (!webhookSecretArn) missing.push('JiraWebhookSecretArn');
-        if (missing.length > 0) {
-          throw new CliError(
-            `Stack '${stackName}' is missing outputs ${missing.join(', ')}. `
-            + 'Re-deploy with the JiraIntegration CDK changes (mise //cdk:deploy).',
-          );
-        }
+        const {
+          JiraWorkspaceRegistryTableName: workspaceRegistryTable,
+          JiraWebhookSecretArn: webhookSecretArn,
+        } = await requireStackOutputs(region, stackName, [
+          'JiraWorkspaceRegistryTableName',
+          'JiraWebhookSecretArn',
+        ], 'Re-deploy with the JiraIntegration CDK changes (mise //cdk:deploy).');
 
         // ─── Resolve caller identity ─────────────────────────────────────
         const cognitoSub = cognitoSubFromSession();
@@ -872,19 +862,13 @@ export function makeJiraCommand(): Command {
         const config = loadConfig();
         const region = opts.region || config.region;
         const stackName = opts.stackName;
-        const [workspaceRegistryTable, webhookSecretArn] = await Promise.all([
-          findStackOutput(region, stackName, 'JiraWorkspaceRegistryTableName'),
-          findStackOutput(region, stackName, 'JiraWebhookSecretArn'),
-        ]);
-        const missing: string[] = [];
-        if (!workspaceRegistryTable) missing.push('JiraWorkspaceRegistryTableName');
-        if (!webhookSecretArn) missing.push('JiraWebhookSecretArn');
-        if (missing.length > 0) {
-          throw new CliError(
-            `Stack '${stackName}' is missing outputs ${missing.join(', ')}. `
-            + 'Re-deploy with the JiraIntegration CDK changes (mise //cdk:deploy).',
-          );
-        }
+        const {
+          JiraWorkspaceRegistryTableName: workspaceRegistryTable,
+          JiraWebhookSecretArn: webhookSecretArn,
+        } = await requireStackOutputs(region, stackName, [
+          'JiraWorkspaceRegistryTableName',
+          'JiraWebhookSecretArn',
+        ], 'Re-deploy with the JiraIntegration CDK changes (mise //cdk:deploy).');
 
         const ddb = makeDocClient({ region });
         const registry = await ddb.send(new GetCommand({
@@ -946,19 +930,13 @@ export function makeJiraCommand(): Command {
         const region = opts.region || config.region;
         const stackName = opts.stackName;
 
-        const [workspaceRegistryTable, userMappingTable] = await Promise.all([
-          findStackOutput(region, stackName, 'JiraWorkspaceRegistryTableName'),
-          findStackOutput(region, stackName, 'JiraUserMappingTableName'),
-        ]);
-        const missing: string[] = [];
-        if (!workspaceRegistryTable) missing.push('JiraWorkspaceRegistryTableName');
-        if (!userMappingTable) missing.push('JiraUserMappingTableName');
-        if (missing.length > 0) {
-          throw new CliError(
-            `Stack '${stackName}' is missing outputs ${missing.join(', ')}. `
-            + 'Re-deploy with the JiraIntegration CDK changes (mise //cdk:deploy).',
-          );
-        }
+        const {
+          JiraWorkspaceRegistryTableName: workspaceRegistryTable,
+          JiraUserMappingTableName: userMappingTable,
+        } = await requireStackOutputs(region, stackName, [
+          'JiraWorkspaceRegistryTableName',
+          'JiraUserMappingTableName',
+        ], 'Re-deploy with the JiraIntegration CDK changes (mise //cdk:deploy).');
 
         const callerCognitoSub = cognitoSubFromSession();
 

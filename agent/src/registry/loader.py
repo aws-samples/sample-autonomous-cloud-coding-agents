@@ -8,10 +8,9 @@ payload:
   * ``mcp_server`` → merge the connection config into ``.mcp.json`` (PR 2).
   * ``cedar_policy_module`` / ``skill`` → PR 3.
 
-The merge mirrors ``channel_mcp.configure_channel_mcp``: read the existing
-``.mcp.json`` (if any), overlay the registry servers without clobbering other
-entries, and write it back. Runs alongside the channel MCP wiring so the SDK's
-project-scoped scan picks up both.
+The merge reads the existing ``.mcp.json`` (if any), overlays the registry
+servers without clobbering other entries, and writes it back, so the SDK's
+project-scoped scan picks them up.
 """
 
 from __future__ import annotations
@@ -66,9 +65,8 @@ def _to_mcp_config(runtime: dict[str, Any], server_key: str) -> dict[str, Any]:
     entry shape the Claude Agent SDK actually consumes.
 
     The registry contract names the discriminant ``transport`` (``http`` / ``sse``
-    / ``stdio``), but the SDK's ``McpServerConfig`` (and the existing
-    ``channel_mcp`` entries) use the key ``type``. Writing ``transport``
-    unchanged produces an entry the agent does not recognize, so a published
+    / ``stdio``), but the SDK's ``McpServerConfig`` uses the key ``type``. Writing
+    ``transport`` unchanged produces an entry the agent does not recognize, so a published
     server following the documented contract would silently fail to load (#246).
     Map ``transport`` → ``type`` and pass the rest through untouched.
 

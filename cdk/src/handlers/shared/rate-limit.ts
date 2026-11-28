@@ -25,7 +25,7 @@
  * UTC `yyyymmddhhmm` produced by {@link formatMinuteBucket}. Centralising
  * the formatter here removes the per-handler duplication flagged in
  * PR review (S5) and keeps the bucket boundary identical across
- * approve, deny, get-pending, get-policies, and nudge-task.
+ * approve, deny, get-pending, and nudge-task.
  */
 
 /**

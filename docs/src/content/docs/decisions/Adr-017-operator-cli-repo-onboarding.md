@@ -3,7 +3,7 @@ title: "ADR-017: Operator CLI repo onboarding"
 ---
 
 **Status:** accepted
-**Date:** 2026-06-22
+**Date:** 2026-06-22 · amended 2026-11-26
 
 ## Context
 
@@ -39,3 +39,14 @@ Vision tenet 7 (observable, attributable) expects config-changing operations to 
 
 - Structured audit events for `repo onboard` / `offboard` (and eventual `POST /v1/repos`).
 - REST API for repo CRUD when operator IAM is not the desired control plane.
+
+## Amendment (2026-11-26): the CLI writes every per-repo setting that is plain data
+
+Under decision 1 the CLI set six settings (compute type, runtime ARN, model, token secret, turn limit, poll interval) and left the rest to a `Blueprint` and a deploy. Most of the rest is plain data in the repository's `RepoTable` record: it creates no AWS resource, yet changing it took a deploy. The CLI now writes it. The amendment has two points, so that the second can be withdrawn on its own:
+
+1. **Plain settings.** `bgagent repo onboard` also sets the cost budget, the memory token budget, the approval-gate cap, the build and lint commands, the system prompt additions, and the MCP server and skill pins, and it refuses a turn limit outside 1 to 500. `--unset <column>` removes a setting, so that the platform default applies again. Both writers of the record make the same merging write: an `UpdateItem` that changes only the attributes it names and leaves the rest of the record as it is. A setting that a Blueprint declares is written again by every deploy, and a Blueprint no longer removes a registry asset list that it leaves out: it detaches one by declaring it as `[]`.
+2. **Cedar.** `bgagent repo onboard` also sets a repository's Cedar policies (`--cedar-policy-file`) and its Cedar policy module pins (`--cedar-policy-module`). Neither writer parses the policy text: the agent's engine does when a task starts, and a task whose policies it cannot load fails. This point stands on its own: without it the two flags go, and `--unset` still removes both columns.
+
+**What stays with a deploy.** Egress domains, which only a Blueprint declares (`networking.egressAllowlist`), and IAM for a custom runtime or token secret: the CLI stores the ARN, the grant is made in CDK.
+
+**Audit records.** Decision 3 accepted the audit gap for v1 and tied structured audit records to the moment the operator write path "graduates from expedient to primary". This amendment makes that path the documented default ([REPO_ONBOARDING.md](/sample-autonomous-cloud-coding-agents/architecture/repo-onboarding#onboarding-mechanism)). The follow-up is therefore due, and it is still open: this amendment adds no audit record.

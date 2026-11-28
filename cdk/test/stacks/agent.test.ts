@@ -251,21 +251,10 @@ describe('AgentStack', () => {
     template.hasOutput('BedrockModelIds', { Value: DEFAULT_BEDROCK_MODEL_IDS.join(',') });
   });
 
-  test('outputs CedarWasmLayerArn', () => {
-    template.hasOutput('CedarWasmLayerArn', {});
-  });
-
   test('enables Agent Registry by default', () => {
     template.hasOutput('AgentRegistryId', {});
     template.hasOutput('AgentRegistryArn', {});
     template.hasOutput('RegistryApiUrl', {});
-  });
-
-  test('creates the Cedar-wasm Lambda layer', () => {
-    template.resourceCountIs('AWS::Lambda::LayerVersion', 1);
-    template.hasResourceProperties('AWS::Lambda::LayerVersion', {
-      CompatibleRuntimes: ['nodejs22.x', 'nodejs24.x'],
-    });
   });
 
   test('runtime receives TASK_APPROVALS_TABLE_NAME env var', () => {
@@ -734,6 +723,15 @@ describe('AgentStack', () => {
     template.resourceCountIs('AWS::Cognito::UserPool', 1);
   });
 
+  test('the Cognito routes of Slack, Linear and Jira are behind the authorizer of TaskApi, the only Cognito authorizer of the root stack', () => {
+    const authorizers = Object.keys(template.findResources('AWS::ApiGateway::Authorizer', { Properties: { Type: 'COGNITO_USER_POOLS' } }));
+    expect(authorizers).toEqual([expect.stringMatching(/^TaskApiAuthorizer/)]);
+    const routes = Object.entries(template.findResources('AWS::ApiGateway::Method'))
+      .filter(([logicalId]) => /^TaskApi(slacklinkPOST|linearlinkPOST|linearworkspacesslugDELETE|jiralinkPOST)/.test(logicalId));
+    expect(routes).toHaveLength(4);
+    for (const [, route] of routes) expect(route.Properties.AuthorizerId).toEqual({ Ref: authorizers[0] });
+  });
+
   test('sets 90-day retention on runtime log groups', () => {
     template.hasResourceProperties('AWS::Logs::LogGroup', {
       LogGroupName: Match.stringLikeRegexp('APPLICATION_LOGS'),
@@ -1029,7 +1027,7 @@ describe('AgentStack', () => {
   });
 
   test('the fan-out consumer can reach BOTH surfaces\' credentials registries', () => {
-    // Its Jira and Linear props are OPTIONAL on the construct, so dropping one
+    // The construct takes any list of trackers, so dropping one
     // from the stack wiring disables that surface's final-status comment with no
     // synth error and no test failure elsewhere — a silent capability loss. Pin
     // both env vars so the omission fails here instead.
@@ -1059,7 +1057,44 @@ describe('AgentStack', () => {
     expect(asJson).toContain('bgagent-jira-oauth-*');
   });
 
-  test('the stranded-orchestration sweep gets the registry its panel refresh needs', () => {
+  test('the orchestrator and the screenshot processor can reach BOTH surfaces\' credentials registries', () => {
+    // Neither wiring fails synthesis when it is dropped: the orchestrator then loses the
+    // queued notice on that surface, the screenshot processor the preview on its issues.
+    const fns = Object.entries(template.findResources('AWS::Lambda::Function'));
+    for (const prefix of ['TaskOrchestratorOrchestratorFn', 'GitHubScreenshotIntegrationWebhookProcessorFn']) {
+      const vars = fns.find(([id]) => id.startsWith(prefix))?.[1].Properties.Environment.Variables ?? {};
+      expect([prefix, vars.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME, vars.JIRA_WORKSPACE_REGISTRY_TABLE_NAME])
+        .toEqual([prefix, expect.anything(), expect.anything()]);
+    }
+    // The processor finds the reply of an iteration through each tracker's task-table index.
+    const processorPolicies = JSON.stringify(Object.entries(template.findResources('AWS::IAM::Policy'))
+      .filter(([id]) => id.startsWith('GitHubScreenshotIntegrationWebhookProcessorFn')));
+    expect(processorPolicies).toContain('/index/LinearIssueIndex');
+    expect(processorPolicies).toContain('/index/JiraIssueIndex');
+  });
+
+  test('only these functions can store a rotated OAuth token of a tracker', () => {
+    // The write on a tracker's OAuth secrets is one argument of grantFeedback: a function that
+    // gains or loses it shows here.
+    const writers = (secrets: string) => [...new Set(
+      ['AWS::IAM::Policy', 'AWS::IAM::ManagedPolicy'].flatMap(type => Object.entries(template.findResources(type)))
+        .filter(([, policy]) => policy.Properties.PolicyDocument.Statement.some((statement: { Action: string | string[]; Resource: unknown }) =>
+          [statement.Action].flat().includes('secretsmanager:PutSecretValue') && JSON.stringify(statement.Resource).includes(secrets)))
+        .map(([id]) => id.replace(/ServiceRole(DefaultPolicy|OverflowPolicy\d+)[0-9A-F]{8}$/, '')),
+    )].sort();
+
+    expect(writers(':secret:bgagent-linear-oauth-*')).toEqual([
+      'FanOutConsumerFanOutFn', 'GitHubScreenshotIntegrationWebhookProcessorFn', 'LinearIntegrationWebhookProcessorFn',
+      'TaskOrchestratorOrchestratorFn',
+    ]);
+    expect(writers(':secret:bgagent-jira-oauth-*')).toEqual([
+      'FanOutConsumerFanOutFn', 'GitHubScreenshotIntegrationWebhookProcessorFn', 'IterationHeartbeatSweepFn',
+      'JiraIntegrationWebhookProcessorFn', 'OrchestrationReconcilerReconcilerFn', 'StrandedOrchestrationReconcilerReconcilerFn',
+      'TaskOrchestratorOrchestratorFn',
+    ]);
+  });
+
+  test('the stranded-orchestration sweep gets the registries its panel refresh needs', () => {
     // It shares refreshPanelAndSettle with the live reconciler; without a
     // registry that feedback no-ops and a recovered epic's panel stays stale.
     const fns = template.findResources('AWS::Lambda::Function');
@@ -1068,6 +1103,7 @@ describe('AgentStack', () => {
     const vars = (sweep![1] as { Properties?: { Environment?: { Variables?: Record<string, unknown> } } })
       .Properties?.Environment?.Variables ?? {};
     expect(vars.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME).toBeDefined();
+    expect(vars.JIRA_WORKSPACE_REGISTRY_TABLE_NAME).toBeDefined();
   });
 
   test('every function that reads the per-user concurrency cap gets the one the orchestrator admits against', () => {
@@ -2151,9 +2187,9 @@ describe('AgentStack solution attribution (#319): AWS_SDK_UA_APP_ID via stack-le
     // A loose `toBeGreaterThan` let a whole integration construct disappear
     // unnoticed; the exact count fails if a Lambda is dropped OR if a new one
     // is added without being attributed below.
-    // 48 existing handlers (5 scheduled maintenance jobs nested) + 2 registry
+    // 47 existing handlers (5 scheduled maintenance jobs nested) + 2 registry
     // provisioning handlers + 4 registry API handlers in nested stacks.
-    expect(abcaLambdas.length).toBe(54);
+    expect(abcaLambdas.length).toBe(53);
     // Every ABCA-authored Lambda must carry the canonical `#` app-id. Collect
     // any offenders so a failure names the exact logical id(s) that are naked.
     const unattributed = abcaLambdas
@@ -2410,16 +2446,12 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
       })
       .map(([id]) => id);
 
-    for (const fragment of [
-      'LinearIntegrationWebhookProcessor',
-      'FanOut',
-      'Orchestrator',
-      'OrchestrationReconciler',
-      'IterationHeartbeat',
-      'GitHubScreenshot',
-    ]) {
-      expect(withVaultEnv.join(' ')).toContain(fragment);
-    }
+    // The logical IDs without their hash: a function that gains or loses the wiring shows here.
+    expect(withVaultEnv.map((id) => id.replace(/[0-9A-F]{8}$/, '')).sort()).toEqual([
+      'FanOutConsumerFanOutFn', 'GitHubScreenshotIntegrationWebhookProcessorFn', 'IterationHeartbeatSweepFn',
+      'LinearIntegrationWebhookProcessorFn', 'OrchestrationReconcilerReconcilerFn', 'StrandedOrchestrationReconcilerReconcilerFn',
+      'TaskOrchestratorOrchestratorFn',
+    ]);
     // Every one also carries the workload name, or the env is inert — and they all
     // carry the SAME one. Two Lambdas naming different identities is a partial
     // outage that no single-Lambda assertion would catch: one mints, one 404s.
@@ -2452,7 +2484,7 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
     const valueImports = (file: string): Set<string> => {
       const src = fs.readFileSync(file, 'utf8');
       const found = new Set<string>();
-      const re = /import\s+(type\s+)?(?:\{[^}]*\}|\*\s+as\s+\w+|\w+)\s+from\s+'(?:\.\/)?(?:shared\/)?([a-z0-9-]+)'/gs;
+      const re = /import\s+(type\s+)?(?:\{[^}]*\}|\*\s+as\s+\w+|\w+)\s+from\s+'(?:\.\/)?((?:shared\/)?[a-z0-9-]+)'/gs;
       for (let m = re.exec(src); m !== null; m = re.exec(src)) {
         if (!m[1]) found.add(m[2]!);
       }
@@ -2476,17 +2508,24 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
         }
       }
     }
-    const reaching = fs.readdirSync(handlersDir)
-      .filter((f) => f.endsWith('.ts'))
-      .filter((f) => [...valueImports(path.join(handlersDir, f))].some((d) => minters.has(d)))
-      .sort();
+    const handlerFiles = fs.readdirSync(handlersDir).filter((f) => f.endsWith('.ts'));
+    const reaching = new Set(handlerFiles
+      .filter((f) => [...valueImports(path.join(handlersDir, f))].some((d) => minters.has(d.replace(/^shared\//, '')))));
+    // A handler that value-imports a reaching handler ('./<name>') runs its code, so it is reaching too.
+    for (let grew = true; grew;) {
+      grew = false;
+      for (const f of handlerFiles) {
+        if (reaching.has(f)) continue;
+        if ([...valueImports(path.join(handlersDir, f))].some((d) => reaching.has(`${d}.ts`))) { reaching.add(f); grew = true; }
+      }
+    }
 
     // linear-webhook is the RECEIVER: it imports the resolver file for
     // getOauthSecretStrict (signature verification) and never mints, so it needs no
     // grant. Everything else here must be wired above, except console-linear, which runs
     // in the operator console stack and is wired there (test/stacks/console.test.ts,
     // "mints Linear tokens through the identity vault when the platform has one").
-    expect(reaching).toEqual([
+    expect([...reaching].sort()).toEqual([
       'console-linear.ts',
       'fanout-task-events.ts',
       'github-webhook-processor.ts',
@@ -2495,6 +2534,7 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
       'linear-webhook.ts',
       'orchestrate-task.ts',
       'orchestration-reconciler.ts',
+      'reconcile-stranded-orchestrations.ts',
     ]);
   });
 });

@@ -22,11 +22,10 @@
  *
  * DynamoDB Streams on `TaskEventsTable` deliver NEW_IMAGE records to
  * this Lambda. For each record we resolve a per-channel event filter
- * (``CHANNEL_DEFAULTS`` modulo optional per-task overrides from
- * `TaskRecord.notifications`, §6.5) and hand the event only to the
+ * (``CHANNEL_DEFAULTS``) and hand the event only to the
  * channels whose filter includes it. Channels do NOT share a single
  * union filter — Slack wants interactive signals (errors, approvals,
- * status responses) that would be noise on Email, while GitHub only
+ * status responses), while GitHub only
  * cares about PR activity + terminal outcomes.
  *
  * Dispatcher state: GitHub edits a single issue comment in place
@@ -34,8 +33,7 @@
  * transitions and session-message cleanup via the ``slack-notify``
  * helper (this router absorbed what used to be a standalone Slack
  * stream consumer, dropping ``TaskEventsTable`` from two stream
- * readers back to one). Email remains a log-only stub until SES
- * wiring lands.
+ * readers back to one).
  */
 
 import { GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
@@ -84,13 +82,9 @@ import { coerceNumericOrNull } from './shared/numeric';
 import { loadRepoConfig } from './shared/repo-config';
 import { encodeMarkdownUrl } from './shared/screenshot-url';
 import { prNumberFromTask } from './shared/task-pr-number';
-import type { ChannelConfig, TaskNotificationsConfig, TaskRecord } from './shared/types';
+import type { TaskRecord } from './shared/types';
 import { makeDocClient } from './shared/ua';
 import { dispatchSlackEvent, SlackApiError } from './slack-notify';
-
-// Re-export the shared types so existing test imports (and any future
-// caller that only imports from the handler module) continue to work.
-export type { ChannelConfig, TaskNotificationsConfig };
 
 /** Terminal task event types — shared by every channel's default filter.
  *  Kept as a single set so changes land in one place. */
@@ -109,8 +103,6 @@ const LINEAR_SESSION_HEARTBEAT_EVENT = 'agent_turn';
  *
  * - ``approval_requested`` / ``approval_stranded`` go to Slack so the
  *   user sees the gate on their phone.
- * - ``approval_requested`` (high severity only — enforced by the
- *   dispatcher, not the filter) goes to Email.
  * - Granted / denied / timed_out are user-facing UX confirmations the
  *   CLI already surfaces; routing them to Slack too would create
  *   notification fatigue. Kept out of every channel's default.
@@ -127,23 +119,20 @@ const APPROVAL_NOTIFICATION_EVENTS = [
  * Per-channel default event-type subscriptions (design §6.2).
  *
  * Channels do NOT share a single filter — Slack wants interactive
- * signals (errors, approvals, status responses) while Email stays
- * minimal (terminal + approval only) and GitHub edits-in-place on
- * `pr_created` + terminal. Routing this per-channel up-front means
- * one user's chatty Slack settings can't spam their email, and
- * vice-versa, without any per-task config writer.
+ * signals (errors, approvals, status responses) while GitHub
+ * edits-in-place on `pr_created` + terminal.
  *
  * Approval milestones (§11.2):
  *   - ``approval_requested`` / ``approval_stranded`` are the two
  *     user-facing "something needs you" signals that get fanned out.
  *     Every other ``approval_*`` milestone is internal bookkeeping
  *     (caps, clipping, late-wins) or a UX confirmation the CLI
- *     already surfaces; routing those to Slack / Email would create
+ *     already surfaces; routing those to Slack would create
  *     notification fatigue without adding value.
  *   - Per-user rate limit of 10 approval-related messages per minute
  *     is enforced in the dispatcher, not in this filter.
  */
-export type NotificationChannel = 'slack' | 'email' | 'github' | 'linear' | 'jira';
+export type NotificationChannel = 'slack' | 'github' | 'linear' | 'jira';
 
 export const CHANNEL_DEFAULTS: Record<NotificationChannel, ReadonlySet<string>> = {
   // Slack is the "on-call" channel per §6.2 — all terminal outcomes
@@ -172,17 +161,6 @@ export const CHANNEL_DEFAULTS: Record<NotificationChannel, ReadonlySet<string>> 
     'agent_error',
     ...APPROVAL_NOTIFICATION_EVENTS,
     'status_response', // Phase 2 (not yet emitted)
-  ]),
-  // Email is deliberately minimal per §6.2: task_completed, task_failed,
-  // and high-severity approval requests. Cancellations and strands are
-  // intentionally NOT delivered. Severity-gating happens in the
-  // dispatcher (§11.2 — Slack approvals accept low/medium,
-  // high severity stays CLI-only for Slack buttons but is still OK
-  // for email-as-notification).
-  email: new Set<string>([
-    'task_completed',
-    'task_failed',
-    'approval_requested',
   ]),
   // GitHub edits a single issue comment in place (§6.4) covering
   // pr_created + terminal, including cancellations, strands, and
@@ -233,7 +211,7 @@ export const CHANNEL_DEFAULTS: Record<NotificationChannel, ReadonlySet<string>> 
   // duration — and fires even on an agent crash. ``task_timed_out`` is
   // included (unlike Linear, which predates it) because the orchestrator
   // now emits it as a distinct terminal event (``orchestrator.ts``); the
-  // Slack + email defaults already subscribe to it.
+  // Slack default already subscribes to it.
   //
   // Ordinary Jira tasks receive a post-once terminal comment, with idempotency
   // carried by ``jira_final_comment_event_id``. Comment-triggered iterations
@@ -246,59 +224,6 @@ export const CHANNEL_DEFAULTS: Record<NotificationChannel, ReadonlySet<string>> 
   ]),
 };
 
-/**
- * Resolve the effective event-type filter for a channel.
- *
- * For v1 this is always the channel's default set — per-task
- * overrides (design §6.5 `TaskRecord.notifications`) are forward-
- * compatible plumbing: when Chunk K adds a DDB read, a caller can
- * pass `overrides` and enable/disable the channel or override its
- * event list. Today the value is always `undefined`, so every task
- * inherits the defaults.
- *
- * Resolution rules:
- *   - ``{ enabled: false }`` → empty set (channel opted out).
- *   - ``events`` absent      → channel default.
- *   - ``events: []``         → empty set (treated as opt-out with
- *                              a WARN, since an empty explicit list
- *                              is almost always a submission mistake —
- *                              we surface it rather than silently mute).
- *   - ``events: ["default", …]`` → ``"default"`` expands to the
- *                              channel default, other entries are
- *                              added on top.
- *   - ``events: [only literals]`` → the explicit list REPLACES the
- *                              default entirely.
- */
-export function resolveChannelFilter(
-  channel: NotificationChannel,
-  overrides?: TaskNotificationsConfig,
-): ReadonlySet<string> {
-  const channelOverride = overrides?.[channel];
-  if (channelOverride?.enabled === false) return new Set<string>();
-  if (!channelOverride?.events) return CHANNEL_DEFAULTS[channel];
-  if (channelOverride.events.length === 0) {
-    // An empty explicit list silently muting a channel would be a
-    // footgun once Chunk K exposes this at the submit-time API. Log
-    // a WARN so operators see the mute; downstream validation should
-    // catch this at submission, but defense-in-depth matters here
-    // because the DDB path is cheap to bypass.
-    logger.warn('[fanout] channel override has empty events list — muting channel', {
-      event: 'fanout.resolve.empty_events_override',
-      channel,
-    });
-    return new Set<string>();
-  }
-  const expanded = new Set<string>();
-  for (const e of channelOverride.events) {
-    if (e === 'default') {
-      for (const d of CHANNEL_DEFAULTS[channel]) expanded.add(d);
-    } else {
-      expanded.add(e);
-    }
-  }
-  return expanded;
-}
-
 /** Stable channel iteration order, derived from ``CHANNEL_DEFAULTS``'s
  *  insertion order so adding a fourth channel (append to
  *  ``NotificationChannel`` + ``CHANNEL_DEFAULTS`` + ``DISPATCHERS``)
@@ -308,10 +233,10 @@ const CHANNELS = Object.keys(CHANNEL_DEFAULTS) as readonly NotificationChannel[]
 /** Union of every channel's currently-subscribed events. Used as the
  *  outer guard: events no channel cares about short-circuit before we
  *  spin up dispatchers, keeping the stream-processor narrow. */
-function unionSubscribedTypes(overrides?: TaskNotificationsConfig): ReadonlySet<string> {
+function unionSubscribedTypes(): ReadonlySet<string> {
   const u = new Set<string>();
   for (const ch of CHANNELS) {
-    for (const t of resolveChannelFilter(ch, overrides)) u.add(t);
+    for (const t of CHANNEL_DEFAULTS[ch]) u.add(t);
   }
   return u;
 }
@@ -416,14 +341,13 @@ export function effectiveEventType(event: FanOutEvent): string {
  *  guard so events nobody cares about short-circuit before we spin
  *  dispatchers. Matches on the unwrapped effective event type so
  *  ``agent_milestone`` carriers route by their milestone name. */
-export function shouldFanOut(event: FanOutEvent, overrides?: TaskNotificationsConfig): boolean {
-  return unionSubscribedTypes(overrides).has(effectiveEventType(event));
+export function shouldFanOut(event: FanOutEvent): boolean {
+  return unionSubscribedTypes().has(effectiveEventType(event));
 }
 
 /**
  * Per-channel dispatcher implementations. Slack and GitHub both talk to
- * real external APIs today; Email is still a log-only stub until SES
- * wiring lands.
+ * real external APIs today.
  *
  * Dispatchers do NOT catch infra errors themselves. Error isolation
  * lives in ``routeEvent`` where ``Promise.allSettled`` records
@@ -1043,15 +967,6 @@ async function dispatchToGitHubComment(event: FanOutEvent): Promise<void> {
     created: result.created,
     event_type: event.event_type,
     effective_event_type: renderedEventType,
-  });
-}
-
-async function dispatchToEmail(event: FanOutEvent): Promise<void> {
-  logger.info('[fanout/email] would send', {
-    event: 'fanout.email.dispatch_stub',
-    task_id: event.task_id,
-    event_type: event.event_type,
-    effective_event_type: effectiveEventType(event),
   });
 }
 
@@ -2223,7 +2138,6 @@ const DISPATCHERS: Record<NotificationChannel, (ev: FanOutEvent) => Promise<void
   github: dispatchToGitHubComment,
   linear: dispatchToLinear,
   jira: dispatchToJira,
-  email: dispatchToEmail,
 };
 
 /**
@@ -2261,10 +2175,7 @@ export interface RouteOutcome {
  * retryable failure — and the handler will flag the record for
  * partial-batch retry.
  */
-export async function routeEvent(
-  ev: FanOutEvent,
-  overrides?: TaskNotificationsConfig,
-): Promise<RouteOutcome> {
+export async function routeEvent(ev: FanOutEvent): Promise<RouteOutcome> {
   const attempted: NotificationChannel[] = [];
   const tasks: Promise<unknown>[] = [];
   // Match against the effective type so ``agent_milestone`` carriers
@@ -2272,13 +2183,12 @@ export async function routeEvent(
   // subscribed to those milestone names.
   const effective = effectiveEventType(ev);
   for (const ch of CHANNELS) {
-    const filter = resolveChannelFilter(ch, overrides);
-    if (!filter.has(effective)) continue;
+    if (!CHANNEL_DEFAULTS[ch].has(effective)) continue;
     attempted.push(ch);
     tasks.push(DISPATCHERS[ch](ev));
   }
-  // Parallelism is bounded by the dispatcher list (5 channels:
-  // slack/github/linear/jira/email), not by program input, so the
+  // Parallelism is bounded by the dispatcher list (4 channels:
+  // slack/github/linear/jira), not by program input, so the
   // unbounded-parallelism lint does not apply.
 
   const results = await Promise.allSettled(tasks);
@@ -2365,10 +2275,6 @@ export const handler = async (
   let dispatched = 0;
   let dropped = 0;
 
-  // v1: no per-task override; every event uses the channel defaults.
-  // Chunk K wires a DDB read here to load ``TaskRecord.notifications``.
-  const overrides: TaskNotificationsConfig | undefined = undefined;
-
   for (const record of event.Records) {
     processed++;
     const sequenceNumber = record.dynamodb?.SequenceNumber;
@@ -2378,7 +2284,7 @@ export const handler = async (
         dropped++;
         continue;
       }
-      if (!shouldFanOut(ev, overrides)) {
+      if (!shouldFanOut(ev)) {
         dropped++;
         continue;
       }
@@ -2398,7 +2304,7 @@ export const handler = async (
       }
       perTaskCounts.set(ev.task_id, seen + 1);
 
-      const outcome = await routeEvent(ev, overrides);
+      const outcome = await routeEvent(ev);
       if (outcome.dispatched.length > 0) dispatched++;
       // Per-channel infra rejections (DDB throttle, Secrets Manager
       // 5xx, transient Slack 5xx) escalate to the partial-batch retry

@@ -1,7 +1,8 @@
 # Interactive Agents: Async Interaction Design
 
-> **Status:** Active design
-> **Branch:** `feature/interactive-background-agents`
+> **Status:** Partly implemented.
+> **Shipped:** `bgagent status`, `bgagent watch`, `bgagent nudge`, and the approval commands `bgagent approve`, `bgagent deny` and `bgagent pending`.
+> **Not implemented:** `bgagent ask`, Slack approval buttons, email dispatch and the per-task notification config.
 > **Last updated:** 2026-04-29 (rev 6)
 
 ---
@@ -95,7 +96,7 @@ This document describes the interactivity surfaces layered on top of that model 
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                            CLIENT SURFACES                              │
 │                                                                         │
-│  bgagent CLI     Slack bot      GitHub webhook      Web UI (future)     │
+│  bgagent CLI     Slack bot      GitHub webhook      Operator console    │
 │       │             │                │                    │             │
 │       └─────────────┴────────────────┴────────────────────┘             │
 │                                │                                        │
@@ -255,7 +256,7 @@ Commands:
 - `nudge <id> "<text>"` — steer.
 - `cancel <id>` — stop the task.
 - `ask <id> "<question>"` (Phase 2) — ask the agent a question.
-- `approve <id>` / `deny <id>` / `pending` / `policies` (Phase 3) — HITL.
+- `approve <id>` / `deny <id>` / `pending` (Phase 3) — HITL.
 
 Authentication: Cognito User Pool ID token in `Authorization` header for all REST calls. Token caching in `~/.bgagent/credentials.json` with auto-refresh.
 
@@ -408,7 +409,7 @@ Flags:
 
 **Rate limit:** 1 open ask per task per user (429 otherwise). Forward-compatible with multi-user team scenarios.
 
-### 5.6 `bgagent approve` / `deny` / `pending` / `policies` (Phase 3)
+### 5.6 `bgagent approve` / `deny` / `pending` (Phase 3)
 
 HITL approval commands. All flows are REST + DDB; no streaming. Detailed design in [`CEDAR_HITL_GATES.md`](./CEDAR_HITL_GATES.md). Summary:
 
@@ -645,7 +646,7 @@ Exactly one runtime, invoked via SigV4 from the orchestrator. The CLI never talk
 
 Every durable signal from the agent flows through this table. Every consumer reads from it.
 
-*Why:* Decouples the agent from every consumer. CLI, Slack bot, GitHub integration, and any future web UI all read the same substrate without touching the runtime.
+*Why:* Decouples the agent from every consumer. CLI, Slack bot, GitHub integration, and the operator console all read the same substrate without touching the runtime.
 
 ### AD-4. Notification plane as first-class
 
@@ -732,7 +733,7 @@ Opt-in per task: 4 KB previews + full trajectory to S3 with TTL.
 ### Phase 3 — Cedar HITL
 
 - Hard-gate approval gates with Cedar policy evaluation
-- `bgagent approve` / `deny` / `pending` / `policies`
+- `bgagent approve` / `deny` / `pending`
 - `AWAITING_APPROVAL` state + orchestrator handling
 - Full design in [`CEDAR_HITL_GATES.md`](./CEDAR_HITL_GATES.md)
 

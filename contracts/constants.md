@@ -12,8 +12,8 @@ PR #88's review); this file replaces that pattern.
 
 ## Why this lives in `contracts/`
 
-Same rationale as `cedar-parity/`: neither `agent/` nor `cdk/` owns
-the contract. This is the neutral location both runtimes read.
+Neither `agent/` nor `cdk/` owns the contract: this is the neutral
+location both runtimes read.
 
 ## Consumers
 

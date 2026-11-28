@@ -47,7 +47,7 @@ For focused worker checks:
 
 ```bash
 cd agent
-uv run pytest tests/test_microvm_*.py tests/test_poll_for_decision.py --no-cov
+mise //agent:testf -- tests/test_microvm_*.py tests/test_poll_for_decision.py
 ```
 
 DynamoDB Local tests (`*-local.test.ts`, `test_microvm_checkpoint.py`) need a

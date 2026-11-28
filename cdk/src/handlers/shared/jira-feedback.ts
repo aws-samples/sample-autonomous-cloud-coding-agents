@@ -31,8 +31,7 @@ import type { StateIntent, TransitionOptions } from './orchestration-channel';
  * configured Forge app actor or the legacy OAuth fallback. Used by the
  * webhook processor to give users
  * feedback on pre-container failures (guardrail block, concurrency cap,
- * unmapped project, etc.) — paths where the agent never starts and the
- * agent-side Jira MCP cannot run.
+ * unmapped project, etc.) — paths where the agent never starts.
  *
  * Unlike Linear, Jira has no "reaction" primitive. The failure marker
  * (❌) is folded into the comment text instead of attached as a separate

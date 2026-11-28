@@ -23,6 +23,7 @@ import * as apigw from 'aws-cdk-lib/aws-apigateway';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { GitHubScreenshotIntegration } from '../../src/constructs/github-screenshot-integration';
+import { grantTrackerFeedback } from '../../src/constructs/integration-parts';
 
 describe('GitHubScreenshotIntegration construct', () => {
   let template: Template;
@@ -170,6 +171,7 @@ describe('GitHubScreenshotIntegration construct', () => {
       TimeToLiveSpecification: { AttributeName: 'ttl', Enabled: true },
       PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true },
     });
+    template.hasResource('AWS::DynamoDB::Table', { DeletionPolicy: 'Delete', Properties: { KeySchema: [{ AttributeName: 'dedup_key', KeyType: 'HASH' }] } });
   });
 });
 
@@ -193,9 +195,17 @@ describe('GitHubScreenshotIntegration — task-table grants (iteration-UX)', () 
     });
 
     // The Linear index Query is part of Linear wiring (ADR-024), so the
-    // processor needs a Linear registry for the grant to exist.
-    const linearWorkspaceRegistryTable = dynamodb.Table.fromTableName(stack, 'LinearRegistry', 'LinearRegistry');
-    new GitHubScreenshotIntegration(stack, 'Screenshot', { api, githubTokenSecret, taskTable, linearWorkspaceRegistryTable });
+    // processor needs the Linear tracker for the grant to exist.
+    const linearRegistry = dynamodb.Table.fromTableName(stack, 'LinearRegistry', 'LinearRegistry');
+    new GitHubScreenshotIntegration(stack, 'Screenshot', {
+      api,
+      githubTokenSecret,
+      taskTable,
+      trackers: [{
+        issueIndexName: 'LinearIssueIndex',
+        grantFeedback: (fn, options) => grantTrackerFeedback(fn, linearRegistry, 'LINEAR_WORKSPACE_REGISTRY_TABLE_NAME', 'bgagent-linear-oauth-*', options.writeBack),
+      }],
+    });
     template = Template.fromStack(stack);
   });
 
@@ -267,11 +277,15 @@ describe('Jira screenshot delivery wiring', () => {
   let template: Template;
   beforeAll(() => {
     const stack = new Stack(new App(), 'JiraScreenshots');
+    const jiraRegistry = dynamodb.Table.fromTableName(stack, 'Jira', 'JiraRegistry');
     new GitHubScreenshotIntegration(stack, 'Screenshots', {
       api: new apigw.RestApi(stack, 'Api'),
       githubTokenSecret: new secretsmanager.Secret(stack, 'Token'),
       taskTable: dynamodb.Table.fromTableName(stack, 'Tasks', 'Tasks'),
-      jiraWorkspaceRegistryTable: dynamodb.Table.fromTableName(stack, 'Jira', 'JiraRegistry'),
+      trackers: [{
+        issueIndexName: 'JiraIssueIndex',
+        grantFeedback: (fn, options) => grantTrackerFeedback(fn, jiraRegistry, 'JIRA_WORKSPACE_REGISTRY_TABLE_NAME', 'bgagent-jira-oauth-*', options.writeBack),
+      }],
     });
     template = Template.fromStack(stack);
   });

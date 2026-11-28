@@ -33,7 +33,8 @@ export function makeRegistryClient(): RegistryClient {
   if (!registryId) {
     throw new Error(
       'Agent Registry is disabled or not configured (AGENT_REGISTRY_ID is not set); '
-      + 'remove registry:// refs or deploy with enableAgentRegistry=true',
+      + 'remove the registry:// refs from the repository record (declare the asset list as [] in the Blueprint, '
+      + 'or bgagent repo onboard <repo> --unset <column>) or deploy with enableAgentRegistry=true',
     );
   }
   return new AgentRegistryClient({ registryId });

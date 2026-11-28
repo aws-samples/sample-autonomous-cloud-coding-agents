@@ -18,24 +18,21 @@
  */
 
 import * as path from 'path';
-import { ArnFormat, Aspects, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
+import { Aspects, Duration, RemovalPolicy } from 'aws-cdk-lib';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
-import { Runtime, Architecture } from 'aws-cdk-lib/aws-lambda';
+import { Runtime, Architecture, Function as LambdaFunction } from 'aws-cdk-lib/aws-lambda';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
-import { JiraProjectMappingTable } from './jira-project-mapping-table';
-import { JiraUserMappingTable } from './jira-user-mapping-table';
-import { JiraWorkspaceRegistryTable } from './jira-workspace-registry-table';
+import { FeedbackTracker, grantTrackerFeedback, integrationTable, secretArnPattern, webhookDedupTable } from './integration-parts';
 import { ComponentUaAspect } from './solution-ua-aspect';
-
-/** Default task-record retention used for TTL computation (days). */
-const DEFAULT_TASK_RETENTION_DAYS = 90;
+import { grantTaskCreation, taskCreationEnvironment } from './task-creation';
+import { JIRA_ISSUE_INDEX_NAME } from './task-table-indexes';
 
 /**
  * Webhook-processor Lambda timeout (seconds). The processor is invoked
@@ -71,8 +68,11 @@ export interface JiraIntegrationProps {
   /** The existing REST API to add Jira routes to. */
   readonly api: apigw.RestApi;
 
-  /** Cognito user pool for the /jira/link endpoint (Cognito-authenticated). */
+  /** Cognito user pool in which the budget check looks up the groups of a user. */
   readonly userPool: cognito.IUserPool;
+
+  /** Cognito authorizer of `api`, for the /jira/link route. */
+  readonly linkAuthorizer: apigw.IAuthorizer;
 
   /** The DynamoDB task table. */
   readonly taskTable: dynamodb.ITable;
@@ -143,17 +143,63 @@ export interface JiraIntegrationProps {
  * - API Gateway routes under /jira/*
  * - Webhook signing-secret placeholder (populated by `bgagent jira setup`)
  */
-export class JiraIntegration extends Construct {
-  /** Jira `{cloudId}#{projectKey}` → repo mapping table. */
+export class JiraIntegration extends Construct implements FeedbackTracker {
+  public readonly issueIndexName = JIRA_ISSUE_INDEX_NAME;
+
+  /**
+   * DynamoDB table mapping Jira Cloud projects to GitHub repositories.
+   *
+   * Schema: jira_project_identity (PK) — composite key `{cloudId}#{projectKey}`.
+   * `cloudId` is the Atlassian tenant identifier; `projectKey` is the human
+   * project key (e.g. `ENG`).
+   *
+   * Fields:
+   * - repo — `owner/repo`
+   * - cloud_id — duplicated from the PK for filtering by tenant
+   * - project_key — duplicated from the PK
+   * - label_filter — Jira issue label that triggers a task (default `bgagent`)
+   * - status — 'active' | 'removed'
+   * - onboarded_at, updated_at — ISO timestamps
+   */
   public readonly projectMappingTable: dynamodb.Table;
 
-  /** Jira `{cloudId}#{accountId}` → platform user mapping table. */
+  /**
+   * DynamoDB table for mapping Jira user identities to platform user IDs.
+   *
+   * Schema: jira_identity (PK) — composite key `{cloudId}#{accountId}` for
+   * confirmed mappings, `pending#{code}` for in-flight link codes (with TTL).
+   * `accountId` is Atlassian's stable per-tenant user identifier returned by
+   * the OAuth identity endpoint and present on issue events.
+   *
+   * GSIs:
+   * - PlatformUserIndex (PK: platform_user_id, SK: linked_at) — list linked Jira accounts for a user
+   */
   public readonly userMappingTable: dynamodb.Table;
 
   /**
-   * Registry of Jira tenants that have completed OAuth onboarding.
-   * Look up the per-tenant `oauth_secret_arn` by `cloudId` from the inbound
-   * webhook, then fetch the OAuth/signing secret from Secrets Manager.
+   * DynamoDB table tracking Jira Cloud tenants that have completed OAuth onboarding.
+   *
+   * Schema: jira_cloud_id (PK) — Atlassian's tenant identifier (UUID), the stable
+   * key returned from `accessible-resources`.
+   *
+   * Fields:
+   * - site_url — `https://<your-domain>.atlassian.net` (display only; NOT a
+   *   valid REST base for the 3LO token, which is minted with
+   *   `audience=api.atlassian.com` and must call the
+   *   `https://api.atlassian.com/ex/jira/<cloudId>` gateway base instead)
+   * - oauth_secret_arn — full ARN of the per-tenant Secrets Manager secret
+   *   (`bgagent-jira-oauth-<cloudId>`) holding the OAuth bundle (access/refresh
+   *   tokens, client credentials, webhook signing secret, and optional Forge
+   *   app-actor proxy configuration). Created by `bgagent jira setup` and
+   *   extended by `bgagent jira app-setup`, not by CDK.
+   * - outbound_identity — `app` after the Forge identity probe succeeds.
+   * - app_actor_account_id / app_actor_display_name / app_actor_configured_at —
+   *   non-secret audit metadata for the verified Jira app account. The proxy
+   *   URL and HMAC secret remain in Secrets Manager.
+   * - installed_by_platform_user_id — Cognito sub of the admin who ran
+   *   `bgagent jira setup` (audit only; runtime callers do not need this)
+   * - installed_at, updated_at — ISO timestamps
+   * - status — 'active' | 'revoked'
    */
   public readonly workspaceRegistryTable: dynamodb.Table;
 
@@ -176,23 +222,16 @@ export class JiraIntegration extends Construct {
     const removalPolicy = props.removalPolicy ?? RemovalPolicy.DESTROY;
 
     // --- DynamoDB tables ---
-    const projectMapping = new JiraProjectMappingTable(this, 'ProjectMappingTable', { removalPolicy });
-    const userMapping = new JiraUserMappingTable(this, 'UserMappingTable', { removalPolicy });
-    const workspaceRegistry = new JiraWorkspaceRegistryTable(this, 'WorkspaceRegistryTable', { removalPolicy });
-    this.projectMappingTable = projectMapping.table;
-    this.userMappingTable = userMapping.table;
-    this.workspaceRegistryTable = workspaceRegistry.table;
+    this.projectMappingTable = integrationTable(this, 'ProjectMappingTable', { partitionKey: 'jira_project_identity', removalPolicy });
+    this.userMappingTable = integrationTable(this, 'UserMappingTable', {
+      partitionKey: 'jira_identity', ttl: true, platformUserIndex: true, removalPolicy,
+    });
+    this.workspaceRegistryTable = integrationTable(this, 'WorkspaceRegistryTable', { partitionKey: 'jira_cloud_id', removalPolicy });
 
     // Dedup table: Jira webhook retries collapse to a single processor invoke
     // within the 8h TTL window. Issue events use the event timestamp; comment
     // events use the stable Jira comment ID.
-    this.webhookDedupTable = new dynamodb.Table(this, 'WebhookDedupTable', {
-      partitionKey: { name: 'dedup_key', type: dynamodb.AttributeType.STRING },
-      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      timeToLiveAttribute: 'ttl',
-      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
-      removalPolicy,
-    });
+    this.webhookDedupTable = webhookDedupTable(this, removalPolicy);
 
     // --- Webhook signing secret (placeholder, populated by `bgagent jira setup`) ---
     // Per-tenant OAuth tokens live in `bgagent-jira-oauth-<cloudId>` secrets
@@ -228,25 +267,7 @@ export class JiraIntegration extends Construct {
       nodeModules: ['pdf-parse'],
     };
 
-    // --- Task creation environment (matches LinearIntegration / SlackIntegration pattern) ---
-    const createTaskEnv: Record<string, string> = {
-      TASK_TABLE_NAME: props.taskTable.tableName,
-      TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
-      TASK_RETENTION_DAYS: String(props.taskRetentionDays ?? DEFAULT_TASK_RETENTION_DAYS),
-    };
-    if (props.repoTable) {
-      createTaskEnv.REPO_TABLE_NAME = props.repoTable.tableName;
-    }
-    if (props.orchestratorFunctionArn) {
-      createTaskEnv.ORCHESTRATOR_FUNCTION_ARN = props.orchestratorFunctionArn;
-    }
-    if (props.guardrailId && props.guardrailVersion) {
-      createTaskEnv.GUARDRAIL_ID = props.guardrailId;
-      createTaskEnv.GUARDRAIL_VERSION = props.guardrailVersion;
-    }
-    if (props.attachmentsBucket) {
-      createTaskEnv.ATTACHMENTS_BUCKET_NAME = props.attachmentsBucket.bucketName;
-    }
+    const createTaskEnv = taskCreationEnvironment(props);
     if (props.orchestrationTable) {
       createTaskEnv.ORCHESTRATION_TABLE_NAME = props.orchestrationTable.tableName;
     }
@@ -256,17 +277,9 @@ export class JiraIntegration extends Construct {
         props.maxConcurrentTasksPerUser ?? 10,
       );
     }
-    if (props.budgetTable) {
-      createTaskEnv.BUDGET_TABLE_NAME = props.budgetTable.tableName;
-      createTaskEnv.USER_POOL_ID = props.userPool.userPoolId;
-    }
 
-    // --- Cognito Authorizer (for /jira/link) ---
-    const cognitoAuthorizer = new apigw.CognitoUserPoolsAuthorizer(this, 'JiraCognitoAuthorizer', {
-      cognitoUserPools: [props.userPool],
-    });
     const cognitoAuthOptions: apigw.MethodOptions = {
-      authorizer: cognitoAuthorizer,
+      authorizer: props.linkAuthorizer,
       authorizationType: apigw.AuthorizationType.COGNITO,
     };
     const noneAuthOptions: apigw.MethodOptions = {
@@ -303,57 +316,15 @@ export class JiraIntegration extends Construct {
     // refresh-token JSON during expiring-token refresh.
     webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
       actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
-      resources: [
-        Stack.of(this).formatArn({
-          service: 'secretsmanager',
-          resource: 'secret',
-          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-          resourceName: 'bgagent-jira-oauth-*',
-        }),
-      ],
+      resources: [secretArnPattern(this, 'bgagent-jira-oauth-*')],
     }));
-    props.taskTable.grantReadWriteData(webhookProcessorFn);
-    props.taskEventsTable.grantReadWriteData(webhookProcessorFn);
+    // The processor stores the screened bytes and deletes them when the task is not created.
+    grantTaskCreation(webhookProcessorFn, props);
     if (props.orchestrationTable) {
       props.orchestrationTable.grantReadWriteData(webhookProcessorFn);
     }
     if (props.orchestrationTable && props.userConcurrencyTable) {
       props.userConcurrencyTable.grantReadData(webhookProcessorFn);
-    }
-    if (props.repoTable) {
-      props.repoTable.grantReadData(webhookProcessorFn);
-    }
-    if (props.budgetTable) {
-      props.budgetTable.grantReadData(webhookProcessorFn);
-      webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
-        actions: ['cognito-idp:AdminListGroupsForUser'],
-        resources: [props.userPool.userPoolArn],
-      }));
-    }
-    if (props.orchestratorFunctionArn) {
-      webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
-        actions: ['lambda:InvokeFunction'],
-        resources: [props.orchestratorFunctionArn],
-      }));
-    }
-    if (props.guardrailId) {
-      webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
-        actions: ['bedrock:ApplyGuardrail'],
-        resources: [
-          Stack.of(this).formatArn({
-            service: 'bedrock',
-            resource: 'guardrail',
-            resourceName: props.guardrailId,
-          }),
-        ],
-      }));
-    }
-    // The processor downloads Jira `media` attachments, screens them, and
-    // writes the cleaned bytes to the attachments bucket before creating the
-    // task (#577). ReadWrite mirrors the confirm-uploads path (Put + Get for
-    // multipart/versioned writes).
-    if (props.attachmentsBucket) {
-      props.attachmentsBucket.grantReadWrite(webhookProcessorFn);
     }
 
     // --- Webhook receiver (verifies HMAC, dedups, invokes processor) ---
@@ -384,14 +355,7 @@ export class JiraIntegration extends Construct {
     // CLI owns the lifecycle of these secrets.
     webhookFn.addToRolePolicy(new iam.PolicyStatement({
       actions: ['secretsmanager:GetSecretValue'],
-      resources: [
-        Stack.of(this).formatArn({
-          service: 'secretsmanager',
-          resource: 'secret',
-          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-          resourceName: 'bgagent-jira-oauth-*',
-        }),
-      ],
+      resources: [secretArnPattern(this, 'bgagent-jira-oauth-*')],
     }));
     webhookProcessorFn.grantInvoke(webhookFn);
 
@@ -470,5 +434,11 @@ export class JiraIntegration extends Construct {
         },
       ], true);
     }
+  }
+
+  public grantFeedback(fn: LambdaFunction, options: { readonly writeBack: boolean }): void {
+    grantTrackerFeedback(
+      fn, this.workspaceRegistryTable, 'JIRA_WORKSPACE_REGISTRY_TABLE_NAME', 'bgagent-jira-oauth-*', options.writeBack,
+    );
   }
 }

@@ -31,6 +31,25 @@ def log(prefix: str, text: str):
         pass
 
 
+def put_log_event(log_group: str, stream: str, message: str) -> None:
+    """Put one event, stamped now, on ``stream`` of ``log_group``; create the stream if needed.
+
+    The message is written as given. Raises on failure: what a lost event is worth is the
+    caller's decision.
+    """
+    from aws_session import platform_client
+
+    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    client = platform_client("logs", region_name=region)
+    with contextlib.suppress(client.exceptions.ResourceAlreadyExistsException):
+        client.create_log_stream(logGroupName=log_group, logStreamName=stream)
+    client.put_log_events(
+        logGroupName=log_group,
+        logStreamName=stream,
+        logEvents=[{"timestamp": int(time.time() * 1000), "message": message}],
+    )
+
+
 def log_error_cw(message: str, *, task_id: str | None = None) -> None:
     """Emit an ERROR line to stdout AND the APPLICATION_LOGS CloudWatch group.
 
@@ -77,20 +96,7 @@ def _log_error_cw_blocking(log_group: str, task_id: str | None, stamped: str) ->
     warnings. Failures are swallowed (any surfaceable alarm should
     fire on the absence of the expected stream, not on this helper).
     """
-    try:
-        from aws_session import platform_client
-
-        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
-        client = platform_client("logs", region_name=region)
-        stream = f"agent_error/{task_id or 'unknown'}"
-        with contextlib.suppress(client.exceptions.ResourceAlreadyExistsException):
-            client.create_log_stream(logGroupName=log_group, logStreamName=stream)
-        client.put_log_events(
-            logGroupName=log_group,
-            logStreamName=stream,
-            logEvents=[{"timestamp": int(time.time() * 1000), "message": stamped}],
-        )
-    except Exception:  # noqa: S110 - best-effort telemetry; stdout path already logged
+    with contextlib.suppress(Exception):
         # Intentionally silent. The caller (``log_error_cw``) has
         # already written the same message to stdout via the regular
         # ``log("ERROR", ...)`` path, so a CloudWatch delivery failure
@@ -98,7 +104,7 @@ def _log_error_cw_blocking(log_group: str, task_id: str | None, stamped: str) ->
         # degrades it to the runtime-DEFAULT log group. Raising here
         # would unwind the daemon thread mid-shutdown and emit a
         # confusing secondary traceback during a primary failure.
-        pass
+        put_log_event(log_group, f"agent_error/{task_id or 'unknown'}", stamped)
 
 
 def truncate(text: str, max_len: int = 200) -> str:

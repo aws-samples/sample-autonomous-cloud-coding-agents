@@ -254,8 +254,7 @@ function parseSkillPublisher(skillMd: string): string | undefined {
 }
 
 /** Recover the ABCA runtime payload from a SKILL.md's `x-abca-runtime`
- *  frontmatter key (base64-encoded JSON). Mirrors
- *  ``agent/src/registry/agent_registry_client.py``. Also accepts the legacy
+ *  frontmatter key (base64-encoded JSON). Also accepts the legacy
  *  single-quoted-JSON form so records published before the base64 switch still
  *  resolve. Reads the key from the YAML-parsed frontmatter object, so a
  *  caller-controlled discovery field cannot inject a shadowing key. */

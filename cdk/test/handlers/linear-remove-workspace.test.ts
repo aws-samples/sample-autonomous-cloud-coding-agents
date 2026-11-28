@@ -700,7 +700,7 @@ describe('linear-remove-workspace handler', () => {
     // and reporting success. The name is deterministic
     // (`bgagent-linear-oauth-<slug>`) and `SecretId` accepts a name, so there
     // is nothing to guess — and the IAM grant is over that *name* prefix
-    // (`linear-integration.ts:519`), which is what makes this permitted.
+    // (`linear-integration.ts`), which is what makes this permitted.
     routeDdb({ registryRow: activeRow({ oauth_secret_arn: undefined }) });
     smSend.mockReset();
     smSend.mockResolvedValue({});
@@ -743,7 +743,7 @@ describe('linear-remove-workspace handler', () => {
 
   test("a vault row that DID record an ARN reports 'absent', not 'not_applicable'", async () => {
     // `bgagent linear setup` writes `oauth_secret_arn` unconditionally
-    // (cli/src/commands/linear.ts:1321,1340), so vault rows normally carry BOTH
+    // (cli/src/commands/linear.ts), so vault rows normally carry BOTH
     // a provider name and an ARN. "vault-managed ⇒ no secret" would therefore be
     // wrong: only a vault row with no ARN of its own is `not_applicable`. The
     // provider follow-up is still reported, because that is driven by

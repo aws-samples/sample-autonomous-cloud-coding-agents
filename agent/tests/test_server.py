@@ -560,6 +560,36 @@ def test_validate_required_params_repoless_workflow_does_not_require_repo():
     assert missing == ["repo_url"]
 
 
+def test_validate_required_params_gives_no_verdict_on_an_unloadable_workflow():
+    """An id without a workflow file: ``build_config`` fails that task in the pipeline thread."""
+    missing = server._validate_required_params(
+        {"resolved_workflow": {"id": "knowledge/mystery-v1", "version": "1.0.0"}}
+    )
+    assert missing == []
+
+
+def test_validate_required_params_reads_pr_number_from_the_workflow_not_from_its_id(monkeypatch):
+    """An id outside the shipped ones, whose workflow names ``pr_number`` under ``all_of``."""
+    from workflow import load_workflow
+    from workflow.models import RequiredInputs
+
+    synthetic = load_workflow("coding/new-task-v1").model_copy(
+        update={
+            "id": "synthetic/on-a-pr-v1",
+            "required_inputs": RequiredInputs(all_of=["task_description", "pr_number"]),
+        }
+    )
+    monkeypatch.setattr("workflow.load_workflow", lambda workflow_id: synthetic)
+    missing = server._validate_required_params(
+        {
+            "resolved_workflow": {"id": "synthetic/on-a-pr-v1", "version": "1.0.0"},
+            "repo_url": "o/r",
+            "task_description": "x",
+        }
+    )
+    assert missing == ["pr_number"]
+
+
 def test_drain_threads_joins_active_threads():
     """_drain_threads joins live background threads on shutdown."""
     stop = threading.Event()
@@ -1770,14 +1800,11 @@ class TestMicrovmRunHookHeaderPosture:
             ),
         )
         assert started.wait(timeout=5.0)
-        # run_task never receives the token/session (they are consumed by
-        # _run_task_background), so assert via the extractor instead.
         fake_request: Any = _FakeRequest()
         params = server._extract_invocation_params(
             {"task_id": "t-hdr", "repo_url": "o/r", "prompt": "x"}, fake_request
         )
         assert params["session_id"] == ""
-        assert params["workload_access_token"] == ""
 
 
 class TestInvocationParamContract:

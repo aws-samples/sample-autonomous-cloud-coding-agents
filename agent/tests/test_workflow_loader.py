@@ -348,6 +348,11 @@ class TestLoadWorkflow:
         assert workflow.convergence.mode == mode
         assert workflow.convergence.terminal_outcomes == [outcome]
 
+    def test_same_id_returns_the_same_object(self):
+        # The pipeline loads the workflow again after the agent ran, without a
+        # fallback: that load must not be able to fail once the first passed.
+        assert load_workflow("coding/new-task-v1") is load_workflow("coding/new-task-v1")
+
     def test_missing_id_raises(self):
         with pytest.raises(WorkflowValidationError, match="not found"):
             load_workflow("coding/does-not-exist-v9")

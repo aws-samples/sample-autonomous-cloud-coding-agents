@@ -205,10 +205,6 @@ description = "cdk diff (pass args after --)"
 depends = ["//web:bundle"]
 run = "npx cdk diff {{arg(name='cdkargs', var=true, required=false)}}"
 
-[tasks.bundle]
-description = "No-op bundle step for cdk/cdk.json (NodejsFunction bundles at synth time)"
-run = "node -e \"process.exit(0)\""
-
 [tasks.build]
 description = "compile, test, eslint, typecheck, synth (quiet) — DAG: compile first, then test+typecheck+synth; eslint beside them"
 depends = [":test", ":eslint", ":typecheck", ":synth:quiet"]

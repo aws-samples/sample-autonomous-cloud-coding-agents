@@ -2,7 +2,7 @@
 title: "Repository preparation"
 ---
 
-The [Quick Start](/sample-autonomous-cloud-coding-agents/getting-started/quick-start) covers the basic setup: forking a sample repo, creating a PAT, registering a Blueprint, and storing the token in Secrets Manager. This section covers what you need beyond that.
+The [Quick Start](/sample-autonomous-cloud-coding-agents/getting-started/quick-start) covers the basic setup: forking a sample repo, creating a PAT, storing the token in Secrets Manager, and onboarding the fork. This section covers what you need beyond that.
 
 ### Pre-flight checks
 
@@ -31,7 +31,13 @@ The default is `awslabs/agent-plugins`. For a quick end-to-end test, fork that r
 
 ### Multiple repositories
 
-To onboard additional repositories, add entries to `resolveBlueprintDefinitions` in `cdk/src/blueprints/definitions.ts`. The app resolves these plain inputs before constructing either stack, so repository provisioning and DNS egress policy use the same configuration:
+To onboard another repository, run `bgagent repo onboard` with operator AWS credentials. It writes the repository's record without a deploy, and its flags set the per-repo overrides, which [Per-repo overrides](/sample-autonomous-cloud-coding-agents/customizing/per-repo-overrides) lists:
+
+```bash
+bgagent repo onboard acme/my-service --max-turns 150 --max-budget 5
+```
+
+To keep a registration in source control, or to give a repository extra egress domains, add an entry to `resolveBlueprintDefinitions` in `cdk/src/blueprints/definitions.ts` instead. The app resolves these plain inputs before constructing either stack, so repository provisioning and DNS egress policy use the same configuration:
 
 ```typescript
 definitions.push({
@@ -61,13 +67,13 @@ definitions.push({
 });
 ```
 
-If you use a custom `compute.runtimeArn` or `credentials.githubTokenSecretArn`, pass the ARNs to `TaskOrchestrator` via `additionalRuntimeArns` and `additionalSecretArns` so the Lambda has IAM permission. See [Repo onboarding](/sample-autonomous-cloud-coding-agents/architecture/repo-onboarding) for the full model.
+If you use a custom runtime ARN or GitHub token secret (`--runtime-arn` and `--token-secret-arn`, or `compute.runtimeArn` and `credentials.githubTokenSecretArn`), pass the ARNs to `TaskOrchestrator` via `additionalRuntimeArns` and `additionalSecretArns` so the Lambda has IAM permission. See [Repo onboarding](/sample-autonomous-cloud-coding-agents/architecture/repo-onboarding) for the full model.
 
 #### Build-regression gating (important for non-mise repos)
 
 Before opening a PR, the agent runs a **build** and **lint** command in its cloud container — once on the clean clone (baseline) and again after its changes. If the build was green before and fails after, the task fails (a build-**regression** gate). This is a compile/test verification, **not** a deployment — your app's actual deploy stays in your own CI/CD after the PR merges.
 
-The command defaults to **`mise run build`** / **`mise run lint`**. A repo that uses [mise](https://mise.jdx.dev/) with `build` / `lint` tasks gets gating for free. A repo that uses npm, gradle, cargo, make, etc. **must set `pipeline.buildCommand`** (and optionally `lintCommand`) to its real command — otherwise the default `mise run build` finds no task, **build-regression gating is silently OFF, and a change that breaks the build still reports success**. When that happens the agent surfaces a `⚠️ Build-regression gating is OFF` warning on the PR so the gap is visible, but the fix is to configure the command. For #247 orchestration this matters doubly: dependent sub-issues stack onto a predecessor's branch, so an unverified broken predecessor propagates downstream.
+The command defaults to **`mise run build`** / **`mise run lint`**. A repo that uses [mise](https://mise.jdx.dev/) with `build` / `lint` tasks gets gating for free. A repo that uses npm, gradle, cargo, make, etc. **must set its build command** (and optionally its lint command) to its real command, with `bgagent repo onboard owner/repo --build-command 'npm run build && npm test'` (and `--lint-command`) or with `pipeline.buildCommand` (and `lintCommand`) in its Blueprint — otherwise the default `mise run build` finds no task, **build-regression gating is silently OFF, and a change that breaks the build still reports success**. When that happens the agent surfaces a `⚠️ Build-regression gating is OFF` warning on the PR so the gap is visible, but the fix is to configure the command. For #247 orchestration this matters doubly: dependent sub-issues stack onto a predecessor's branch, so an unverified broken predecessor propagates downstream.
 
 Redeploy after changing Blueprints: `mise //cdk:deploy`. A redeploy writes the overrides a definition declares. It does not clear one that was deleted from the definition: see [Removing a per-repo override](/sample-autonomous-cloud-coding-agents/customizing/per-repo-overrides#removing-a-per-repo-override).
 
@@ -97,7 +103,7 @@ The default image (`agent/Dockerfile`) includes Python, Node 24 (LTS), `git`, `g
 
 A blueprint can declare its own `security.cedarPolicies` rules on top of the built-in hard/soft-deny starter set. Hard-deny rules absolutely block a tool call; soft-deny rules pause the agent and ask a human before proceeding.
 
-See the [Cedar policy guide](/sample-autonomous-cloud-coding-agents/customizing/cedar-policies) for the full authoring reference — vocabulary (`execute_bash`, `write_file`, `context.command`, `context.file_path`), annotations (`@rule_id`, `@tier`, `@approval_timeout_s`, `@severity`, `@category`), worked examples, multi-match rules, and cross-engine parity testing with [`contracts/cedar-parity/`](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/tree/main/contracts/cedar-parity) fixtures.
+See the [Cedar policy guide](/sample-autonomous-cloud-coding-agents/customizing/cedar-policies) for the full authoring reference — vocabulary (`execute_bash`, `write_file`, `context.command`, `context.file_path`), annotations (`@rule_id`, `@tier`, `@approval_timeout_s`, `@severity`, `@category`), worked examples, and multi-match rules.
 
 ### Other options
 

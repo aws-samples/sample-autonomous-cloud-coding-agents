@@ -6,7 +6,7 @@ title: "Cedar HITL Approval Gates"
 > **Companion:** [`INTERACTIVE_AGENTS.md`](/sample-autonomous-cloud-coding-agents/architecture/interactive-agents) §9.3 (pointing here), §7 (state machine).
 > **Design locked:** 2026-04-23 (Sam ↔ assistant discussion).
 > **Rev:** 5 (2026-05-06 — fold in parallel adversarial + advocate review of the timeout design: late-approval re-read on TIMED_OUT ConditionCheckFailed; user-visible timeout-cap milestones; ceiling-shrink milestone; Runtime JWT bound verified as auto-refreshed IAM; three new tuning metrics; explicit off-hours trade-off section; notification-delivery-failure boundary. IMPL-24 through IMPL-28 added.).
-> **Implementation:** Core shipped. The 3-outcome engine (`agent/src/policy.py`), default policy sets (`agent/policies/hard_deny.cedar`, `agent/policies/soft_deny.cedar`), approval Lambdas (`cdk/src/handlers/{approve-task,deny-task,get-pending,get-policies}.ts`) wired into `cdk/src/constructs/task-api.ts` (routes `/tasks/{id}/approve`, `/deny`, `/pending`, `/repos/{repo_id}/policies`), the cross-engine parity fixtures (`contracts/cedar-parity/`), and the exact engine pins are all on `main`. §15's task list is preserved as a historical implementation record; see the note at the top of §15 for what (if anything) remains unbuilt.
+> **Implementation:** Core shipped. The 3-outcome engine (`agent/src/policy.py`), default policy sets (`agent/policies/hard_deny.cedar`, `agent/policies/soft_deny.cedar`) and approval Lambdas (`cdk/src/handlers/{approve-task,deny-task,get-pending}.ts`) wired into `cdk/src/constructs/task-api.ts` (routes `/tasks/{id}/approve`, `/deny`, `/pending`) are on `main`. The rule listing (`GET /v1/repos/{repo_id}/policies`, `bgagent policies`), the Lambda-side Cedar engine with its layer and the cross-engine parity contract were removed: see [ADR-028](/sample-autonomous-cloud-coding-agents/decisions/adr-028-one-cedar-engine). §15's task list is preserved as a historical implementation record; see the note at the top of §15 for what (if anything) remains unbuilt.
 
 ---
 
@@ -113,7 +113,7 @@ The winning property: **policy authors can put on their "security-review-approve
 
 ## 3. Design decisions (locked)
 
-Settled during the 2026-04-23 design discussion and extended after the 2026-04-24 and 2026-05-06 reviews. Each has detailed rationale in those conversations; summary here for implementers. **23 decisions**, all locked unless an adversarial review finding explicitly reopened a concern.
+Settled during the 2026-04-23 design discussion and extended after the 2026-04-24 and 2026-05-06 reviews. Each has detailed rationale in those conversations; summary here for implementers. **23 decisions**, all locked unless an adversarial review finding explicitly reopened a concern. Two were withdrawn later, #19 and #23, and #5 lost its listing command ([ADR-028](/sample-autonomous-cloud-coding-agents/decisions/adr-028-one-cedar-engine)).
 
 | # | Decision | Summary |
 |---|---|---|
@@ -121,7 +121,7 @@ Settled during the 2026-04-23 design discussion and extended after the 2026-04-2
 | 2 | **Hook point: extend `PreToolUse`, not `can_use_tool`** | PreToolUse is already async-compatible, already wired to Cedar, and already owns the tool-governance boundary. |
 | 3 | **Wait mechanism: DDB strongly-consistent polling, 2s → 5s backoff** | Initial 2s cadence for the first 30s, then 5s. `ConsistentRead=True` so the agent never misses an approval that already landed. |
 | 4 | **Scope allowlist: in-process, seeded from persisted `initial_approvals`** | Runtime escalation lives in the `PolicyEngine` instance. Submit-time `--pre-approve` flags persist on TaskTable and seed the allowlist at container startup. Lost on restart (rare; reconciler fails stranded tasks). |
-| 5 | **CLI UX: standalone `bgagent approve/deny` + `--pre-approve <scope>` + `bgagent policies list` + `bgagent pending`** | No inline interactive prompt in the streaming CLI for v1. Discovery + listing commands solve the request_id/rule_id copy problem. |
+| 5 | **CLI UX: standalone `bgagent approve/deny` + `--pre-approve <scope>` + `bgagent pending`** | No inline interactive prompt in the streaming CLI for v1. `bgagent pending` solves the request_id copy problem and names the rules that gated each call. |
 | 6 | **Timeouts: per-task default + per-rule Cedar annotation override, min wins, bounded floor + ceiling, fail-closed** | Per-task default: **300s** (5 min), overridable via `--approval-timeout` on submit and bounded by `[30, min(3600, maxLifetime - 300)]`. Floor: 30s (engine-enforced on both task default and rule annotations). Ceiling: `min(1h, maxLifetime_remaining - cleanup_margin)` — sized so the TTL on the approval row always covers the decision window. On timeout → deny (never auto-approve). See §14.8 for the off-hours trade-off this posture deliberately accepts. |
 | 7 | **Concurrency slots: AWAITING_APPROVAL holds the slot** | Matches PAUSED semantics. Container is alive, consuming memory. |
 | 8 | **Hard-deny is absolute** | No `--pre-approve` scope, and no blueprint `disable:` directive, can bypass it. CreateTaskFn validates and rejects `rule:<hard_deny_rule_id>`; blueprint loader rejects `disable:` entries that name built-in hard-deny rules. |
@@ -135,11 +135,11 @@ Settled during the 2026-04-23 design discussion and extended after the 2026-04-2
 | 16 | **Denial reason sanitized in the Lambda, before persisting** | `DenyTaskFn` runs `output_scanner` on the reason before writing to DDB. The agent never sees unscanned text. |
 | 17 | **`tool_input_preview` stripped of ANSI/control characters at agent-side write + CLI render** | Defense in depth against approver-confusion attacks where a prompt-injected tool input overwrites the CLI prompt with a different command. |
 | 18 | **Deny-as-steering injected via Stop hook `between_turns_hooks`, NOT via `permissionDecisionReason` (best-effort)** | Reuses the validated Phase-2 nudge mechanism. `<user_denial>` XML block wrapped by the same `_xml_escape` utility. Because the denial hook runs AFTER the cancel-wins hook, denial injection is best-effort on cancelled tasks; `permissionDecisionReason` on the SDK return is the guaranteed surface (§4 step 25b, §6.5). |
-| 19 | **`rule:` discovery via new endpoint** | `GET /v1/repos/{repo_id}/policies` + `bgagent policies list` surfaces the rule IDs + annotations + whether the rule is hard or soft. Solves the otherwise-undiscoverable `rule:X` pre-approval scope. Packaged via a Lambda layer (§15.6) so cedar-wasm isn't bundled per function. |
+| 19 | **`rule:` discovery via new endpoint** | **Withdrawn ([ADR-028](/sample-autonomous-cloud-coding-agents/decisions/adr-028-one-cedar-engine)).** `GET /v1/repos/{repo_id}/policies` and `bgagent policies list` were removed. Rule ids are in the user guide's table of built-in rules and on every approval request (§7.6). |
 | 20 | **`write_path:<glob>` scope** | Added so users can pre-approve file writes under specific path patterns (e.g., `write_path:docs/**`) without needing to grant all Writes. Validation uses Python `fnmatch` at runtime; glob semantics are a Cedar-`like` superset (§6.4, §5.5). |
 | 21 | **`tool_group:file_write` convenience scope** | Resolves to `{Write, Edit}`. Prevents the surprise of pre-approving `Write` and still getting gated on `Edit`. |
 | 22 | **Pre-implementation spike: cedarpy annotation round-trip** | Day 1 of implementation validates that `policies_to_json_str()` returns annotations in the expected shape. If the API has changed, fall back to policy-ID prefix conventions. |
-| 23 | **Cedar engine parity contract (Python `cedarpy` ↔ JS `cedar-wasm`)** | Both engines are pinned in `mise.toml`. A golden-file parity test runs in CI: for each `(policy, input)` fixture the test asserts Python and WASM return the same `decision` and the same set of matching rule IDs. Policy authors who upgrade either engine must refresh the golden file; drift fails the build. See §15.6 and Appendix B. |
+| 23 | **Cedar engine parity contract (Python `cedarpy` ↔ JS `cedar-wasm`)** | **Withdrawn ([ADR-028](/sample-autonomous-cloud-coding-agents/decisions/adr-028-one-cedar-engine)).** The agent's `cedarpy` is the only Cedar engine, so there is no second engine to compare it with. The pin and the suites that judge a bump are in §15.6. |
 
 ---
 
@@ -392,6 +392,8 @@ security:
   approvalGateCap: 50                         # optional; per-task lifetime cap on gates (1 ≤ N ≤ 500, default 50). See §3 decision #13.
 ```
 
+> **Not implemented: the `disable:` list and `maxPreApprovalScope`.** The `Blueprint` construct has neither property. The engine loads every built-in rule for every task, and a per-repository cap on what `--pre-approve` may seed is designed but not implemented yet. Wherever this document mentions `disable:` or `maxPreApprovalScope`, it describes the design. The construct's `security` properties are `cedarPolicies`, an array of Cedar texts with the tier declared in each text, and `approvalGateCap`: see the [Cedar policy guide](/sample-autonomous-cloud-coding-agents/customizing/cedar-policies#where-rules-live).
+
 **`approvalGateCap` sizing guidance:**
 
 - **Short, well-scoped tasks** (dependency bumps, small refactors): default 50 is generous — typical p99 is under 5 gates. No override needed.
@@ -420,7 +422,7 @@ Fail-on-error is the right posture for blueprint misconfiguration — silent-fal
 
 | Annotation | Required? | Values | Purpose |
 |---|---|---|---|
-| `@rule_id("...")` | **Yes on soft-deny**, recommended on hard-deny | Kebab-case or snake_case identifier, unique across both tiers | Stable ID for `--pre-approve rule:X`, for audit trail, and for the `bgagent policies` discovery endpoint. `PolicyEngine.__init__` raises on duplicates. |
+| `@rule_id("...")` | **Yes on soft-deny**, recommended on hard-deny | Kebab-case or snake_case identifier, unique across both tiers | Stable ID. Approval requests and the audit trail name it, and `--scope rule:<id>` and `--pre-approve rule:<id>` take it. `PolicyEngine.__init__` raises on duplicates. |
 | `@tier("hard"\|"soft")` | **Yes** | Exactly one of "hard" or "soft" | Validates policy is in the correct file/section. Engine rejects mismatch at load time. |
 | `@approval_timeout_s("N")` | No | Integer seconds ≥ 30 | Per-rule timeout. If absent, uses the task default (**300s** by default, overridable via submit-time `--approval-timeout`; see decision #6). Has no effect on hard-deny rules. Values below the floor are rejected at load time. Values below **120s** emit a blueprint-load WARN but are accepted down to the 30s floor — almost no human responds to an approval request in under 2 minutes, so sub-120s is usually a policy-authoring mistake (see IMPL-25). Loader policy: STRICT at the floor (30s, reject) and ADVISORY below 120s (warn, accept). |
 | `@severity("low"\|"medium"\|"high")` | No | One of the three | Shown in CLI approval prompt, colored by severity. Default: "medium". |
@@ -545,23 +547,16 @@ Per the sentinel trick (see §6.2), `invoke_tool` matches on the real tool-name 
 
 ### 5.4 Policy discovery — shared parser
 
-Because `CreateTaskFn` needs to validate `rule:<id>` pre-approvals against the target repo's actual policy set, we ship a **shared policy-parsing library** used in both places:
+The agent's engine (`agent/src/policy.py`, on `cedarpy`) is the only Cedar parser. The Lambda-side parser that this section first described was removed with its one user, the rule listing of §7.6 ([ADR-028](/sample-autonomous-cloud-coding-agents/decisions/adr-028-one-cedar-engine)). §7.6 says where rule ids are found.
 
-- `cdk/src/handlers/shared/cedar-policy.ts` — thin wrapper around `@cedar-policy/cedar-wasm@4.12.0` for TypeScript
-- `agent/src/policy.py` — the full engine, using `cedarpy`
+The design had two checks of a `rule:<id>` scope against the repository's rules: at submit, and again at container start (§13.10). Neither was built:
 
-Both consume the blueprint's `security.cedarPolicies` section. `CreateTaskFn` loads the target repo's blueprint (via the existing `RepoTable` store), concatenates with the built-in policies, parses via `cedar.policyToJson()` (TypeScript; §15.6), and extracts `rule_id` + `tier` annotations. `--pre-approve rule:X` is validated:
+- `CreateTaskFn` checks the syntax of each `initial_approvals` entry (`parseApprovalScope` in `cdk/src/handlers/shared/approval-scope.ts`): a known scope or prefix, a value after the prefix, at most 128 characters, and a known tool or group after `tool_type:` or `tool_group:`. It also refuses the three scopes that stand for a waiting call (`this_call`, `tool_type_session`, `tool_group_session`) and the degenerate patterns of §7.4. It does not read the repository's Cedar rules.
+- At task start the engine puts each `rule:<id>` into its allowlist as it is, and consults those ids only for a call that the soft tier has gated (§6.2).
 
-- `X` exists as some rule's `@rule_id` → ok
-- `X` refers to a hard-deny rule → 400 at submit time (hard-deny cannot be bypassed)
-- `X` refers to a soft-deny rule → ok; passes through
-- Blueprint `disable: [X]` where `X` is a built-in hard-deny rule → 400 at submit time (§5.1, §15.4)
+So a `rule:` scope that names no loaded rule matches nothing: the task starts, and the calls the scope was meant to cover are gated like any other.
 
-Both engines' outputs must agree on the `(decision, matching_rule_ids)` for any input. This is enforced by the cross-engine parity test (§15.6 + decision #23). See §15.6 for the golden-file CI pattern.
-
-Runtime enforcement is still the authoritative layer. Submit-time validation is a UX guard — any drift between submit-time and runtime-loaded policies (possible if blueprint changes between them) causes the task to fail at HYDRATING with a clear error, not silently misbehave. `initial_approvals` is re-validated on container start (§4 step 6); see §13.10 for the drift failure mode.
-
-**Scenario (finding #11):** A user submits `bgagent submit ... --pre-approve rule:deploy_staging` at 9:00 AM against a blueprint that has `deploy_staging` as a soft-deny rule. `CreateTaskFn` validates; `deploy_staging` resolves to a soft-deny rule in the blueprint snapshot — 202 accepted. At 9:01 AM a platform engineer deploys an updated blueprint that removes the `deploy_staging` rule (perhaps it was consolidated under a broader `deploy_any` rule). At 9:03 AM the container spawns and `PolicyEngine.__init__` loads the NEW blueprint. The allowlist seeding step tries to resolve `rule:deploy_staging` → no matching rule_id → task fails at HYDRATING with reason `"initial_approvals drift: rule 'deploy_staging' missing from current blueprint"`. The user sees a clear failure and can resubmit with the new rule name. Without this drift re-validation, the task would silently run without the `deploy_staging` pre-approval — gating on what the user thought was already allowed, which is worse than failing: the user believes their policy was applied when it wasn't.
+§4 (steps 4 and 6) and §7.3 still describe both checks and a shared policy-parsing library: they describe the design.
 
 ### 5.5 Gotchas for policy authors
 
@@ -1103,36 +1098,12 @@ If `maxPreApprovalScope: "tool_type_session"`, `all_session` is rejected. All ot
 
 ### 7.6 `GET /v1/repos/{repo_id}/policies`
 
-New read-only endpoint for rule discovery and `bgagent policies list`:
+**Removed** ([ADR-028](/sample-autonomous-cloud-coding-agents/decisions/adr-028-one-cedar-engine)), together with `bgagent policies`. No route lists a repository's rules.
 
-**Response** (200):
-```json
-{
-  "repo_id": "my-org/my-app",
-  "policies": {
-    "hard": [
-      {"rule_id": "rm_slash", "category": "destructive",
-       "summary": "Reject rm -rf / and similar"},
-      ...
-    ],
-    "soft": [
-      {"rule_id": "force_push_any", "severity": "medium",
-       "category": "destructive", "approval_timeout_s": 300,
-       "summary": "Force push to any branch"},
-      {"rule_id": "write_env_files", "severity": "high",
-       "category": "filesystem", "approval_timeout_s": 600,
-       "summary": "Write to *.env files"},
-      ...
-    ]
-  }
-}
-```
+Where rule ids are found:
 
-Loaded by the Lambda on demand from the target repo's blueprint + built-in policies. `summary` is a human-readable annotation `@summary("...")` if present, else falls back to the first line of the `when` clause rendered as text.
-
-Rate-limited 30/min/user; cached 5min per repo in-Lambda.
-
-**Onboarding gate (symmetric with `POST /v1/tasks`).** If the target repo is not onboarded in `RepoTable`, this endpoint returns **422 `REPO_NOT_ONBOARDED`** — the same response `POST /v1/tasks` would return on a task-submit attempt. The gate runs AFTER rate-limit so the 429 response doesn't leak onboarding-status via a 422-vs-200 timing oracle. Rationale: a user who discovers rules for a repo they can't actually submit tasks against has received misleading information; the 422 tells them the real blocker (onboard the repo first) rather than listing policies that will never fire. Decision documented and added 2026-05-11 as part of the E2E deploy-readiness hotfix.
+- **Built-in rules:** the table [Rule ids](/sample-autonomous-cloud-coding-agents/using/approval-gates-cedar-hitl#rule-ids) in the user guide.
+- **Any rule, a repository's own included:** every approval request names the rules that gated the call. They are the `matching_rule_ids` of `GET /v1/pending` (§7.7), and `bgagent pending` prints them.
 
 ### 7.7 `GET /v1/pending` — list pending approvals across user's active tasks
 
@@ -1151,6 +1122,7 @@ Returns the caller's approvals with `status=PENDING` whose window (`created_at +
       "tool_input_preview": "git push --force origin feature-x",
       "severity": "medium",
       "reason": "Cedar soft-deny: force_push_any",
+      "matching_rule_ids": ["force_push_any"],
       "created_at": "2026-04-23T14:00:00Z",
       "timeout_s": 300,
       "expires_at": "2026-04-23T14:05:00Z"
@@ -1179,10 +1151,6 @@ bgagent deny <task_id> <request_id> [--reason "..."|--reason-file <path>] [--out
 
 # List all pending approvals across the user's active tasks (solves request-id lookup)
 bgagent pending [--output text|json]
-
-# Discover policies for a repo (solves rule-id lookup)
-bgagent policies list --repo <repo_id> [--tier hard|soft] [--output text|json]
-bgagent policies show --repo <repo_id> --rule <rule_id> [--output text|json]
 ```
 
 ### 8.2 Extended `submit` / `run` flags
@@ -1624,7 +1592,7 @@ These alarms transition to `ALARM` state in CloudWatch and appear in the console
 - **Agent container ↔ TaskApprovalsTable**: IAM role on the runtime has `GetItem` / `PutItem` / conditional `UpdateItem` on the table. Agent writes pending, reads decisions, writes TIMED_OUT on internal timeout.
 - **User CLI ↔ API Gateway**: Cognito JWT (same authorizer as `/tasks/*`). Cognito `sub` is the canonical caller identity, used **verbatim** in DDB `ConditionExpression` (§7.1, finding #6).
 - **ApproveTaskFn/DenyTaskFn ↔ TaskApprovalsTable + TaskTable**: Lambda IAM policy allows `UpdateItem` on both tables under `TransactWriteItems`. Authorization is in the ConditionExpression (ownership AND state), not in a separate IAM boundary.
-- **Blueprint origin**: blueprints are CDK-deployed constructs (see `cdk/src/constructs/blueprint.ts`). Platform operators deploy them. Users cannot upload arbitrary blueprint.yaml from the target repo. This property is load-bearing for the security model — if blueprint origin ever becomes user-uploaded, the blueprint-injection section (§12.4) must be re-evaluated. The 64 KB text cap (§5.1, finding #12) and `disable:` hard-deny rejection (finding #9) are applied regardless of origin as defense in depth.
+- **Blueprint origin**: blueprint Cedar policies are written by platform operators, through a deploy (the `Blueprint` construct, see `cdk/src/constructs/blueprint.ts`) or with operator credentials (`bgagent repo onboard`). Users cannot upload arbitrary blueprint.yaml from the target repo. This property is load-bearing for the security model — if blueprint origin ever becomes user-uploaded, the blueprint-injection section (§12.4) must be re-evaluated. The 64 KB text cap (§5.1, finding #12) and `disable:` hard-deny rejection (finding #9) are applied regardless of origin as defense in depth.
 - **Slack → ApproveTaskFn**: mediated by the fan-out Lambda + `SlackUserMappingTable` (§11.2). Slack admin cannot forge mappings; Slack approvals capped at `severity: low|medium` (finding #4).
 
 ### 12.2 Ownership encoded in ConditionExpression
@@ -1664,7 +1632,7 @@ Authorization + approvals-state + task-state transition all atomic. A compromise
 
 ### 12.4 Blueprint content safety
 
-The blueprint trust model (§12.1) means blueprint Cedar policies are trusted by construction. Nonetheless the engine enforces, at ALL origin sources (CDK-deployed today; potentially user-uploadable in future):
+The blueprint trust model (§12.1) means blueprint Cedar policies are trusted by construction. Nonetheless the engine enforces, at ALL origin sources (written by platform operators today, through a deploy or with operator credentials; potentially user-uploadable in future):
 
 - Cedar syntax validation at load → fail-on-error
 - Duplicate `@rule_id` → fail-on-error
@@ -1777,7 +1745,7 @@ ApproveTaskFn sees JWT whose `sub` doesn't match row's `user_id`: atomic `Transa
 
 ### 13.4 Cedar engine crash mid-evaluation
 
-`evaluate_tool_use` catches all exceptions from `cedarpy.is_authorized` and returns `Outcome.DENY` with reason `"fail-closed: <exception_type>"`. Matches existing behavior. Agent-side (cedarpy) and Lambda-side (cedar-wasm) crashes are mutually independent — a crash in one is not a signal the other has the same bug, but CI parity tests (§15.6, decision #23) ensure the two engines produce the same decisions on the same inputs before deploy.
+`evaluate_tool_use` catches all exceptions from `cedarpy.is_authorized` and returns `Outcome.DENY` with reason `"fail-closed: <exception_type>"`. Matches existing behavior.
 
 ### 13.5 Multiple matching rules with conflicting annotations
 
@@ -1809,17 +1777,19 @@ Hook emits `approval_resume_failed` and returns DENY. Task is already in its new
 
 ### 13.10 `initial_approvals` drift at container start
 
+**Not implemented.** Nothing compares a `rule:<id>` scope with the repository's rules, at submit or at container start (§5.4): a scope that names no loaded rule matches nothing, and the task starts. The rest of this section describes the design.
+
 `CreateTaskFn` validates `rule:<id>` scopes against the blueprint at submit time (§5.4). If the blueprint changes between submit and container spawn, the allowlist seeding in `PolicyEngine.__init__` (§4 step 6) re-validates each `initial_approvals` entry. Drift failure mode:
 
 - If a `rule:<id>` no longer resolves to a valid soft-deny rule → task fails at HYDRATING with reason `"initial_approvals drift: rule '<id>' missing"`. User sees clear failure and can resubmit with updated scopes.
 - If a `tool_type:X` or `tool_group:X` references a type that's been removed from the tool catalog → same failure.
 - `bash_pattern:`/`write_path:`/`all_session` scopes have no schema drift; they pass unconditionally.
 
-This is preferred over a silent WARN-skip because silently dropping a pre-approval means the user expects a gate to not fire and it does, which is UX-confusing and violates the principle of least surprise. See finding #11 scenario (§5.4). Drift is tracked in telemetry (new milestone `initial_approvals_drift` emitted on the failure).
+This is preferred over a silent WARN-skip because silently dropping a pre-approval means the user expects a gate to not fire and it does, which is UX-confusing and violates the principle of least surprise. Drift is tracked in telemetry (new milestone `initial_approvals_drift` emitted on the failure).
 
 ### 13.11 Cross-engine policy disagreement (cedarpy vs cedar-wasm)
 
-Addressed by the parity contract (decision #23, §15.6). Golden-file CI test runs every build; divergence fails the build before deploy. Runtime divergence would manifest as `CreateTaskFn` accepting `rule:X` that the agent's engine doesn't recognize (same class as §13.10), or vice versa — both paths fail HYDRATING with a clear drift message.
+No longer applies. The agent's `cedarpy` is the only Cedar engine ([ADR-028](/sample-autonomous-cloud-coding-agents/decisions/adr-028-one-cedar-engine)), so there is no second engine that could disagree with it.
 
 ### 13.12 VM-throttle + late-approval race
 
@@ -1888,7 +1858,7 @@ A blocker does **not** introduce a new task status. Blockers surface as events d
 | `missing_secret` | a required secret was never wired into the blueprint | no | report the exact secret name; never acquire |
 | `egress_denied` | a connection to a non-allowlisted host was blocked | no | report the exact host to allowlist; never widen egress |
 | `dependency_unreachable` | transient failure reaching a dependency/registry | yes | bounded retry with backoff, then report |
-| `policy_fail_closed` | Cedar engine error/unavailable (NOT an intentional hard-deny — see §13.4, §13.15) | no | report; distinct from hard-deny |
+| `policy_fail_closed` | Cedar engine error (NOT an intentional hard-deny — see §13.4, §13.15) | no | report; distinct from hard-deny |
 | `auth_failure` | credential present but rejected | no | report; no self-heal (reserved — no v1 detection site) |
 | `unknown_environmental` | environmental fault not otherwise classified | no | report best-effort detail (fallback only) |
 
@@ -2110,7 +2080,7 @@ See §17.18 for the off-hours escalation future-work primitive, and §13.14 for 
 
 ## 15. Implementation plan
 
-> **Status note (post-implementation):** The v1 core described below is **shipped on `main`** — the 3-outcome engine, hard/soft default policy sets, the approval/deny/pending/policies Lambdas and their API routes, and the cross-engine parity contract all exist and are tested. The task list and scenarios in this section are retained as the historical design-and-build record; treat them as descriptive of what was built rather than as outstanding work. Items still explicitly deferred are tracked in §15.1 ("Future work — polish") and §17 (e.g. CLI inline streaming prompt, `approve --defer` / allowlist revocation, the additional CloudWatch alarms of §11.5, persistent recent-decision cache, persistent per-minute rate limit).
+> **Status note (post-implementation):** The v1 core described below is **shipped on `main`** — the 3-outcome engine, hard/soft default policy sets, and the approval/deny/pending Lambdas and their API routes exist and are tested. The rule listing (its Lambda, route and CLI command), the Lambda-side Cedar engine, its layer and the cross-engine parity contract were built too and removed later ([ADR-028](/sample-autonomous-cloud-coding-agents/decisions/adr-028-one-cedar-engine)); the rows and bullets below that name them stay as the record of that work. The task list and scenarios in this section are retained as the historical design-and-build record; treat them as descriptive of what was built rather than as outstanding work. Items still explicitly deferred are tracked in §15.1 ("Future work — polish") and §17 (e.g. CLI inline streaming prompt, `approve --defer` / allowlist revocation, the additional CloudWatch alarms of §11.5, persistent recent-decision cache, persistent per-minute rate limit).
 
 ### 15.1 Milestone structure
 
@@ -2279,131 +2249,16 @@ Rollout steps:
 
 ### 15.6 Shared Cedar parsing — cross-engine parity contract
 
-The agent runtime uses Python [`cedarpy@4.12.2`](https://pypi.org/project/cedarpy/); the Lambda side (`CreateTaskFn`, `ApproveTaskFn`, `DenyTaskFn`, `GetPoliciesFn`) uses [`@cedar-policy/cedar-wasm@4.12.0`](https://www.npmjs.com/package/@cedar-policy/cedar-wasm) — AWS's official WASM-compiled Cedar engine. Same Rust core, two bindings. Because these engines evolve independently, we ship a **parity contract** (decision #23, finding #1) to catch drift before deploy.
+**Withdrawn** ([ADR-028](/sample-autonomous-cloud-coding-agents/decisions/adr-028-one-cedar-engine)). The contract compared the decisions of two Cedar engines: `cedarpy` in the agent, and `@cedar-policy/cedar-wasm` in a Lambda layer. The Lambda side never decided a request; its one user was the rule listing (§7.6). The listing, the Lambda-side parser with its layer and dependency, the TypeScript copy of the built-in rules and the fixtures in `contracts/cedar-parity/` were removed.
 
-**Version pinning.** Both engines are pinned exactly (not `^` or `~`) in the monorepo's canonical manifest files. The two bindings are deliberately on **different version lines** — they are NOT required to be equal. `cedarpy` and `cedar-wasm` follow independent release cadences over the shared Cedar Rust core, and the currently-shipped pins (`cedarpy==4.12.2` ↔ `@cedar-policy/cedar-wasm==4.12.0`, both on the Cedar 4.12.0 core) are a tested-compatible pair: the parity fixtures in `contracts/cedar-parity/` are what certify that this specific pair produces identical `(decision, matching_rule_ids)` on every fixture. The rule is "move together and re-verify parity when you bump either side," not "keep the version strings equal."
-- `agent/pyproject.toml`: `cedarpy==4.12.2`
-- `cdk/package.json`: `"@cedar-policy/cedar-wasm": "4.12.0"`
-- `mise.toml` documents the pinned versions in a comment for operator visibility
-- `contracts/cedar-parity/engines/versions.json` names the pair the fixtures were verified against. `cdk/test/constructs/cedar-wasm-layer.test.ts` (part of `mise //cdk:test`, so of the build) fails unless `cdk/package.json`, `cdk/layers/cedar-wasm/package.json` and `agent/pyproject.toml` each pin exactly that version, so an engine bump is always an edit to that file as well
+What holds now:
 
-**Lambda layer packaging** (finding #5). The cedar-wasm package is 4.1 MB unzipped. Shipping it in the deployment bundle of each of the 4 policy Lambdas would consume ~16 MB of unzipped bundle size — manageable on its own but leaves little room for AWS SDK + other deps as the codebase grows, and threatens the Lambda 250 MB unzipped limit under realistic growth. Solution: package cedar-wasm as a **Lambda layer** (`cedar-wasm-layer.ts`, task #10 in §15.2), attached to each policy Lambda. This reduces each Lambda's deployment bundle to just the handler code + thin wrapper around the layer import. Policy Lambdas are configured with ≥ 512 MB memory to accommodate WASM module instantiation under concurrent invocation (measured under 100-concurrent bursts in §15.3 Lambda memory tests).
-
-**Golden-file parity test.** A shared fixture dir (`contracts/cedar-parity/`) contains JSON files of the form. The `contracts/` location follows the precedent set by `contracts/memory-hash-vectors.json` — a neutral directory that neither `agent/` nor `cdk/` owns, so both test suites reach into it symmetrically. The sibling `README.md` under `contracts/cedar-parity/` documents the fixture shape and update workflow.
-
-```json
-{
-  "name": "multi-match-force-push-main",
-  "policies": "@tier(\"soft\") @rule_id(\"force_push_any\") ...\n@tier(\"soft\") @rule_id(\"force_push_main\") ...",
-  "input": {
-    "principal": {"type": "Agent", "id": "a"},
-    "action": {"type": "Agent::Action", "id": "execute_bash"},
-    "resource": {"type": "Agent::Sentinel", "id": "sentinel"},
-    "context": {"command": "git push --force origin main"}
-  },
-  "expected": {
-    "decision": "Deny",
-    "matching_rule_ids": ["force_push_any", "force_push_main"]
-  }
-}
-```
-
-Both `tests/test_cedar_parity.py` (agent side, uses `cedarpy`) and `cdk/test/handlers/shared/cedar-parity.test.ts` (Lambda side, uses `cedar-wasm`) load each fixture, run their respective engine, and assert the decision + sorted rule_ids match `expected`. Any divergence fails the build BEFORE deployment. This catches:
-- Syntax that one engine accepts but the other rejects (e.g. a new Cedar feature in a minor release)
-- Annotation parsing differences
-- Multi-match diagnostics divergence (does `diagnostics.reasons` contain policy IDs or rule IDs? both must agree)
-- Any bug fix in one engine that hasn't landed in the other
-
-```mermaid
-flowchart LR
-    F[(Golden-file fixtures<br/>contracts/cedar-parity/*.json)]
-    F --> PY[agent: test_cedar_parity.py<br/>→ cedarpy.is_authorized]
-    F --> TS[cdk: cedar-parity.test.ts<br/>→ cedar-wasm isAuthorized]
-    PY --> PYR[decision + rule_ids]
-    TS --> TSR[decision + rule_ids]
-    PYR --> EQ{Assert equal<br/>byte-for-byte<br/>sorted rule_ids}
-    TSR --> EQ
-    EQ -->|match| OK[CI green<br/>deploy unblocked]
-    EQ -->|mismatch| FAIL[CI red<br/>build fails<br/>before deploy]
-    FAIL -.remediation.-> R1[pin one engine<br/>back or forward]
-    FAIL -.or.-> R2[refresh fixture<br/>if intentional change]
-    FAIL -.or.-> R3[file upstream bug<br/>against diverging engine]
-```
-
-When policy authors upgrade either engine, the parity fixture must be re-generated (a small helper script dumps decisions from both engines; the human confirms the change is intentional).
-
-**What the parity fixtures do not cover.** Each fixture carries its own policy text, so the parity tests compare the two engines and do not exercise the rules shipped in `agent/policies/`. Those are pinned by `agent/tests/test_policy_builtin_rules.py`: for each built-in rule its tier, the calls it must catch (each evaluated for every task type) and one similar call it must leave alone. Removing a rule, moving it to the softer tier, limiting it to some task types or narrowing one of its patterns fails that test.
-
-**Scenario (finding #1, illustrative):** This example uses hypothetical versions (e.g. cedarpy `4.10.1` → `4.11.0`) to show the *class* of bug the parity contract catches; it does not describe the real shipped pins (`cedarpy==4.12.2` ↔ `cedar-wasm==4.12.0`, documented above). The point is that closeness of version strings — even within the same minor line — is no guarantee of behavioral parity, which is exactly why the golden fixtures, not the version numbers, are the source of truth. A platform engineer bumps cedarpy by hand from 4.10.1 to 4.11.0. They notice cedar-wasm is still 4.10.0 but assume it's fine because both say "4.x". Between these versions, cedarpy added support for a new `context has` operator that cedar-wasm doesn't yet have. A new blueprint soft-deny rule uses `context has "approved_context"`. On deploy:
-- Agent-side `PolicyEngine.__init__` parses the rule successfully; engine loads normally.
-- `CreateTaskFn` on the Lambda side calls cedar-wasm `policyToJson()` — it throws: `ParseError: unknown operator 'has' at line 3`.
-- User submits a task against that repo. `CreateTaskFn` crashes mid-validation. Error message: "500 Internal Server Error" (because the Lambda didn't handle the upstream parse error gracefully).
-- Users cannot submit any task on the affected repo until someone notices.
-
-Under the parity-contract regime, the CI build of that bump runs the parity test, which loads a fixture using `context has` — the cedar-wasm side throws; the test fails; CI is red. The engineer sees the failure BEFORE deploying, pins both engines to the same minor, and files an upstream ticket to track the cedar-wasm feature gap. Users never experience the broken deploy. The parity contract caught a class of bug that unit tests can't, because unit tests test each engine in isolation. Version pinning alone would not have helped — the engineer had to notice the version mismatch manually, and humans miss things during dependency updates. The golden file is the forcing function.
-
-**Core `cedar-wasm` functions used by the design:**
-
-| Function | Purpose |
-|---|---|
-| `policySetTextToParts(text: string)` | Split a multi-policy Cedar text into an array of individual policy texts. Returns `{type: "success", policies: string[]}` or `{type: "failure", errors: [...]}` |
-| `policyToJson(text: string)` | Parse a single policy text into structured JSON. Returns `{type: "success", json: {annotations, effect, principal, action, resource, conditions}}` — annotations preserved verbatim under `json.annotations` as a `Record<string, string>` |
-| `isAuthorized({principal, action, resource, context, policies: {staticPolicies: string}, entities: []})` | Main authorization call. Entity references are `{type, id}` objects, **not** string literals. Returns `{type, response: {decision, diagnostics: {reason: string[]}}}` — `diagnostics.reason` is the list of matching policy IDs (e.g. `["policy1", "policy2"]`) for multi-match |
-
-**Minimal annotation-extraction pattern (the only thing `CreateTaskFn` needs for rule validation):**
-
-```typescript
-// cdk/src/handlers/shared/cedar-policy.ts (sketch)
-import * as cedar from '@cedar-policy/cedar-wasm/nodejs';   // from Lambda layer
-
-export interface ParsedRule {
-  ruleId: string;
-  tier: 'hard' | 'soft';
-  severity?: 'low' | 'medium' | 'high';
-  category?: string;
-  approvalTimeoutS?: number;
-}
-
-export function parseRules(policiesText: string): ParsedRule[] {
-  const splitResult = cedar.policySetTextToParts(policiesText);
-  if (splitResult.type !== 'success') {
-    throw new Error(`Cedar policy parse failed: ${JSON.stringify(splitResult.errors)}`);
-  }
-  const rules: ParsedRule[] = [];
-  for (const policyText of splitResult.policies ?? []) {
-    const jsonResult = cedar.policyToJson(policyText);
-    if (jsonResult.type !== 'success') continue;
-    const annotations = jsonResult.json.annotations ?? {};
-    const tier = annotations.tier;
-    const ruleId = annotations.rule_id;
-    if (tier !== 'hard' && tier !== 'soft') {
-      throw new Error(`Missing or invalid @tier annotation on policy (rule_id=${ruleId})`);
-    }
-    if (!ruleId) {
-      throw new Error(`Missing @rule_id annotation on ${tier}-deny policy`);
-    }
-    rules.push({
-      ruleId,
-      tier,
-      severity: annotations.severity as ParsedRule['severity'],
-      category: annotations.category,
-      approvalTimeoutS: annotations.approval_timeout_s ? parseInt(annotations.approval_timeout_s, 10) : undefined,
-    });
-  }
-  return rules;
-}
-
-export function isHardDenyRule(rules: ParsedRule[], ruleId: string): boolean {
-  return rules.some(r => r.ruleId === ruleId && r.tier === 'hard');
-}
-```
-
-**API differences from Python cedarpy to be aware of during implementation:**
-
-1. Results are always wrapped in `{type: "success" | "failure", ...}`. Always check `.type` before accessing payload.
-2. `isAuthorized` takes a single call object (not 3 positional args). Entities are `{type, id}` objects.
-3. The Lambda cold-start penalty is ~30ms for the first `require()` (WASM module instantiation). Keep the import at module scope — not inside the handler — so subsequent invocations reuse the already-instantiated module. The Lambda layer attachment (task #10 in §15.2) ensures the `.wasm` file is loaded once per container init, not per invocation.
-4. The Node binding is CJS; the Lambda bundler (esbuild) treats the `.wasm` file as an external asset handled by the layer. No custom esbuild loader needed.
+- **One engine.** `PolicyEngine` in `agent/src/policy.py`, on [`cedarpy`](https://pypi.org/project/cedarpy/), is the only code that parses, validates and evaluates Cedar. The built-in rules have one copy: `agent/policies/hard_deny.cedar` and `agent/policies/soft_deny.cedar`.
+- **One exact pin.** `agent/pyproject.toml` requires `cedarpy==4.12.2`. `test_pyproject_requires_exactly_the_pinned_cedarpy` in `agent/tests/test_cedarpy_annotations_contract.py` names that version and fails on any other requirement, a version range included. A bump is therefore a change made by hand, and its author moves the version in the test in the same change.
+- **Three suites judge a bump**, all in `agent/tests/`:
+  - `test_policy_builtin_rules.py`: for each built-in rule its tier, the calls it must catch and one similar call it must leave alone.
+  - `test_cedarpy_annotations_contract.py`: `policies_to_json_str()` returns the five annotations of §5.2 as the engine reads them.
+  - `test_policy_three_outcome.py`: the three outcomes, the checks at load and the fail-closed answers.
 
 ---
 
@@ -2472,7 +2327,7 @@ The intent here is to make 50 a **measurable** default, not a frozen one.
 
 **IMPL-28** (review 2026-05-06 timeout adversarial review, Fix 6; updated 2026-05-08 with Chunk 8 Option E architecture): Add three new CloudWatch metrics to `TaskDashboard` in namespace `ABCA/Cedar-HITL` to distinguish between the four failure modes that all surface as "timeout": `ApprovalTimeoutClipRate` (percentage, dimension: `reason`), `ApprovalTimeoutBreakdown` (histogram of `effective_timeout_s` on timed-out approvals, dimension: `rule_id`, and once more without dimensions for the widget), and `ApprovalDecisionLatency` (p50/p90/p99, dimension: `outcome ∈ {approved, denied, timed_out}`). Metrics are published by `ApprovalMetricsPublisherFn` — a dedicated Lambda consumer of `TaskEventsTable` streams that emits CloudWatch EMF on every approval milestone. `TaskEventsTable` remains the single source of truth; the publisher owns the metric schema so future dashboard iterations do not require agent redeploys. Dashboard widget layout: ClipRate + Breakdown side-by-side above DecisionLatency (full row), so operators can tell at a glance whether "timeout" is a policy problem, a sizing problem, a UX problem, or a notification problem. See §11.3.
 
-**IMPL-29** (Chunk 1 spike finding, 2026-05-07): The two Cedar engines expose matching policy IDs under asymmetrically-named fields: `cedarpy` uses `result.diagnostics.reasons` (plural list) while `cedar-wasm` uses `result.response.diagnostics.reason` (singular-named list). Both return the same data (a list of positional policy IDs). The shared policy-parsing library (Chunk 5, `cdk/src/handlers/shared/cedar-policy.ts`) and the agent engine (Chunk 2, `agent/src/policy.py`) must each normalize against their own engine's spelling; the parity fixtures under `contracts/cedar-parity/` are the authoritative test for whether the normalization stays correct across engine upgrades. Do not "fix" this asymmetry inside the engines — both names are stable upstream APIs and the normalization is cheap.
+**IMPL-29** (Chunk 1 spike finding, 2026-05-07): `cedarpy` reports the policies that matched a request in `result.diagnostics.reasons`, a list of positional policy IDs, and the engine (`agent/src/policy.py`) maps them to `@rule_id` values. `agent/tests/test_cedarpy_annotations_contract.py` fails if a `cedarpy` upgrade drops or renames that attribute. The other half of this note, the `cedar-wasm` spelling of the same field, went with the Lambda-side engine ([ADR-028](/sample-autonomous-cloud-coding-agents/decisions/adr-028-one-cedar-engine)).
 
 ---
 

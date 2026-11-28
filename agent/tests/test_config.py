@@ -7,13 +7,14 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 
 from config import (
-    PR_WORKFLOW_IDS,
     build_config,
     clear_jira_task_credentials,
     resolve_jira_oauth_token,
     resolve_linear_api_token,
 )
 from models import TaskConfig
+from workflow import WorkflowValidationError, load_workflow
+from workflow.models import RequiredInputs
 
 # Stamps that both `_is_expiring` helpers must treat as malformed. The two with a "Z"
 # that is not the zone suffix pin the explicit `.replace("Z", "+00:00")`: parsed raw
@@ -33,15 +34,39 @@ class TestAgentWorkspaceConstant:
         assert config.AGENT_WORKSPACE == "/workspace"
 
 
-class TestPRWorkflowIds:
-    def test_contains_pr_iteration_workflow(self):
-        assert "coding/pr-iteration-v1" in PR_WORKFLOW_IDS
+class TestUsesPullRequest:
+    @pytest.mark.parametrize(
+        ("workflow_id", "expected"),
+        [
+            ("coding/pr-iteration-v1", True),
+            ("coding/pr-review-v1", True),
+            ("coding/restack-v1", True),
+            ("coding/new-task-v1", False),
+            ("default/agent-v1", False),
+            ("knowledge/web-research-v1", False),
+        ],
+    )
+    def test_shipped_workflow(self, workflow_id, expected):
+        assert load_workflow(workflow_id).uses_pull_request is expected
 
-    def test_contains_pr_review_workflow(self):
-        assert "coding/pr-review-v1" in PR_WORKFLOW_IDS
-
-    def test_does_not_contain_new_task_workflow(self):
-        assert "coding/new-task-v1" not in PR_WORKFLOW_IDS
+    def test_build_config_reads_it_from_the_workflow_not_from_its_id(self, monkeypatch):
+        # all_of holds a second name: the rule is "names pr_number", not "is [pr_number]".
+        synthetic = load_workflow("coding/new-task-v1").model_copy(
+            update={
+                "id": "synthetic/on-a-pr-v1",
+                "required_inputs": RequiredInputs(all_of=["task_description", "pr_number"]),
+            }
+        )
+        monkeypatch.setattr("workflow.load_workflow", lambda workflow_id: synthetic)
+        config = build_config(
+            repo_url="owner/repo",
+            task_description="x",
+            github_token="ghp_test123",
+            aws_region="us-east-1",
+            resolved_workflow={"id": "synthetic/on-a-pr-v1", "version": "1.0.0"},
+            pr_number="42",
+        )
+        assert config.is_pr_workflow is True
 
 
 class TestWorkflowResolution:
@@ -130,42 +155,15 @@ class TestWorkflowResolution:
         assert config.requires_repo is False
         assert config.repo_url == ""
 
-    def test_workflow_load_failure_fails_closed(self, monkeypatch):
-        # When the pinned workflow file can't load, the fallback must fail CLOSED:
-        # an unrecognised id is treated as read-only (deny writes) and repo-bound,
-        # rather than fail-open to writeable. Coding ids that ARE known-writeable
-        # keep their writeable posture.
-        import workflow as workflow_mod
-        from workflow import WorkflowValidationError
-
-        def boom(_workflow_id):
-            raise WorkflowValidationError("simulated load failure")
-
-        # build_config does `from workflow import load_workflow` at call time, so
-        # patch the name on the workflow package the import resolves against.
-        monkeypatch.setattr(workflow_mod, "load_workflow", boom)
-
-        # Unknown id → read-only + requires repo (fail closed on both axes).
-        cfg = build_config(
-            repo_url="owner/repo",
-            github_token="ghp_test123",
-            task_description="x",
-            aws_region="us-east-1",
-            resolved_workflow={"id": "knowledge/mystery-v1", "version": "1.0.0"},
-        )
-        assert cfg.read_only is True
-        assert cfg.requires_repo is True
-
-        # Known-writeable coding id keeps writeable even on load failure.
-        cfg2 = build_config(
-            repo_url="owner/repo",
-            github_token="ghp_test123",
-            task_description="x",
-            aws_region="us-east-1",
-            resolved_workflow={"id": "coding/new-task-v1", "version": "1.0.0"},
-        )
-        assert cfg2.read_only is False
-        assert cfg2.requires_repo is True
+    def test_unloadable_workflow_raises(self):
+        with pytest.raises(WorkflowValidationError, match="not found"):
+            build_config(
+                repo_url="owner/repo",
+                github_token="ghp_test123",
+                task_description="x",
+                aws_region="us-east-1",
+                resolved_workflow={"id": "knowledge/mystery-v1", "version": "1.0.0"},
+            )
 
 
 class TestBuildConfig:

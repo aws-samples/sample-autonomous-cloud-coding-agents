@@ -902,24 +902,6 @@ export interface GetPendingResponse {
   readonly pending: readonly PendingApprovalSummary[];
 }
 
-/** Rule metadata returned by `GET /v1/repos/{repo_id}/policies`. */
-export interface PolicyRuleSummary {
-  readonly rule_id: string;
-  readonly category?: string;
-  readonly severity?: Severity;
-  readonly approval_timeout_s?: number;
-  readonly summary: string;
-}
-
-/** GET /v1/repos/{repo_id}/policies response body. */
-export interface GetPoliciesResponse {
-  readonly repo_id: string;
-  readonly policies: {
-    readonly hard: readonly PolicyRuleSummary[];
-    readonly soft: readonly PolicyRuleSummary[];
-  };
-}
-
 /** Maximum deny reason length after server-side sanitization. */
 export const DENY_REASON_MAX_LENGTH = 2000;
 
@@ -947,3 +929,8 @@ export const MAX_BUDGET_USD_MIN = 0.01;
 /** Maximum allowed max_budget_usd ($100).
  *  Sourced from ``contracts/constants.json`` via cdk types.ts (#258). */
 export const MAX_BUDGET_USD_MAX = 100;
+
+/** Bounds of a repository's approval_gate_cap.
+ *  Sourced from ``contracts/constants.json`` via cdk types.ts. */
+export const APPROVAL_GATE_CAP_MIN = 1;
+export const APPROVAL_GATE_CAP_MAX = 500;

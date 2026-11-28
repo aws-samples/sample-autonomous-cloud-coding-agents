@@ -148,9 +148,8 @@ _auth_state_lock = threading.Lock()
 def _enabled(channel_source: str, channel_metadata: dict[str, str] | None) -> str | None:
     """Return the Linear issue id if reactions should fire, else None.
 
-    Gating mirrors ``channel_mcp.configure_channel_mcp`` — the same
-    ``channel_source == 'linear'`` check, plus a metadata presence check so
-    we don't fire GraphQL calls we can't address.
+    Gating: a ``channel_source == 'linear'`` check, plus a metadata presence
+    check so we don't fire GraphQL calls we can't address.
     """
     if channel_source != "linear":
         return None

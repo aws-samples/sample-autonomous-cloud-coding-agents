@@ -1047,13 +1047,6 @@ class TestApprovalMilestoneHelpers:
         _, metadata = self._last_event(writer)
         assert metadata["matching_rule_ids"] == ["a", "b"]
 
-    def test_approval_stranded(self, writer):
-        writer.write_approval_stranded(request_id="01KREQ", age_s=600, reason="container evicted")
-        _, metadata = self._last_event(writer)
-        assert metadata["milestone"] == "approval_stranded"
-        assert metadata["age_s"] == 600
-        assert metadata["reason"] == "container evicted"
-
     def test_approval_write_failed(self, writer):
         writer.write_approval_write_failed(request_id="01KREQ", error="TransactionCanceled")
         _, metadata = self._last_event(writer)

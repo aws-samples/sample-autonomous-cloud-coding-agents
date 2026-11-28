@@ -37,6 +37,11 @@ description = "Run Jest tests"
 # passes) or --passWithNoTests (passes when no test file is left) to the script.
 run = "yarn test"
 
+# --ci as in the suite: a missing or changed snapshot fails the run instead of being written.
+[tasks.testf]
+description = "Focused jest run (no coverage): mise //cli:testf -- <path or pattern>"
+run = "yarn jest --ci --coverage=false"
+
 # --config in both eslint tasks: see the note on the same tasks in cdk/mise.toml.
 [tasks.eslint]
 description = "Run ESLint"

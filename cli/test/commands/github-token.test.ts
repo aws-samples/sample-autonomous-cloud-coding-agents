@@ -196,7 +196,7 @@ describe('loadActiveRepoConfig', () => {
     ddbSend.mockResolvedValueOnce({});
     await expect(
       repoLookup.loadActiveRepoConfig('us-east-1', 'RepoTable-dev', 'acme/missing'),
-    ).rejects.toThrow(/not onboarded/);
+    ).rejects.toThrow("Repository 'acme/missing' is not onboarded. Register it with 'bgagent repo onboard acme/missing' or a Blueprint.");
   });
 
   test('throws when repo status is not active', async () => {

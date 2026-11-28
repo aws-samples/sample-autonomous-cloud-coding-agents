@@ -473,7 +473,7 @@ agent/
 ├── mise.toml            Tool versions / tasks used when the target repo relies on mise
 ├── src/                 Agent source modules (pythonpath configured in pyproject.toml)
 │   ├── __init__.py
-│   ├── entrypoint.py    Re-export shim for backward compatibility (tests); delegates to specific modules
+│   ├── entrypoint.py    Batch entry point; the ECS boot command imports run_task_from_payload from it
 │   ├── config.py        Configuration: build_config(), get_config(), resolve_github_token(), resolve_linear_api_token(); resolves the pinned workflow (resolved_workflow / ids like coding/new-task-v1) and validates required inputs per the workflow's requires_repo / read_only / is_pr_workflow (replaced TaskType in #248)
 │   ├── models.py        Pydantic data models (TaskConfig, RepoSetup, AgentResult, TaskResult, HydratedContext, AttachmentConfig, etc.). TaskConfig carries the workflow fields (resolved_workflow, policy_principal, read_only, allowed_tools, requires_repo, is_pr_workflow) that replaced the former TaskType enum (#248)
 │   ├── pipeline.py      Top-level pipeline: main() CLI entry, run_task() orchestration, status resolution, error chaining
@@ -504,7 +504,7 @@ agent/
 ├── prepare-commit-msg.sh Git hook (Task-Id / Prompt-Version / Workflow-Id / Workflow-Step trailers on commits)
 ├── run.sh               Build + run helper for local/server mode with AgentCore constraints
 ├── tests/               pytest unit tests (pythonpath: src/)
-│   ├── test_config.py       Config validation and workflow-resolution tests (requires_repo / read_only / is_pr_workflow, load-failure fallback)
+│   ├── test_config.py       Config validation and workflow-resolution tests (requires_repo / read_only / is_pr_workflow)
 │   ├── test_hooks.py        PreToolUse hook and hook matcher tests
 │   ├── test_models.py       Pydantic model tests (construction, validation, frozen enforcement, model_dump)
 │   ├── test_policy.py       Cedar policy engine tests (fail-closed, deny-list)

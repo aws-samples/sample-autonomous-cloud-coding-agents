@@ -102,7 +102,7 @@ The `--plugin-dir` flag tells Claude Code to load the local plugin from the `doc
 |-------|------------|--------------|
 | `setup` | "get started", "install", "first time setup" | Full guided setup: prerequisites, toolchain, deploy, smoke test |
 | `deploy` | "deploy", "cdk diff", "destroy" | Deploy, diff, or destroy the CDK stack with pre-checks |
-| `onboard-repo` | "add a repo", "onboard", 422 errors | Add a new GitHub repository via Blueprint construct |
+| `onboard-repo` | "add a repo", "onboard", 422 errors | Onboard a GitHub repository with `bgagent repo onboard` or a Blueprint |
 | `submit-task` | "submit task", "run agent", "review PR", "quick submit" | Submit a coding task with prompt quality coaching (supports quick mode) |
 | `troubleshoot` | "debug", "error", "not working", "failed" | Diagnose deployment, auth, or task execution issues |
 | `status` | "status", "health check", "is ABCA running" | Platform health check: stack status, running tasks, build health |

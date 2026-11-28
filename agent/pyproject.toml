@@ -5,17 +5,6 @@ description = "Background coding agent — runs tasks in isolated cloud environm
 requires-python = ">=3.13"
 dependencies = [
     "boto3==1.44.0", #https://pypi.org/project/boto3/ (botocore 1.44.0 makes "standard" the default retry mode; src/aws_session.py names "legacy", the mode every client ran with before)
-    # Vestigial from the parked AgentCore Identity flow (Phase 2.0a).
-    # Phase 2.0b reads per-workspace Linear OAuth tokens directly from
-    # Secrets Manager because AgentCore Identity's USER_FEDERATION
-    # flow has an open service-side bug (see memory/project_oauth_2_0b.md).
-    # Kept here so the workload-token bridge in `server.py` still
-    # imports cleanly when Phase 2.0c eventually resumes the
-    # AgentCore Identity path. The bridge is now wrapped in
-    # try/except (ImportError, AttributeError), so removing this dep
-    # would degrade gracefully — but for now we keep the dep to
-    # preserve the clean code path.
-    "bedrock-agentcore==1.26.0", #https://pypi.org/project/bedrock-agentcore/
     # Held at 0.2.179, one release below the newest that is past the 7-day
     # cooldown. 0.2.180 bundles claude CLI 2.1.321, whose changelog says: "Changed
     # mods Claude writes to turn on without asking in auto and bypass modes".
@@ -30,25 +19,9 @@ dependencies = [
     "uvicorn==0.54.0", #https://pypi.org/project/uvicorn/
     "aws-opentelemetry-distro==0.22.0", #https://pypi.org/project/aws-opentelemetry-distro/ (0.22.0 clears GHSA-xcq7-p3pf-p88h and GHSA-f5m9-jfrj-jjj7)
     "mcp==2.3.0", #https://pypi.org/project/mcp/ (GHSA-84m7-p3x7-pcfv is fixed since 1.30.0; 2.x replaces httpx with httpx2, which src/gateway_tools.py imports)
-    # CEDAR ENGINE PARITY — DO NOT BUMP IN ISOLATION.
-    # cedarpy (Python, agent runtime) and @cedar-policy/cedar-wasm (TypeScript,
-    # CDK Lambdas) are two language bindings over the same Cedar Rust core.
-    # Even patch-version drift between the bindings can produce divergent
-    # (decision, matching_rule_ids) on the same (policy, input) — a class
-    # of bug invisible to per-side unit tests. The contracts/cedar-parity/
-    # golden fixtures are how CI catches divergence; if you bump cedarpy
-    # you MUST bump @cedar-policy/cedar-wasm to a tested-compatible version
-    # in cdk/package.json AND refresh the parity fixtures, in the same
-    # commit. See docs/design/CEDAR_HITL_GATES.md §15.6 (decision #23) and
-    # the parity-contract banner in mise.toml.
-    # EXACT pin (no ^/~). The binding version (4.12.2) is the cedarpy package
-    # release, NOT the Cedar Rust core version (cedarpy 4.12.2 builds on
-    # cedar-policy 4.12.0, the same core as @cedar-policy/cedar-wasm 4.12.0
-    # pinned in cdk/package.json).
-    # Matching binding version *strings* across languages is neither necessary
-    # nor sufficient for behavioral parity; parity is established empirically by
-    # the contracts/cedar-parity/ golden fixtures in CI, which assert identical
-    # (decision, matching_rule_ids) for both bindings on the same (policy, input).
+    # The only Cedar engine. An exact pin that moves by hand, in a change of its
+    # own: tests/test_cedarpy_annotations_contract.py names the version.
+    # cedarpy 4.12.2 builds on the Cedar 4.12.0 core.
     "cedarpy==4.12.2", #https://github.com/k9securityio/cedar-py
     # Workflow-driven tasks (#248): the step runner loads YAML workflow files
     # and validates them against agent/workflows/schema/workflow.schema.json.
@@ -61,7 +34,7 @@ dependencies = [
 # The uv-missing-dependency-cooldown rule wants a global exclude-newer window.
 # We intentionally do NOT set one: deps are exact-pinned (==) and lockfile-managed
 # via upgrade-main.yml, and a global cooldown conflicts with fresh exact pins
-# (fastapi/bedrock-agentcore/boto3 were published within the last week) — it makes
+# (fastapi/boto3 were published within the last week) — it makes
 # `uv sync` unsatisfiable and re-breaks on every pin bump. The rule's threat model
 # (surprise malicious/unstable version) is already covered by exact pins + reviewed
 # lock upgrades. See #532.
@@ -168,7 +141,6 @@ max-complexity = 15
 
 [tool.ruff.lint.per-file-ignores]
 "tests_emulator/**" = ["S101", "PLR2004", "ARG", "TID251"]  # emulator-backed tests (mise run test:integration): assert; literal assertions; fixtures taken for their effect; their own boto3 session
-"src/entrypoint.py" = ["E402"]  # re-export shim: importlib.reload() call must precede re-export from-imports
 # aws_session.py is the one module that builds boto3 clients, resources and sessions:
 # it attaches the solution User-Agent (#319). TID251 is one rule for the whole
 # banned-api table below, so this file-wide exemption also switches off the ban
@@ -193,7 +165,7 @@ max-complexity = 15
 # both to test them, under the tests/** exemption above. src/aws_session.py is
 # not checked for this either: its TID251 exemption is file-wide.
 "server".msg = "server.py is a process entrypoint (uvicorn loads it): move what you need into a module both can import"
-"entrypoint".msg = "entrypoint.py is the batch entrypoint and a re-export shim kept for tests, and importing it reloads config: import the name from the module that defines it"
+"entrypoint".msg = "entrypoint.py is the batch entrypoint: import the name from the module that defines it"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

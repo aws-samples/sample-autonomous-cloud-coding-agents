@@ -50,13 +50,13 @@ import {
 import { Blueprint } from '../constructs/blueprint';
 import { BudgetAlerts } from '../constructs/budget-alerts';
 import { BudgetTable } from '../constructs/budget-table';
-import { CedarWasmLayer } from '../constructs/cedar-wasm-layer';
 import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
 import { DnsFirewall } from '../constructs/dns-firewall';
 import { EcsAgentCluster, resolveEcsTaskSizing } from '../constructs/ecs-agent-cluster';
 import { EcsPayloadBucket } from '../constructs/ecs-payload-bucket';
 import { FanOutConsumer } from '../constructs/fanout-consumer';
 import { GitHubScreenshotIntegration } from '../constructs/github-screenshot-integration';
+import { secretArnPattern } from '../constructs/integration-parts';
 import { IterationHeartbeat } from '../constructs/iteration-heartbeat';
 import { JiraIntegration } from '../constructs/jira-integration';
 import {
@@ -311,7 +311,7 @@ export class AgentStack extends Stack {
   /** Set when deployed with the Linear identity vault; the console then mints tokens through it. */
   public readonly linearIdentityVault?: LinearIdentityVault;
 
-  // eslint-disable-next-line complexity -- predates the ceiling (120; 108 when it landed); must not grow
+  // eslint-disable-next-line complexity -- predates the ceiling (116; 108 when it landed); must not grow
   constructor(scope: Construct, id: string, props: AgentStackProps = {}) {
     super(scope, id, props);
 
@@ -381,12 +381,6 @@ export class AgentStack extends Stack {
         description: 'ABCA agent asset registry (#246)',
       })
       : undefined;
-
-    // Cedar-wasm Lambda layer (§15.2 task 10). Instantiated here so the
-    // asset is in the synthed template; Chunk 5 handlers (Approve,
-    // Deny, GetPolicies, CreateTask) attach the layer via
-    // ``fn.addLayers(cedarWasmLayer.layer)``.
-    const cedarWasmLayer = new CedarWasmLayer(this, 'CedarWasmLayer');
 
     // --trace trajectory storage (design §10.1). Opt-in per task; only
     // written when the submit payload sets ``trace: true``.
@@ -672,7 +666,6 @@ export class AgentStack extends Stack {
       taskEventsTable: taskEventsTable.table,
       taskNudgesTable: taskNudgesTable.table,
       taskApprovalsTable: taskApprovalsTable.table,
-      cedarWasmLayer: cedarWasmLayer.layer,
       repoTable: repoTable.table,
       webhookTable: webhookTable.table,
       apiKeyTable: apiKeyTable.table,
@@ -1140,11 +1133,6 @@ export class AgentStack extends Stack {
     new CfnOutput(this, 'TaskApprovalsTableName', {
       value: taskApprovalsTable.table.tableName,
       description: 'Name of the DynamoDB task approvals table (Cedar HITL)',
-    });
-
-    new CfnOutput(this, 'CedarWasmLayerArn', {
-      value: cedarWasmLayer.layer.layerVersionArn,
-      description: 'ARN of the Cedar-wasm Lambda layer (consumed by Chunk 5 REST handlers)',
     });
 
     new CfnOutput(this, 'UserConcurrencyTableName', {
@@ -1626,8 +1614,8 @@ export class AgentStack extends Stack {
       githubTokenSecret,
     });
 
-    // FanOutConsumer is constructed below LinearIntegration so the
-    // Linear dispatcher can receive ``linearIntegration.workspaceRegistryTable``.
+    // FanOutConsumer is constructed below LinearIntegration and JiraIntegration
+    // so that it can receive them as its trackers.
 
     // --- Cedar HITL approval metrics publisher (Chunk 8, §11.3 / IMPL-28) ---
     // The second consumer of the TaskEventsTable stream (FanOutConsumer is the first).
@@ -1651,6 +1639,7 @@ export class AgentStack extends Stack {
       const slackIntegration = new SlackIntegration(this, 'SlackIntegration', {
         api: taskApi.api,
         userPool: taskApi.userPool,
+        linkAuthorizer: taskApi.cognitoAuthorizer,
         taskTable: taskTable.table,
         taskEventsTable: taskEventsTable.table,
         budgetTable: budgetTable.table,
@@ -1745,6 +1734,7 @@ export class AgentStack extends Stack {
       identityVault: linearIdentityVault,
       api: taskApi.api,
       userPool: taskApi.userPool,
+      linkAuthorizer: taskApi.cognitoAuthorizer,
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
       budgetTable: budgetTable.table,
@@ -1772,12 +1762,7 @@ export class AgentStack extends Stack {
         [microvmImageConfigured, 'lambdaMicrovmImageArn', lazyMicrovmImageArn],
       ]),
     }) : undefined;
-    const linearOauthSecretArn = Stack.of(this).formatArn({
-      service: 'secretsmanager',
-      resource: 'secret',
-      arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-      resourceName: 'bgagent-linear-oauth-*',
-    });
+    const linearOauthSecretArn = secretArnPattern(this, 'bgagent-linear-oauth-*');
 
     // The orchestration reconciler consumes the TaskTable stream and
     // releases dependency-unblocked children as predecessors reach
@@ -1802,15 +1787,8 @@ export class AgentStack extends Stack {
       'ORCHESTRATOR_FUNCTION_ARN',
       orchestrator.alias.functionArn,
     );
-    // The reconciler posts the parent rollup comment on completion —
-    // needs the workspace registry to resolve the per-workspace OAuth token.
-    if (linearIntegration) {
-      linearIntegration.workspaceRegistryTable.grantReadData(orchestrationReconciler.fn);
-      orchestrationReconciler.fn.addEnvironment(
-        'LINEAR_WORKSPACE_REGISTRY_TABLE_NAME',
-        linearIntegration.workspaceRegistryTable.tableName,
-      );
-    }
+    // The reconciler posts the parent rollup comment on completion.
+    linearIntegration?.grantFeedback(orchestrationReconciler.fn, { writeBack: false });
     // Read the user concurrency counter so a wide fan-out releases only
     // up to the free budget (the cap throttles, not guillotines, children).
     userConcurrencyTable.table.grantReadData(orchestrationReconciler.fn);
@@ -1841,20 +1819,12 @@ export class AgentStack extends Stack {
         }),
       ],
     }));
-    // Released child tasks attributed to linear workspaces need the
-    // per-workspace OAuth secret prefix readable (createTaskCore stashes
-    // the ARN; agent reads it). Same prefix grant as the webhook processor.
-    if (linearIntegration) {
-      orchestrationReconciler.fn.addToRolePolicy(new iam.PolicyStatement({
-        actions: ['secretsmanager:GetSecretValue'],
-        resources: [linearOauthSecretArn],
-      }));
-    }
     // Scheduled backstop that recovers orchestrations whose terminal
     // events were lost while the live reconciler was unavailable. Runs the
     // same createTaskCore release path, so it needs the identical grants
     // (repo config, guardrail, orchestrator invoke, linear-oauth secret).
     // Only Linear and Jira seed orchestrations, so only they need the sweep.
+    let strandedSweepFn: StrandedOrchestrationReconciler['fn'] | undefined;
     if (issueOrchestrationEnabled) {
       const strandedOrchestrationReconciler = new StrandedOrchestrationReconciler(
         this, 'StrandedOrchestrationReconciler', {
@@ -1864,6 +1834,7 @@ export class AgentStack extends Stack {
           orchestratorFunctionArn: orchestrator.alias.functionArn,
         },
       );
+      strandedSweepFn = strandedOrchestrationReconciler.fn;
       repoTable.table.grantReadData(strandedOrchestrationReconciler.fn);
       strandedOrchestrationReconciler.fn.addEnvironment('REPO_TABLE_NAME', repoTable.table.tableName);
       strandedOrchestrationReconciler.fn.addEnvironment('GUARDRAIL_ID', inputGuardrail.guardrailId);
@@ -1882,22 +1853,8 @@ export class AgentStack extends Stack {
           }),
         ],
       }));
-      if (linearIntegration) {
-        strandedOrchestrationReconciler.fn.addToRolePolicy(new iam.PolicyStatement({
-          actions: ['secretsmanager:GetSecretValue'],
-          resources: [linearOauthSecretArn],
-        }));
-        // The sweep shares the live reconciler's panel refresh + parent settle
-        // (refreshPanelAndSettle), which needs a credentials registry to resolve an
-        // outbound token — without it that feedback silently no-ops and a recovered
-        // epic's panel stays stale. It already had the matching secret grant above,
-        // just not the table, so the feedback half of the sweep never ran.
-        linearIntegration.workspaceRegistryTable.grantReadData(strandedOrchestrationReconciler.fn);
-        strandedOrchestrationReconciler.fn.addEnvironment(
-          'LINEAR_WORKSPACE_REGISTRY_TABLE_NAME',
-          linearIntegration.workspaceRegistryTable.tableName,
-        );
-      }
+      // The sweep shares the live reconciler's panel refresh + parent settle (refreshPanelAndSettle).
+      linearIntegration?.grantFeedback(strandedOrchestrationReconciler.fn, { writeBack: false });
       // The sweep is the drain path for throttle-deferred children, so it
       // throttles to the same free budget the live reconciler does.
       userConcurrencyTable.table.grantReadData(strandedOrchestrationReconciler.fn);
@@ -1942,23 +1899,8 @@ export class AgentStack extends Stack {
       }));
     }
 
-    // Phase 2.0b-O2: pipe the workspace registry table + per-workspace
-    // OAuth-secret-prefix grant into the orchestrator so that it can post the
-    // queued notice as a Linear comment when a task is queued at the
-    // concurrency cap. The orchestrator only resolves a token when
-    // `task.channel_source === 'linear'`, but the IAM grant is unconditional
-    // (per-workspace secrets are created lazily by `bgagent linear setup`).
-    if (linearIntegration) {
-      linearIntegration.workspaceRegistryTable.grantReadData(orchestrator.fn);
-      orchestrator.fn.addEnvironment(
-        'LINEAR_WORKSPACE_REGISTRY_TABLE_NAME',
-        linearIntegration.workspaceRegistryTable.tableName,
-      );
-      orchestrator.fn.addToRolePolicy(new iam.PolicyStatement({
-        actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
-        resources: [linearOauthSecretArn],
-      }));
-    }
+    // The orchestrator posts the queued notice as a Linear comment when a task is queued at the concurrency cap.
+    linearIntegration?.grantFeedback(orchestrator.fn, { writeBack: true });
 
     // Mid-run liveness heartbeat. A scheduled sweep edits the maturing
     // Linear/Jira comment of RUNNING comment-triggered iterations to show elapsed time
@@ -1970,17 +1912,7 @@ export class AgentStack extends Stack {
     const iterationHeartbeat = issueOrchestrationEnabled
       ? new IterationHeartbeat(this, 'IterationHeartbeat', { taskTable: taskTable.table })
       : undefined;
-    if (linearIntegration && iterationHeartbeat) {
-      linearIntegration.workspaceRegistryTable.grantReadData(iterationHeartbeat.fn);
-      iterationHeartbeat.fn.addEnvironment(
-        'LINEAR_WORKSPACE_REGISTRY_TABLE_NAME',
-        linearIntegration.workspaceRegistryTable.tableName,
-      );
-      iterationHeartbeat.fn.addToRolePolicy(new iam.PolicyStatement({
-        actions: ['secretsmanager:GetSecretValue'],
-        resources: [linearOauthSecretArn],
-      }));
-    }
+    if (iterationHeartbeat) linearIntegration?.grantFeedback(iterationHeartbeat.fn, { writeBack: false });
 
     if (linearIntegration) {
       new CfnOutput(this, 'LinearWebhookSecretArn', {
@@ -2008,6 +1940,7 @@ export class AgentStack extends Stack {
     const jiraIntegration = features.jira ? new JiraIntegration(this, 'JiraIntegration', {
       api: taskApi.api,
       userPool: taskApi.userPool,
+      linkAuthorizer: taskApi.cognitoAuthorizer,
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
       budgetTable: budgetTable.table,
@@ -2022,27 +1955,10 @@ export class AgentStack extends Stack {
       // task-admission time. Same bucket the orchestrator hydrates from.
       attachmentsBucket: attachmentsBucket.bucket,
     }) : undefined;
-    const jiraOauthSecretArn = Stack.of(this).formatArn({
-      service: 'secretsmanager',
-      resource: 'secret',
-      arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-      resourceName: 'bgagent-jira-oauth-*',
-    });
+    const jiraOauthSecretArn = secretArnPattern(this, 'bgagent-jira-oauth-*');
 
-    // Add Jira to the channel-neutral heartbeat sweep. Token resolution can
-    // refresh an expiring OAuth bundle, so this trusted Lambda needs scoped
-    // Get+Put on the per-tenant secret prefix as well as registry-table read.
-    if (jiraIntegration && iterationHeartbeat) {
-      jiraIntegration.workspaceRegistryTable.grantReadData(iterationHeartbeat.fn);
-      iterationHeartbeat.fn.addEnvironment(
-        'JIRA_WORKSPACE_REGISTRY_TABLE_NAME',
-        jiraIntegration.workspaceRegistryTable.tableName,
-      );
-      iterationHeartbeat.fn.addToRolePolicy(new iam.PolicyStatement({
-        actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
-        resources: [jiraOauthSecretArn],
-      }));
-    }
+    // The heartbeat sweep is channel-neutral: it edits the maturing comment of Jira iterations too.
+    if (iterationHeartbeat) jiraIntegration?.grantFeedback(iterationHeartbeat.fn, { writeBack: true });
 
     if (jiraIntegration) {
       // Agent runtime reads the per-tenant Jira OAuth token directly from
@@ -2065,39 +1981,13 @@ export class AgentStack extends Stack {
         }));
       }
 
-      // Pipe the workspace registry table + per-tenant OAuth-secret-prefix
-      // grant into the orchestrator so the concurrency-cap queueing path
-      // (`notifyJiraOnConcurrencyCap` in orchestrate-task.ts) can post a Jira
-      // comment. The orchestrator only resolves a token when
-      // `task.channel_source === 'jira'`, but the IAM grant is unconditional
-      // (per-tenant secrets are created lazily by setup). Put is needed because
-      // resolving an expiring token refreshes it in place (the orchestrator is
-      // a trusted Lambda; unlike the agent it owns the rotated-token write-back).
-      jiraIntegration.workspaceRegistryTable.grantReadData(orchestrator.fn);
-      orchestrator.fn.addEnvironment(
-        'JIRA_WORKSPACE_REGISTRY_TABLE_NAME',
-        jiraIntegration.workspaceRegistryTable.tableName,
-      );
-      orchestrator.fn.addToRolePolicy(new iam.PolicyStatement({
-        actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
-        resources: [jiraOauthSecretArn],
-      }));
+      // The orchestrator posts a Jira comment when a task is queued at the concurrency cap.
+      jiraIntegration.grantFeedback(orchestrator.fn, { writeBack: true });
 
-      // The reconciler picks the feedback surface from each orchestration's own
-      // recorded channel, so give it the Jira tenant registry too — otherwise a
-      // Jira-sourced orchestration would resolve to no adapter and silently skip
-      // its panel/reactions. Read + Put for the same reason as the orchestrator
-      // above (resolving an expiring token refreshes it in place). Harmless while
-      // only Linear seeds orchestrations; required the moment one can be Jira's.
-      jiraIntegration.workspaceRegistryTable.grantReadData(orchestrationReconciler.fn);
-      orchestrationReconciler.fn.addEnvironment(
-        'JIRA_WORKSPACE_REGISTRY_TABLE_NAME',
-        jiraIntegration.workspaceRegistryTable.tableName,
-      );
-      orchestrationReconciler.fn.addToRolePolicy(new iam.PolicyStatement({
-        actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
-        resources: [jiraOauthSecretArn],
-      }));
+      // The reconciler picks the feedback surface from each orchestration's own recorded channel.
+      jiraIntegration.grantFeedback(orchestrationReconciler.fn, { writeBack: true });
+      // The stranded sweep runs the same panel refresh.
+      if (strandedSweepFn) jiraIntegration.grantFeedback(strandedSweepFn, { writeBack: true });
 
       new CfnOutput(this, 'JiraWebhookSecretArn', {
         value: jiraIntegration.webhookSecret.secretArn,
@@ -2122,12 +2012,12 @@ export class AgentStack extends Stack {
 
     // --- Fan-out plane consumer ---
     // Consumes TaskEventsTable DynamoDB Streams and dispatches events to
-    // Slack / GitHub / Linear / email per per-channel default filters.
+    // Slack / GitHub / Linear / Jira per per-channel default filters.
     // GitHub dispatcher edits a single issue comment in place; Slack
     // dispatcher reads per-workspace bot tokens from
     // ``bgagent/slack/*``; Linear dispatcher posts a single
     // deterministic final-status comment with cost/turns/duration.
-    // Email remains a log-only stub until SES wires.
+    const trackers = [linearIntegration, jiraIntegration].filter(tracker => tracker !== undefined);
     const fanOutConsumer = new FanOutConsumer(this, 'FanOutConsumer', {
       taskEventsTable: taskEventsTable.table,
       taskTable: taskTable.table,
@@ -2145,26 +2035,9 @@ export class AgentStack extends Stack {
           arnFormat: ArnFormat.COLON_RESOURCE_NAME,
         }),
       }),
-      // Linear dispatcher reads workspace registry rows + per-workspace
-      // OAuth-secret JSON. Same scope `bgagent-linear-oauth-*` as the
-      // orchestrator and webhook processor — Lambdas in this stack share
-      // the rotated-token write path; the agent runtime gets read-only.
-      ...(linearIntegration && {
-        linearWorkspaceRegistryTable: linearIntegration.workspaceRegistryTable,
-        linearOauthSecretArnPattern: linearOauthSecretArn,
-      }),
+      // The Linear and Jira dispatchers post the final-status comment of a terminal task.
+      trackers,
       linearAgentSessionsEnabled,
-      // Jira dispatcher posts a deterministic final-status comment with
-      // cost/turns/duration on Jira-origin terminal tasks. Same scope
-      // `bgagent-jira-oauth-*` as the orchestrator and Jira webhook
-      // processor — Lambdas in this stack share the rotated-token write
-      // path. Both props are optional on the construct, so omitting them
-      // silently disables Jira final-status comments rather than failing
-      // synth: keep them wired whenever Jira is deployed.
-      ...(jiraIntegration && {
-        jiraWorkspaceRegistryTable: jiraIntegration.workspaceRegistryTable,
-        jiraOauthSecretArnPattern: jiraOauthSecretArn,
-      }),
     });
 
     // --- GitHub deployment-status → screenshot pipeline ---
@@ -2178,14 +2051,8 @@ export class AgentStack extends Stack {
       ? new GitHubScreenshotIntegration(this, 'GitHubScreenshotIntegration', {
         api: taskApi.api,
         githubTokenSecret,
-        // When the screenshot lands on a PR linked to a Linear issue
-        // (identifier in the PR title/body), also post the screenshot
-        // as a comment on that Linear issue. Wired through the existing
-        // workspace registry so token resolution reuses the per-workspace
-        // OAuth secrets created by `bgagent linear setup`. Each tracker is
-        // wired only when both it and screenshots are deployed.
-        ...(linearIntegration && { linearWorkspaceRegistryTable: linearIntegration.workspaceRegistryTable }),
-        ...(jiraIntegration && { jiraWorkspaceRegistryTable: jiraIntegration.workspaceRegistryTable }),
+        // The screenshot is also posted on the Linear or Jira issue of the PR.
+        trackers,
         // Persist screenshot_url on the deploy task so the
         // orchestration reconciler can embed the integration node's combined
         // preview in the parent epic panel.
@@ -2204,6 +2071,7 @@ export class AgentStack extends Stack {
         orchestrator.fn,
         githubScreenshot?.webhookProcessorFn,
         orchestrationReconciler.fn,
+        strandedSweepFn,
         iterationHeartbeat?.fn,
       ].filter((fn): fn is NonNullable<typeof fn> => fn !== undefined)) {
         linearWriter.addEnvironment('LINEAR_VAULT_ENABLED', 'true');

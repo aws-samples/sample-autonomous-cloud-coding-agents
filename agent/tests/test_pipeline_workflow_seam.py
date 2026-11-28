@@ -52,7 +52,7 @@ class TestExecuteAgentStep:
 
     def test_only_runs_agent_step_not_post_hooks(self):
         # The seam restricts the runner to the run_agent step: deterministic
-        # post-hook handlers (ensure_pr/verify_build) must NOT fire here — the
+        # post-hooks (ensure_pr/verify_build) must NOT fire here — the
         # inline path owns them.
         expected = AgentResult(status="success")
 

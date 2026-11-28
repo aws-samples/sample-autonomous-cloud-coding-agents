@@ -92,6 +92,16 @@ What does **not** change: read-only is still enforced by *both* `allowed_tools` 
 
 With both resolved and the one schema reshape applied, the Phase-0 schema is **frozen**: subsequent phases add registered handlers/deliverers and platform plumbing, not schema fields.
 
+## Addendum (2026-11-26): the runner as built
+
+This addendum records the state of the code. It is not a decision.
+
+The step runner executes three step kinds: `hydrate_context`, `run_agent` and `deliver_artifact`. Sub-decision 2's "existing helpers … become step handlers rather than inline branches" therefore holds in full only for a task without a repository, whose whole step list goes through the runner. For a task with a repository the runner runs the agent step only: the clone, the verify steps and the pull-request step run inline in `pipeline.run_task`, which reads each declared step's `strategy` and `gate`. Step checkpointing and resume (the "Resume-aware steps" consequence above) are not implemented, and the runner keeps no state file.
+
+The handlers for `clone_repo`, `verify_build`, `verify_lint`, `ensure_pr` and `post_review`, and the checkpoint class, were removed on this date: no lane called them.
+
+Open: whether the repository lane moves onto the runner, the runner is retired, or the two lanes stay as they are.
+
 ## References
 
 - Issue [#248](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/248) — capability-driven tasks (this ADR's tracking issue)

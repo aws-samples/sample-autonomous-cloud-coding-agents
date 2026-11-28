@@ -282,7 +282,7 @@ function main(): number {
     return 1;
   }
 
-  // Semantic invariants (belt-and-suspenders — agent also validates at import time)
+  // Semantic invariants
   const invariantErrors: string[] = [];
   if (agc.min <= 0) invariantErrors.push('approval_gate_cap.min must be > 0');
   if (agc.default < agc.min) invariantErrors.push('approval_gate_cap.default must be >= min');

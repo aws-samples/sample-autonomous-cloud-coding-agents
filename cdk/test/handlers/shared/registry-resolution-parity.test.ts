@@ -18,13 +18,10 @@
  */
 
 /**
- * Grammar parity corpus runner (TypeScript side) for registry:// refs (#246).
+ * Grammar corpus runner for registry:// refs (#246).
  *
  * Loads ``contracts/registry-resolution/cases.json`` and asserts ``parseRef``
- * agrees with each golden verdict. The companion runner
- * ``agent/tests/test_registry_resolution_corpus.py`` runs the same file against
- * the Python ``parse_ref``; if either side disagrees, CI fails before deploy.
- * Mirrors the cedar-parity dual-runner pattern.
+ * agrees with each golden verdict.
  */
 
 import * as fs from 'fs';

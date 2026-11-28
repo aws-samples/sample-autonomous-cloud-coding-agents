@@ -42,9 +42,9 @@ jest.mock('@aws-sdk/client-bedrock-runtime', () => ({
 // create-task-core collapsed the prior checkRepoOnboarded +
 // loadRepoConfig pair into a single ``lookupRepo`` call (see
 // ``cdk/src/handlers/shared/repo-config.ts::lookupRepo``). The mock
-// exposes the one function the submit path now calls; the two
-// convenience wrappers are still exported on the real module but
-// create-task-core doesn't reach for them, so leaving them off the
+// exposes the one function the submit path now calls; the
+// convenience wrapper loadRepoConfig is still exported on the real module but
+// create-task-core doesn't reach for it, so leaving it off the
 // mock keeps test failures load-bearing if the import surface
 // drifts.
 const mockLookupRepo = jest.fn();
@@ -871,6 +871,7 @@ describe('createTaskCore', () => {
     );
     expect(result.statusCode).toBe(422);
     expect(JSON.parse(result.body).error.code).toBe('REPO_NOT_ONBOARDED');
+    expect(JSON.parse(result.body).error.message).toBe("Repository 'org/repo' is not onboarded. Register it with 'bgagent repo onboard' or a Blueprint before submitting tasks.");
   });
 
   test('creates task successfully when repo is onboarded', async () => {

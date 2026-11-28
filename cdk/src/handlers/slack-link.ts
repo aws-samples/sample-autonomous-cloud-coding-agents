@@ -17,98 +17,17 @@
  *  SOFTWARE.
  */
 
-import { GetCommand, PutCommand, DeleteCommand } from '@aws-sdk/lib-dynamodb';
-import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
-import { ulid } from 'ulid';
-import { extractUserId } from './shared/gateway';
-import { logger } from './shared/logger';
-import { ErrorCode, errorResponse, successResponse } from './shared/response';
-import { makeDocClient } from './shared/ua';
-import { parseBody } from './shared/validation';
+import { makeLinkHandler } from './shared/account-link';
 
-const ddb = makeDocClient();
-
-const USER_MAPPING_TABLE = process.env.SLACK_USER_MAPPING_TABLE_NAME!;
-
-interface LinkRequest {
-  readonly code: string;
-}
-
-/**
- * POST /v1/slack/link — Complete Slack account linking.
- *
- * Called from the CLI (`bgagent slack link <code>`) with a Cognito JWT.
- * Looks up the pending link record, maps the Slack identity to the
- * authenticated platform user, and cleans up the pending record.
- */
-export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
-  const requestId = ulid();
-
-  try {
-    const userId = extractUserId(event);
-    if (!userId) {
-      return errorResponse(401, ErrorCode.UNAUTHORIZED, 'Authentication required.', requestId);
-    }
-
-    const body = parseBody<LinkRequest>(event.body ?? null);
-    if (typeof body?.code !== 'string' || !body.code) {
-      return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Request body must include a "code" field.', requestId);
-    }
-
-    const code = body.code.trim().toUpperCase();
-
-    // Look up the pending link record.
-    const pending = await ddb.send(new GetCommand({
-      TableName: USER_MAPPING_TABLE,
-      Key: { slack_identity: `pending#${code}` },
-    }));
-
-    // DynamoDB TTL deletes lazily, so an expired code can still be in the table.
-    if (!pending.Item || pending.Item.status !== 'pending'
-      || typeof pending.Item.ttl !== 'number' || pending.Item.ttl < Math.floor(Date.now() / 1000)) {
-      return errorResponse(404, ErrorCode.VALIDATION_ERROR, 'Invalid or expired link code.', requestId);
-    }
-
-    const teamId = pending.Item.slack_team_id as string;
-    const slackUserId = pending.Item.slack_user_id as string;
-    const now = new Date().toISOString();
-
-    // Write the confirmed mapping.
-    await ddb.send(new PutCommand({
-      TableName: USER_MAPPING_TABLE,
-      Item: {
-        slack_identity: `${teamId}#${slackUserId}`,
-        platform_user_id: userId,
-        slack_team_id: teamId,
-        slack_user_id: slackUserId,
-        linked_at: now,
-        link_method: 'slash_command',
-      },
-    }));
-
-    // Clean up the pending record.
-    await ddb.send(new DeleteCommand({
-      TableName: USER_MAPPING_TABLE,
-      Key: { slack_identity: `pending#${code}` },
-    }));
-
-    logger.info('Slack account linked', {
-      platform_user_id: userId,
-      slack_team_id: teamId,
-      slack_user_id: slackUserId,
-    });
-
-    return successResponse(200, {
-      message: 'Slack account linked successfully.',
-      slack_team_id: teamId,
-      slack_user_id: slackUserId,
-      linked_at: now,
-    }, requestId);
-  } catch (err) {
-    logger.error('Slack link handler failed', {
-      error: err instanceof Error ? err.message : String(err),
-      request_id: requestId,
-    });
-    return errorResponse(500, ErrorCode.INTERNAL_ERROR, 'Internal server error.', requestId);
-  }
-}
+export const handler = makeLinkHandler({
+  surface: 'Slack',
+  tableName: process.env.SLACK_USER_MAPPING_TABLE_NAME!,
+  identityAttr: 'slack_identity',
+  tenantAttr: 'slack_team_id',
+  userAttr: 'slack_user_id',
+  responseAttrs: ['slack_team_id', 'slack_user_id'],
+  mappingExtras: { link_method: 'slash_command' },
+  dryRun: false,
+  // The Slack slash command issues its codes in upper case.
+  upperCaseCode: true,
+});

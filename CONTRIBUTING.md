@@ -86,7 +86,7 @@ Keep settings for one machine out of the repository: mise reads an untracked `mi
 
 ### Dependency upgrades
 
-The `upgrade-main` GitHub workflow runs `mise run upgrade` daily and opens a PR labeled `auto-approve` when lockfiles change. Upgrades stay within the ranges declared in each manifest — exact pins are never rewritten, which keeps the Cedar engine parity pair (`cedarpy` / `@cedar-policy/cedar-wasm`) untouched; those move only together, by hand, with refreshed parity fixtures.
+The `upgrade-main` GitHub workflow runs `mise run upgrade` daily and opens a PR labeled `auto-approve` when lockfiles change. Upgrades stay within the ranges declared in each manifest — exact pins are never rewritten, so the Cedar engine (`cedarpy`) moves only by hand.
 
 PRs labeled `auto-approve` are approved automatically by the `auto-approve` workflow; only apply the label to automated PRs whose changes are gated by the full build (e.g. the dependency-upgrade PRs).
 

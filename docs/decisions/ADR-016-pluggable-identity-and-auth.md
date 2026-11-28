@@ -182,7 +182,8 @@ to the Jira/Slack/GitHub `ChannelCredential`s in P7, and none of them are discov
    `WorkloadAccessToken` header, the agent calls `get_workload_access_token_for_user_id` +
    `get_resource_oauth2_token` through boto3 against its ambient role. AgentCore Runtime and ECS then
    behave identically, which is what makes the substrate-independence claim testable rather than
-   aspirational.
+   aspirational. Since 2026-11-26 the header bridge in `server.py` and the `bedrock-agentcore`
+   package, which the Context section calls vestigial, are removed.
 
 **IAM: the resources the data plane authorizes against are not the ones you would guess.** Both were
 found only by a live `AccessDenied`, because a unit test can only assert the ARN you chose:
