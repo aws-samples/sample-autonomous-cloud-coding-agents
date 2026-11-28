@@ -25,7 +25,7 @@ ARG GH_SHA256_ARM64=ee32df2323c8847f5fac6cb6b4b69ca75828e9329a8f22f677021f7b3306
 #
 # To bump: `docker buildx imagetools inspect <image>:<tag>` and copy the Digest.
 # Keep the tag alongside the digest; it documents what the digest is meant to be.
-FROM --platform=$TARGETPLATFORM jdxcode/mise:2026.11.6@sha256:d4de1845114f6d73e90e15f7642885f74f3ca93074491038a2b9c43e4b897f21 AS mise
+FROM --platform=$TARGETPLATFORM jdxcode/mise:2026.11.11@sha256:14a30b9945ea5c2fbae70d8b6be8f2c8b2456698f2a258f3f6315f7784c84676 AS mise
 
 FROM --platform=$TARGETPLATFORM python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
 

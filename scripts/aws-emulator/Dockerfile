@@ -17,7 +17,7 @@ ARG AWS_EMULATOR_VERSION=1.0.610
 # Pinned by digest like every other external image in this repository (see agent/Dockerfile).
 # The digest is a multi-platform index (linux/amd64 + linux/arm64). To bump:
 #   docker buildx imagetools inspect public.ecr.aws/amazonlinux/amazonlinux:2023-minimal
-FROM public.ecr.aws/amazonlinux/amazonlinux:2023-minimal@sha256:158a9044f9dc0777f098b76c8b54346f6ed4560b9a6a416dec7a5ba3bc483af4 AS base
+FROM public.ecr.aws/amazonlinux/amazonlinux:2023-minimal@sha256:def78a1e7b7c3dc3e6a840ec5b70c94dddcb97099117ae1ba34dc7a39b8ba61d AS base
 
 FROM base AS verified
 ARG AWS_EMULATOR_VERSION
