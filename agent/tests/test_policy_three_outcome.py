@@ -439,19 +439,20 @@ class TestThreeOutcomePipeline:
         d = engine.evaluate_tool_use("Bash", {"command": "git push --force origin feature"})
         assert d.outcome == Outcome.REQUIRE_APPROVAL
         assert "force_push_any" in d.matching_rule_ids
-        assert d.timeout_s == 300
+        # The rule allows 3600s; the task default (1800s) decides.
+        assert d.timeout_s == 1800
         assert d.severity == "medium"
 
     def test_soft_deny_multi_match_merges_annotations(self):
-        # force_push_any (300s, medium) + force_push_main (600s, high) both
-        # match "git push --force origin main". Merge picks min(300, 600)=300s
+        # force_push_any (3600s, medium) + force_push_main (3600s, high) both
+        # match "git push --force origin main". Merge picks min(3600, 3600, 1800)=1800s
         # and max(medium, high)=high. §6.3.
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
         d = engine.evaluate_tool_use("Bash", {"command": "git push --force origin main"})
         assert d.outcome == Outcome.REQUIRE_APPROVAL
         assert "force_push_any" in d.matching_rule_ids
         assert "force_push_main" in d.matching_rule_ids
-        assert d.timeout_s == 300  # min across rules + task default
+        assert d.timeout_s == 1800  # min across rules (3600) + task default (1800)
         assert d.severity == "high"  # max across rules
 
     def test_default_allow_on_no_match(self):

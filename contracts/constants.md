@@ -48,7 +48,7 @@ JSON at TypeScript compile time via `resolveJsonModule`.
   "approval_timeout_s": {
     "min": 30,
     "max": 3600,
-    "default": 300
+    "default": 1800
   },
   "max_budget_usd": {
     "min": 0.01,
@@ -104,7 +104,9 @@ JSON at TypeScript compile time via `resolveJsonModule`.
   before the `maxLifetime - 300` clip is applied (§7.3). 3600 seconds
   (1 hour).
 - **`approval_timeout_s.default`** — value applied when the submit payload
-  omits `approval_timeout_s`. 300 seconds (5 minutes) per §6 decision #6.
+  omits `approval_timeout_s` and the repo's blueprint sets no
+  `security.approvalTimeoutSeconds`. 1800 seconds (30 minutes): long enough for
+  someone away from the session to answer. Was 300 s (§6 decision #6).
 - **`max_budget_usd.min`** — floor for a task's `max_budget_usd` (1 cent).
   Validated server-side (`validation.ts`) and pre-validated by
   `bgagent submit --max-budget` (#258).
@@ -198,9 +200,9 @@ fails the drift check *and* the image build.
   The coordinator suspends only images whose launched version declares this protocol.
 - **`microvm_sleep_after_s`** — per-task approval-wait delay before MicroVM sleep
   (`min` 0 = off, `max` 3,600, `default` 60). The default is chosen against
-  `approval_timeout_s.default` (300 s): the supervisor wakes 60 s before the
+  `approval_timeout_s.default` (1800 s): the supervisor wakes 60 s before the
   deadline and never suspends for less than 30 s, so a default gate sleeps from
-  60 s to 240 s.
+  60 s to 1740 s.
 
 The published CLI package contains only `lib/`, so it cannot load the repository
 contract at runtime. It mirrors these values as literals and

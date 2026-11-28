@@ -245,7 +245,7 @@ When you specify `--max-turns` (CLI) or `max_turns` (API) on a task, your value 
 
 ### Removing a per-repo override
 
-Deleting an override from the Blueprint and redeploying does not remove it. A redeploy writes the settings the Blueprint declares and leaves the rest of the repository's record in `RepoTable` as it is, so the repository keeps the last value: a deleted `agent.maxBudgetUsd` is still the default budget of its tasks, and a deleted `agent.modelId` still selects the old model. An empty string or an empty list does not clear a setting either. Only the registry asset lists (`assets.mcpServers`, `assets.cedarPolicyModules`, `assets.skills`) are removed from the record when the Blueprint stops declaring them.
+Deleting an override from the Blueprint and redeploying does not remove it. A redeploy writes the settings the Blueprint declares and leaves the rest of the repository's record in `RepoTable` as it is, so the repository keeps the last value: a deleted `agent.maxBudgetUsd` is still the default budget of its tasks, and a deleted `agent.modelId` still selects the old model. An empty string or an empty list does not clear a setting either. Only the registry asset lists (`assets.mcpServers`, `assets.cedarPolicyModules`, `assets.skills`) and the approval window (`security.approvalTimeoutSeconds`) are removed from the record when the Blueprint stops declaring them.
 
 `bgagent repo onboard` has no option that removes a setting. When you run it again for an onboarded repository, it keeps the stored value of every option you leave out, and a stored `max_budget_usd` or `memory_token_budget`.
 
@@ -668,7 +668,7 @@ Created:     2026-04-01T00:39:51.271Z
 | `--max-budget` | Maximum cost budget in USD (0.01–100). Overrides per-repo Blueprint default. No default limit. |
 | `--idempotency-key` | Idempotency key for deduplication. |
 | `--trace` | Enable detailed tracing: raises progress preview cap to 4 KB and uploads full NDJSON trajectory to S3 on completion. Download with `bgagent trace download`. |
-| `--approval-timeout` | Cedar HITL per-task approval timeout in seconds (default 300). A matching rule with its own `@approval_timeout_s` annotation still takes the minimum. See [Approval gates](#approval-gates-cedar-hitl). |
+| `--approval-timeout` | Cedar HITL per-task approval timeout in seconds (default 1800, or the repo blueprint's `security.approvalTimeoutSeconds`). A matching rule with its own `@approval_timeout_s` annotation still takes the minimum. See [Approval gates](#approval-gates-cedar-hitl). |
 | `--microvm-sleep-after` | Seconds to wait for approval before putting a Lambda MicroVM to sleep (default 60; 0–3600 accepted). Use `off` to keep it awake. Requires the deployment's automatic-sleep feature to be enabled; does not change approval deadlines or affect other compute backends. |
 | `--pre-approve` | Cedar HITL scope to approve up-front (repeatable). Scope forms: `all_session`, `tool_type:<name>`, `tool_group:<name>`, `bash_pattern:<glob>`, `write_path:<glob>`, `rule:<rule_id>`. Hard-deny rules are always enforced. |
 | `--wait` | Poll until the task reaches a terminal status. |
@@ -905,7 +905,7 @@ When a rule marked `@tier("soft")` matches a tool call:
 1. The agent stops before invoking the tool.
 2. A row is atomically written to the approvals table and the task status flips to `AWAITING_APPROVAL`.
 3. A progress event (`approval_requested`) is emitted so `bgagent watch` shows the gate in real time.
-4. The task waits for your decision up to the rule's timeout (default 300 s, configurable per-rule and per-task).
+4. The task waits for your decision up to the approval window (default 30 minutes; configurable per repo with the blueprint's `security.approvalTimeoutSeconds`, per task, and per rule, up to 1 hour).
 5. On approval, the agent proceeds; on denial, the deny reason is best-effort injected back into the agent's context so it can adapt; on timeout, the gate is treated as a denial with `timed_out` as the reason.
 
 A decision is recorded at most once per request. Replaying approve/deny on the same `(task_id, request_id)` is idempotent.

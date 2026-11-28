@@ -17,6 +17,7 @@
  *  SOFTWARE.
  */
 
+import { redactValue } from './deny-reason-scanner';
 import { isTerminalMaturingReply, preservePreviewSuffix } from './iteration-reply';
 import { resolveLinearOauthToken } from './linear-oauth-resolver';
 import { logger } from './logger';
@@ -255,7 +256,7 @@ export async function graphqlData(
     const resp = await fetch(LINEAR_GRAPHQL_URL, {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, variables }),
+      body: JSON.stringify({ query, variables: redactValue(variables) }),
       signal: controller.signal,
     });
     if (!resp.ok) {
@@ -309,7 +310,7 @@ export async function graphqlRequest(
         'Authorization': `Bearer ${accessToken}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ query, variables }),
+      body: JSON.stringify({ query, variables: redactValue(variables) }),
       signal: controller.signal,
     });
     if (!resp.ok) {
@@ -388,6 +389,85 @@ export async function postIssueComment(
   const token = await resolveToken(ctx);
   if (!token) return { ok: false, retryable: false };
   return graphqlRequest(token, COMMENT_CREATE_MUTATION, { issueId, body });
+}
+
+/**
+ * Read consent from Linear itself. Webhook authentication alone is insufficient:
+ * legacy worker credentials can read the OAuth bundle containing the HMAC key.
+ * Lookup failures must retry, never become permission to use webhook fields.
+ */
+export async function readLinearApprovalComment(
+  ctx: LinearFeedbackContext,
+  id: string,
+): Promise<{
+  id: string;
+  body: string;
+  user?: { id: string } | null;
+  botActor?: { id: string } | null;
+  issue: { id: string };
+  parent?: { id: string } | null;
+  /** The parent comment (the notice) is this app's and was never edited. */
+  noticeUnchanged: boolean;
+} | null> {
+  const token = await resolveToken(ctx);
+  if (!token) throw new Error('Linear approval verification token unavailable');
+  const result = await graphqlData(token, `
+    query VerifyApprovalComment($id: String!) {
+      organization { id }
+      viewer { id }
+      comment(id: $id) { id body user { id } botActor { id } issue { id } parent { id editedAt user { id } } }
+    }`, { id });
+  if (!result.ok) throw new Error('Linear approval comment verification unavailable');
+  if ((result.value.organization as { id?: string } | undefined)?.id !== ctx.linearWorkspaceId) {
+    throw new Error('Linear approval verification workspace mismatch');
+  }
+  const viewerId = (result.value.viewer as { id?: string } | undefined)?.id;
+  if (!viewerId) throw new Error('Linear approval verification identity unavailable');
+  const comment = result.value.comment as Omit<NonNullable<Awaited<ReturnType<typeof readLinearApprovalComment>>>, 'noticeUnchanged'> & {
+    parent?: { id: string; editedAt?: string | null; user?: { id: string } | null } | null;
+  } | null ?? null;
+  // Diagnostic user-mode OAuth tokens can post genuine human comments. Workers
+  // holding that token must not manufacture consent from its own identity.
+  // Read the identity from Linear, including for installations predating this check.
+  if (!comment || comment.user?.id === viewerId) return null;
+  // The agent's tools hold the same app token and could rewrite the notice the
+  // owner is answering: an edited notice, or one by another author, is not ours.
+  return { ...comment, noticeUnchanged: comment.parent?.user?.id === viewerId && !comment.parent.editedAt };
+}
+
+/**
+ * Retry-safe posting for approval prompts and acknowledgements. Without a token the
+ * post is retryable: the resolver also returns null when the secret cannot be read
+ * once, and an approval request that is never shown is denied when it times out.
+ */
+export async function postIdentifiedComment(
+  ctx: LinearFeedbackContext,
+  input: { id: string; issueId: string; body: string; parentId?: string },
+): Promise<LinearPostResult> {
+  const token = await resolveToken(ctx);
+  if (!token) return { ok: false, retryable: true };
+  const created = await graphqlRequest(token, `
+    mutation ApprovalComment($input: CommentCreateInput!) {
+      commentCreate(input: $input) { success comment { id } }
+    }`, { input });
+  if (created.ok) return { ok: true };
+  // A successful write can lose its response, and a retry then meets the id that
+  // exists. The read-back only recognises that comment; whether a failure is worth a
+  // retry is the create's own answer (network, 5xx and 429 are; GraphQL errors and
+  // other 4xx are not). ``comment(id)`` is non-null in Linear's schema, so a missing
+  // comment is an error here, not null. Linear holds the body as the scan left it.
+  const existing = await graphqlData(token, `
+    query ApprovalComment($id: String!) {
+      comment(id: $id) { body issue { id } parent { id } }
+    }`, { id: input.id });
+  const comment = existing.ok ? existing.value.comment as {
+    body?: string; issue?: { id?: string }; parent?: { id?: string } | null;
+  } | undefined : undefined;
+  const normalizeBody = (body: string) => body.replace(/\r\n?/g, '\n').replace(/\n+$/, '');
+  const same = typeof comment?.body === 'string' && normalizeBody(comment.body) === normalizeBody(redactValue(input.body))
+    && comment.issue?.id === input.issueId
+    && comment.parent?.id === input.parentId;
+  return same ? { ok: true } : created;
 }
 
 /**

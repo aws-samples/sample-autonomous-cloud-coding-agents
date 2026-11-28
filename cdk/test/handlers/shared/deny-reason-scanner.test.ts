@@ -19,7 +19,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { DENY_REASON_SECRET_NAMES, scanDenyReason } from '../../../src/handlers/shared/deny-reason-scanner';
+import { DENY_REASON_SECRET_NAMES, redactValue, scanDenyReason } from '../../../src/handlers/shared/deny-reason-scanner';
 
 // Shared with agent/tests/test_output_scanner.py: the agent's scanner has to
 // give the same text for a URL with a user and a password.
@@ -59,6 +59,7 @@ const FIX_PASSWORD = 's3cret' + 'P4ss';
 // A password with letters and digits, as somebody may leave it inside the
 // brackets of a placeholder.
 const FIX_LETTERS_AND_DIGITS = 'Passw0rd' + '123';
+const R = '[REDACTED-CONNECTION_STRING]';
 const FIX_CONNECTION_STRING = 'postgres://app' + ':s3cretP4ss' + '@db.internal:5432/app';
 // Base64 text holds "/", and so does many a generated password.
 const FIX_CONNECTION_STRING_WITH_SLASH = 'postgres://admin' + ':abc/def+ghiJKL' + '@db.internal:5432/app';
@@ -125,10 +126,10 @@ describe('scanDenyReason', () => {
     ['a quoted AWS secret key', `AWS_SECRET_ACCESS_KEY="${FIX_AWS_SECRET}", the old one`, '[REDACTED-AWS_SECRET]", the old one'],
     ['an AWS secret key that ends in "/"', `aws_secret_access_key = ${FIX_AWS_SECRET_ENDING_IN_SLASH}`, '[REDACTED-AWS_SECRET]'],
     ['an AWS secret key in the JSON form', `"SecretAccessKey": "${FIX_AWS_SECRET}"`, '"[REDACTED-AWS_SECRET]"'],
-    ['a connection string with a password', `${FIX_CONNECTION_STRING} is down`, '[REDACTED-CONNECTION_STRING] is down'],
-    ['a connection string whose password holds a slash', `${FIX_CONNECTION_STRING_WITH_SLASH} is down`, '[REDACTED-CONNECTION_STRING] is down'],
-    ['a connection string whose user is an e-mail address', `EMAIL_URL=${FIX_SMTP_URL}`, 'EMAIL_URL=[REDACTED-CONNECTION_STRING]'],
-    ['an AWS key pair in a URL, with slashes in the secret', FIX_AWS_KEY_PAIR_URL, '[REDACTED-CONNECTION_STRING]'],
+    ['a connection string with a password', `${FIX_CONNECTION_STRING} is down`, 'postgres://[REDACTED-CONNECTION_STRING]@db.internal:5432/app is down'],
+    ['a connection string whose password holds a slash', `${FIX_CONNECTION_STRING_WITH_SLASH} is down`, 'postgres://[REDACTED-CONNECTION_STRING]@db.internal:5432/app is down'],
+    ['a connection string whose user is an e-mail address', `EMAIL_URL=${FIX_SMTP_URL}`, 'EMAIL_URL=smtp://[REDACTED-CONNECTION_STRING]@smtp.example.com:587'],
+    ['an AWS key pair in a URL, with slashes in the secret', FIX_AWS_KEY_PAIR_URL, 's3a://[REDACTED-CONNECTION_STRING]@bucket/path'],
     ['a token in a git remote URL', FIX_GIT_URL, 'https://[REDACTED-GITHUB_URL_TOKEN]github.com/o/r.git'],
     ['a bearer token after "BEARER" in capitals', `Authorization: BEARER ${FIX_JWT}`, 'Authorization: [REDACTED-GENERIC_BEARER]'],
   ])('redacts %s', (_shape, input, expected) => {
@@ -136,16 +137,25 @@ describe('scanDenyReason', () => {
   });
 
   // AWS_KEY runs first and leaves scheme://[REDACTED-AWS_KEY]...@host, which is
-  // no user:password@host any more. The rest of the URL (the rest of a
-  // password, a secret in the query) must not stay readable for that.
+  // no user:password@host any more. The rest of the user part (the rest of a
+  // password) and the query (a secret in it) must not stay readable for that;
+  // the host and the path stay.
   test.each([
-    ['a session token in the query', `mongodb+srv://${FIX_AWS_KEY_PAIR}@cluster0.example.net/app?authMechanism=MONGODB-AWS&authMechanismProperties=AWS_SESSION_TOKEN:${'T0ken'.repeat(8)}`],
-    ['a password in the query', `https://${FIX_AWS_KEY_PAIR}@files.example.com/get?pass` + 'word=Pa55w0rdQuery'],
-    ['a password longer than a secret key', `postgres://${FIX_AWS_KEY_PAIR}-TailOfPassword@db.internal/app`],
-    ['an SES SMTP password of 44 characters with slashes', `smtp://${FIX_AWS_KEY}:${'aB3/'.repeat(11)}@email-smtp.us-east-1.amazonaws.com:587`],
-    ['a session token after the secret key (MC_HOST of the MinIO client)', `https://${FIX_AWS_KEY_PAIR}:${'aB3/'.repeat(150)}@s3.amazonaws.com`],
-  ])('replaces a URL whose user is an AWS key id as a whole, with %s', (_what, url) => {
-    expect(scanDenyReason(url)).toBe('[REDACTED-CONNECTION_STRING]');
+    [
+      'a session token in the query',
+      `mongodb+srv://${FIX_AWS_KEY_PAIR}@cluster0.example.net/app?authMechanism=MONGODB-AWS&authMechanismProperties=AWS_SESSION_TOKEN:${'T0ken'.repeat(8)}`,
+      `mongodb+srv://${R}@cluster0.example.net/app?${R}`,
+    ],
+    ['a password in the query', `https://${FIX_AWS_KEY_PAIR}@files.example.com/get?pass` + 'word=Pa55w0rdQuery', `https://${R}@files.example.com/get?${R}`],
+    ['a password longer than a secret key', `postgres://${FIX_AWS_KEY_PAIR}-TailOfPassword@db.internal/app`, `postgres://${R}@db.internal/app`],
+    [
+      'an SES SMTP password of 44 characters with slashes',
+      `smtp://${FIX_AWS_KEY}:${'aB3/'.repeat(11)}@email-smtp.us-east-1.amazonaws.com:587`,
+      `smtp://${R}@email-smtp.us-east-1.amazonaws.com:587`,
+    ],
+    ['a session token after the secret key (MC_HOST of the MinIO client)', `https://${FIX_AWS_KEY_PAIR}:${'aB3/'.repeat(150)}@s3.amazonaws.com`, `https://${R}@s3.amazonaws.com`],
+  ])('replaces the user part and the query of a URL whose user is an AWS key id, with %s', (_what, url, expected) => {
+    expect(scanDenyReason(url)).toBe(expected);
   });
 
   test('does not take a longer run after an AWS key id for its secret', () => {
@@ -198,9 +208,9 @@ describe('scanDenyReason', () => {
   test.each([
     ['after Bearer', `Authorization: Bearer ${FIX_GITHUB_APP_TOKEN_STATELESS}`, 'Authorization: [REDACTED-GENERIC_BEARER]'],
     [
-      'in a URL that is replaced as a whole',
+      'in the user part of a URL',
       `https://x-access-token:${FIX_GITHUB_APP_TOKEN_STATELESS}:x-oauth-basic@github.com/o/r.git?t=QuerySecret7`,
-      '[REDACTED-CONNECTION_STRING]',
+      `https://${R}@github.com/o/r.git?${R}`,
     ],
   ])('leaves the other patterns their match of a stateless token %s', (_where, input, expected) => {
     expect(scanDenyReason(input)).toBe(expected);
@@ -240,10 +250,10 @@ describe('scanDenyReason', () => {
   test('leaves the other patterns their match of the rest of a bearer token', () => {
     // The entry for the rest of a bearer token runs last. Directly behind the
     // Bearer pattern it would take the marker of the key id, and the pattern
-    // for connection strings needs that marker to replace this URL as a
-    // whole: the password would stay.
+    // for connection strings needs that marker to replace the user part of
+    // this URL: the password would stay.
     const input = `s3://Bearer ${'x'.repeat(24)}-${FIX_AWS_KEY}:pa/ss@host`;
-    expect(scanDenyReason(input)).toBe('[REDACTED-CONNECTION_STRING]');
+    expect(scanDenyReason(input)).toBe(`s3://${R}@host`);
   });
 
   test('takes text with a colon for a git remote URL token up to 512 characters', () => {
@@ -259,7 +269,7 @@ describe('scanDenyReason', () => {
     // Without the u flag a JavaScript regular expression counts it as two.
     const wide = String.fromCodePoint(0x1F600);
     expect(scanDenyReason(`x-access-token:a:${wide.repeat(300)}s3cret@github.com`)).toBe('[REDACTED-GITHUB_URL_TOKEN]github.com');
-    expect(scanDenyReason(`postgres://${FIX_AWS_KEY_PAIR}-[${wide.repeat(200)}s3cret@db.internal/app`)).toBe('[REDACTED-CONNECTION_STRING]');
+    expect(scanDenyReason(`postgres://${FIX_AWS_KEY_PAIR}-[${wide.repeat(200)}s3cret@db.internal/app`)).toBe(`postgres://${R}@db.internal/app`);
   });
 
   test('leaves a URL followed by an e-mail address alone', () => {
@@ -307,12 +317,12 @@ describe('scanDenyReason', () => {
   });
 
   test.each([
-    [`DATABASE_URL = "postgresql+psycopg2://{user}:${FIX_PASSWORD}@{host}:{port}/{db}"`, 'DATABASE_URL = "[REDACTED-CONNECTION_STRING]"'],
-    [`url = f"redis://default:${FIX_PASSWORD}@{host}:6379/0"`, 'url = f"[REDACTED-CONNECTION_STRING]"'],
-    [`conn = "amqp://%s:${FIX_PASSWORD}@%s:5672/" % (user, host)`, 'conn = "[REDACTED-CONNECTION_STRING]" % (user, host)'],
-    [`export PGURL="postgres://app:${FIX_PASSWORD}@db.internal/app"`, 'export PGURL="[REDACTED-CONNECTION_STRING]"'],
-    [`# docs: mongodb://<user>:${FIX_PASSWORD}@cluster0.example.net`, '# docs: [REDACTED-CONNECTION_STRING]'],
-    [`sqlalchemy.url = postgresql://%(DB_USER)s:${FIX_PASSWORD}@%(DB_HOST)s/app`, 'sqlalchemy.url = [REDACTED-CONNECTION_STRING]'],
+    [`DATABASE_URL = "postgresql+psycopg2://{user}:${FIX_PASSWORD}@{host}:{port}/{db}"`, `DATABASE_URL = "postgresql+psycopg2://${R}@{host}:{port}/{db}"`],
+    [`url = f"redis://default:${FIX_PASSWORD}@{host}:6379/0"`, `url = f"redis://${R}@{host}:6379/0"`],
+    [`conn = "amqp://%s:${FIX_PASSWORD}@%s:5672/" % (user, host)`, `conn = "amqp://${R}@%s:5672/" % (user, host)`],
+    [`export PGURL="postgres://app:${FIX_PASSWORD}@db.internal/app"`, `export PGURL="postgres://${R}@db.internal/app"`],
+    [`# docs: mongodb://<user>:${FIX_PASSWORD}@cluster0.example.net`, `# docs: mongodb://${R}@cluster0.example.net`],
+    [`sqlalchemy.url = postgresql://%(DB_USER)s:${FIX_PASSWORD}@%(DB_HOST)s/app`, `sqlalchemy.url = postgresql://${R}@%(DB_HOST)s/app`],
     [`run: git clone https://x-access-token:${FIX_PASSWORD}@github.com/o/r.git`, 'run: git clone https://[REDACTED-GITHUB_URL_TOKEN]github.com/o/r.git'],
   ])('replaces the same URL with a password in the place of the placeholder: %s', (input, expected) => {
     expect(scanDenyReason(input)).toBe(expected);
@@ -345,13 +355,13 @@ describe('scanDenyReason', () => {
     '{' + '123456' + '}',
     '<' + 'Sunshine' + 'LetMeIn' + '>',
   ])('replaces a password that is not one placeholder and nothing else: %s', (password) => {
-    expect(scanDenyReason(`postgres://app:${password}@db.internal/app`)).toBe('[REDACTED-CONNECTION_STRING]');
+    expect(scanDenyReason(`postgres://app:${password}@db.internal/app`)).toBe(`postgres://${R}@db.internal/app`);
     expect(scanDenyReason(`https://x-access-token:${password}@github.com/o/r.git`)).toBe('https://[REDACTED-GITHUB_URL_TOKEN]github.com/o/r.git');
   });
 
   test('takes a placeholder password after an AWS key id for no template', () => {
-    // The key id is real and is replaced: the URL goes as a whole, as before.
-    expect(scanDenyReason(`https://${FIX_AWS_KEY}:{secret}@files.example.com/x`)).toBe('[REDACTED-CONNECTION_STRING]');
+    // The key id is real and is replaced: the user part goes, as before.
+    expect(scanDenyReason(`https://${FIX_AWS_KEY}:{secret}@files.example.com/x`)).toBe(`https://${R}@files.example.com/x`);
   });
 
   test('is idempotent — running twice produces the same output', () => {
@@ -379,5 +389,23 @@ describe('scanDenyReason', () => {
     expect(DENY_REASON_SECRET_NAMES).toContain('AWS_KEY');
     expect(DENY_REASON_SECRET_NAMES).toContain('GITHUB_TOKEN');
     expect(DENY_REASON_SECRET_NAMES).toContain('PRIVATE_KEY');
+  });
+});
+
+describe('redactValue (outbound Linear and GitHub text, #1066)', () => {
+  test('redacts every string in a nested value and keeps the shape and other values', () => {
+    const value = {
+      input: { body: 'token lin_api_EXAMPLE0EXAMPLE0EX here', count: 3, ok: true },
+      list: ['AKIAIOSFODNN7EXAMPLE', null],
+    };
+    expect(redactValue(value)).toEqual({
+      input: { body: 'token [REDACTED-LINEAR_TOKEN] here', count: 3, ok: true },
+      list: ['[REDACTED-AWS_KEY]', null],
+    });
+  });
+
+  test('leaves ids and ordinary text alone', () => {
+    const value = { id: '420f1277-9f2b-4058-b9c1-ddbceeee6b96', body: 'Opened pull request https://github.com/acme/web/pull/7' };
+    expect(redactValue(value)).toEqual(value);
   });
 });

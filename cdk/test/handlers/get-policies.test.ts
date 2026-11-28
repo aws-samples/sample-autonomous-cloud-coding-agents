@@ -355,6 +355,6 @@ describe('get-policies', () => {
       (r: { rule_id: string }) => r.rule_id === 'force_push_any',
     );
     expect(soft.severity).toBe('medium');
-    expect(soft.approval_timeout_s).toBe(300);
+    expect(soft.approval_timeout_s).toBe(3600);
   });
 });

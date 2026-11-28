@@ -35,7 +35,7 @@ export interface DecisionPostCommitInput {
   readonly requestId: string;
   readonly decision: 'APPROVED' | 'DENIED';
   /** Decision-specific audit fields (approve: `scope`; deny: `reason`). */
-  readonly auditMetadata: Pick<ApprovalDecisionRecordedEvent, 'scope' | 'reason'>;
+  readonly auditMetadata: Pick<ApprovalDecisionRecordedEvent, 'scope' | 'reason'> & { readonly decision_source?: string };
   readonly decidedAt: string;
   readonly nowEpoch: number;
   readonly retentionDays: number;

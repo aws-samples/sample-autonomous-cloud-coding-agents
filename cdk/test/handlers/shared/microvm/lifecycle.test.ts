@@ -100,28 +100,31 @@ describe('MicroVM lifecycle policy', () => {
       deadlineMs: NOW + sharedConstants.approval_timeout_s.default * 1000,
     },
   });
-  test('default timing: a 300 s gate sleeps after 60 s and wakes 60 s before its deadline', () => {
-    expect(sharedConstants.approval_timeout_s.default).toBe(300);
+  test('default timing: a default gate sleeps after 60 s and wakes 60 s before its deadline', () => {
+    expect(sharedConstants.approval_timeout_s.default).toBe(1800);
     expect(sharedConstants.microvm_sleep_after_s.default).toBe(60);
+    const gateMs = sharedConstants.approval_timeout_s.default * 1000;
     const current = defaultGate();
     expect(policy('RUNNING', { snapshot: current, nowMs: NOW + 59_000 }))
       .toMatchObject({ action: 'wait', reason: 'suspend-grace', nextPollInMs: 1000 });
     expect(policy('RUNNING', { snapshot: current, nowMs: NOW + 60_000 })).toMatchObject({ action: 'suspend' });
     // Once the suspend intent for this gate is recorded, it stays asleep until the
-    // wake margin before the ORIGINAL deadline (300 - 60 = 240 s).
-    const asleep = { ...current, intent: { ...intent(), deadline_ms: NOW + 300_000 } };
-    expect(policy('SUSPENDED', { snapshot: asleep, nowMs: NOW + 239_000 }))
+    // wake margin before the ORIGINAL deadline (1800 - 60 = 1740 s).
+    const asleep = { ...current, intent: { ...intent(), deadline_ms: NOW + gateMs } };
+    expect(policy('SUSPENDED', { snapshot: asleep, nowMs: NOW + gateMs - 61_000 }))
       .toMatchObject({ action: 'wait', reason: 'intentionally-suspended', nextPollInMs: 1000 });
-    expect(policy('SUSPENDED', { snapshot: asleep, nowMs: NOW + 240_000 }))
+    expect(policy('SUSPENDED', { snapshot: asleep, nowMs: NOW + gateMs - 60_000 }))
       .toMatchObject({ action: 'resume', reason: 'wake-deadline' });
-    expect(current.approval).toMatchObject({ deadlineMs: NOW + 300_000 });
+    expect(current.approval).toMatchObject({ deadlineMs: NOW + gateMs });
   });
-  test('a 600 s sleep-after never suspends a default 300 s gate', () => {
-    const current = { ...defaultGate(), sleepAfterSeconds: 600 };
-    for (const elapsed of [60_000, 200_000, 239_000]) {
+
+  test('a sleep-after as long as the gate never suspends it', () => {
+    const gateS = sharedConstants.approval_timeout_s.default;
+    const current = { ...defaultGate(), sleepAfterSeconds: gateS };
+    for (const elapsed of [60_000, (gateS / 2) * 1000, gateS * 1000 - 61_000]) {
       expect(policy('RUNNING', { snapshot: current, nowMs: NOW + elapsed })).toMatchObject({ action: 'wait' });
     }
-    expect(policy('RUNNING', { snapshot: current, nowMs: NOW + 240_000 }))
+    expect(policy('RUNNING', { snapshot: current, nowMs: NOW + gateS * 1000 - 60_000 }))
       .toMatchObject({ action: 'resume', reason: 'wake-deadline' });
   });
   test.each([0, -1, NaN, Infinity, 0.5, 3601, '30', null])('off or malformed delay %s keeps awake and repairs existing sleep', value => {

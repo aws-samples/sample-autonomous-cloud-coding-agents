@@ -114,7 +114,7 @@ Created:     2026-04-01T00:39:51.271Z
 | `--max-budget` | Maximum cost budget in USD (0.01–100). Overrides per-repo Blueprint default. No default limit. |
 | `--idempotency-key` | Idempotency key for deduplication. |
 | `--trace` | Enable detailed tracing: raises progress preview cap to 4 KB and uploads full NDJSON trajectory to S3 on completion. Download with `bgagent trace download`. |
-| `--approval-timeout` | Cedar HITL per-task approval timeout in seconds (default 300). A matching rule with its own `@approval_timeout_s` annotation still takes the minimum. See [Approval gates](/sample-autonomous-cloud-coding-agents/using/approval-gates-cedar-hitl). |
+| `--approval-timeout` | Cedar HITL per-task approval timeout in seconds (default 1800, or the repo blueprint's `security.approvalTimeoutSeconds`). A matching rule with its own `@approval_timeout_s` annotation still takes the minimum. See [Approval gates](/sample-autonomous-cloud-coding-agents/using/approval-gates-cedar-hitl). |
 | `--microvm-sleep-after` | Seconds to wait for approval before putting a Lambda MicroVM to sleep (default 60; 0–3600 accepted). Use `off` to keep it awake. Requires the deployment's automatic-sleep feature to be enabled; does not change approval deadlines or affect other compute backends. |
 | `--pre-approve` | Cedar HITL scope to approve up-front (repeatable). Scope forms: `all_session`, `tool_type:<name>`, `tool_group:<name>`, `bash_pattern:<glob>`, `write_path:<glob>`, `rule:<rule_id>`. Hard-deny rules are always enforced. |
 | `--wait` | Poll until the task reaches a terminal status. |

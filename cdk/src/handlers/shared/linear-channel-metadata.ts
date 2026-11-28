@@ -55,6 +55,8 @@ export async function lookupLinearPlatformUser(
   const result = await ddb.send(new GetCommand({
     TableName: userMappingTableName,
     Key: { linear_identity: `${workspaceId}#${userId}` },
+    // Decisions (approval replies, a session stop) are authorized from this mapping.
+    ConsistentRead: true,
   }));
   if (!result.Item || result.Item.status === 'pending') return null;
   return (result.Item.platform_user_id as string) ?? null;

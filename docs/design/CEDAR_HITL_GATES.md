@@ -388,6 +388,7 @@ security:
       - write_infrastructure          # example: repo has its own stricter rule
   maxPreApprovalScope: "tool_type_session"   # optional; caps what --pre-approve can grant
   approvalGateCap: 50                         # optional; per-task lifetime cap on gates (1 ≤ N ≤ 500, default 50). See §3 decision #13.
+  approvalTimeoutSeconds: 1800                # optional; how long a person has to answer a request on this repo's tasks (30 ≤ N ≤ 3600, default 1800). A task's own approval_timeout_s wins.
 ```
 
 **`approvalGateCap` sizing guidance:**
@@ -482,7 +483,7 @@ forbid (principal, action == Agent::Action::"execute_bash", resource)
       || context.command like "*git push origin release/*" };
 ```
 
-A force-push to any branch needs approval in 300s. A force-push to `main` or `prod` gives the user 600s with elevated severity. A non-force push to a protected branch (`main`/`prod`/`master`/`release/*`) also gates — catches the case where an agent directly pushes rather than opening a PR. If a command matches both `force_push_any` and `force_push_main`, multi-match merging picks `min(300, 600) = 300s` and `max(medium, high) = high`.
+A force-push to any branch needs approval within the task's approval window (30 minutes by default). A force-push to `main` or `prod` raises the severity. A non-force push to a protected branch (`main`/`prod`/`master`/`release/*`) also gates — catches the case where an agent directly pushes rather than opening a PR. If a command matches both `force_push_any` and `force_push_main`, multi-match merging picks `min(300, 600) = 300s` and `max(medium, high) = high`.
 
 **Protect sensitive file paths** (soft-deny — part of the built-in starter set):
 ```cedar
@@ -1624,6 +1625,7 @@ These alarms transition to `ALARM` state in CloudWatch and appear in the console
 - **ApproveTaskFn/DenyTaskFn ↔ TaskApprovalsTable + TaskTable**: Lambda IAM policy allows `UpdateItem` on both tables under `TransactWriteItems`. Authorization is in the ConditionExpression (ownership AND state), not in a separate IAM boundary.
 - **Blueprint origin**: blueprints are CDK-deployed constructs (see `cdk/src/constructs/blueprint.ts`). Platform operators deploy them. Users cannot upload arbitrary blueprint.yaml from the target repo. This property is load-bearing for the security model — if blueprint origin ever becomes user-uploaded, the blueprint-injection section (§12.4) must be re-evaluated. The 64 KB text cap (§5.1, finding #12) and `disable:` hard-deny rejection (finding #9) are applied regardless of origin as defense in depth.
 - **Slack → ApproveTaskFn**: mediated by the fan-out Lambda + `SlackUserMappingTable` (§11.2). Slack admin cannot forge mappings; Slack approvals capped at `severity: low|medium` (finding #4).
+- **Linear → recordApprovalForUser / recordDenialForUser**: a reply to the approval notice comment, or an answer in the task's agent session, decides the request after the reply is read back from Linear and its author maps to the task owner (`LinearUserMappingTable`). Linear follows the Slack cap: a `severity: high` request can be denied from Linear but approved only with `bgagent approve`. So can a request whose saved arguments the secret scanner changed, since its notice hides part of the action.
 
 ### 12.2 Ownership encoded in ConditionExpression
 
@@ -2231,11 +2233,13 @@ Built-in policies shipped with the agent:
 **Hard-deny (absolute, cannot be disabled by blueprint)**: `rm_slash`, `write_git_internals`, `write_git_internals_nested`, `drop_table`. Absolute; no scope bypasses them; blueprint `disable:` cannot remove them (§5.1, finding #9).
 
 **Soft-deny starter set (require approval by default, may be disabled by blueprint)**:
-- `force_push_any` — `like "*git push --force*"` — medium, 300s
-- `push_to_protected_branch` — pushes to `main`/`master`/`prod`/`release/*` (non-force) — medium, 300s
-- `force_push_main` — force-push specifically to `main`/`prod` — high, 600s
-- `write_env_files` — `like "*.env"` — high, 600s
-- `write_credentials` — `like "*credentials*"` — high, 300s
+- `force_push_any` — `like "*git push --force*"` — medium, 3600s
+- `push_to_protected_branch` — pushes to `main`/`master`/`prod`/`release/*` (non-force) — medium, 3600s
+- `force_push_main` — force-push specifically to `main`/`prod` — high, 3600s
+- `write_env_files` — `like "*.env"` — high, 3600s
+- `write_credentials` — `like "*credentials*"` — high, 3600s
+
+Each built-in rule allows the 3600s maximum, so the task's window decides: 1800s by default, set per repo with the blueprint's `security.approvalTimeoutSeconds` or per task with `approval_timeout_s`. (Before #1066 the rules were 300s / 600s and the default 300s, which gave a person five minutes.)
 
 Users who want fully autonomous execution (no approval gates) pass `--pre-approve all_session --yes` at submit. Repos that want additional gates add them via `Blueprint.security.cedarPolicies.soft`. Repos that want a different policy set can override specific built-in **soft-deny** rules by `@rule_id` via the blueprint's `security.cedarPolicies.disable` list. The `disable:` mechanism is restricted: it may NOT include any built-in hard-deny rule_id, and the blueprint loader rejects such configurations at task start.
 

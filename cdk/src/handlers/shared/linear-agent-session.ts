@@ -77,12 +77,25 @@ export async function emitAgentActivity(
   accessToken: string,
   agentSessionId: string,
   content: AgentActivityContent,
-  options: { readonly ephemeral?: boolean; readonly id?: string; readonly timeoutMs?: number } = {},
+  options: {
+    readonly ephemeral?: boolean;
+    readonly id?: string;
+    readonly timeoutMs?: number;
+    /** ``select`` turns an elicitation into buttons; ``signalMetadata.options`` lists them. */
+    readonly signal?: 'select';
+    readonly signalMetadata?: Readonly<Record<string, unknown>>;
+  } = {},
 ): Promise<LinearPostResult> {
   const ephemeral = options.ephemeral === true && (content.type === 'thought' || content.type === 'action');
   return graphqlRequest(accessToken, AGENT_ACTIVITY_CREATE_MUTATION, {
     // `id` (a version-4 UUID) makes a retried emit the same activity rather than a second one.
-    input: { agentSessionId, content, ...(ephemeral && { ephemeral: true }), ...(options.id && { id: options.id }) },
+    input: {
+      agentSessionId,
+      content,
+      ...(ephemeral && { ephemeral: true }),
+      ...(options.id && { id: options.id }),
+      ...(options.signal && { signal: options.signal, signalMetadata: options.signalMetadata ?? {} }),
+    },
   }, options.timeoutMs);
 }
 
@@ -145,6 +158,107 @@ export async function fetchAgentSessionIssue(
     description: issue.description ?? null,
     projectId: issue.project?.id ?? null,
   });
+}
+
+/** A human's prompt in a session, as Linear records it. */
+export interface SessionPromptActivity {
+  readonly sessionId: string;
+  readonly authorId: string;
+  readonly body: string;
+  /** When the person wrote it (ISO), as Linear records it. */
+  readonly createdAt: string;
+}
+
+const SESSION_PROMPT_QUERY = `
+query VerifySessionPrompt($id: ID!) {
+  organization { id }
+  viewer { id }
+  agentActivities(filter: { id: { eq: $id } }, first: 1) {
+    nodes {
+      createdAt
+      agentSession { id }
+      content { __typename ... on AgentActivityPromptContent { body } }
+      user { id app }
+      promptAuthor { id app }
+    }
+  }
+}`;
+
+/**
+ * The one activity of an ``agentActivities`` read by id, or null. Read through the
+ * filter because Linear declares ``agentActivity(id)`` non-null: a missing activity
+ * is a GraphQL error there, which would look like Linear failing.
+ */
+function onlyActivity<T>(data: { agentActivities?: { nodes?: T[] } | null }): T | null {
+  return data.agentActivities?.nodes?.[0] ?? null;
+}
+
+/**
+ * Read a session prompt back from Linear before acting on it as consent. Webhook
+ * authentication alone is not enough: legacy worker credentials can read the OAuth
+ * bundle that holds the webhook signing key (the comment path reads its replies back
+ * for the same reason, ``readLinearApprovalComment``). Null when the activity is not a
+ * human's prompt: missing, not a prompt, written by an app, or by this token's own
+ * identity. Throws when Linear cannot answer, so the delivery retries instead of
+ * falling back to the webhook's fields.
+ */
+export async function fetchSessionPromptActivity(
+  accessToken: string,
+  workspaceId: string,
+  activityId: string,
+): Promise<SessionPromptActivity | null> {
+  const result = await graphqlData(accessToken, SESSION_PROMPT_QUERY, { id: activityId });
+  if (!result.ok) throw new Error('Linear session prompt verification unavailable');
+  const data = result.value as {
+    organization?: { id?: string };
+    viewer?: { id?: string };
+    agentActivities?: {
+      nodes?: Array<{
+        createdAt?: string;
+        agentSession?: { id?: string } | null;
+        content?: { __typename?: string; body?: string } | null;
+        user?: { id?: string; app?: boolean } | null;
+        promptAuthor?: { id?: string; app?: boolean } | null;
+      }>;
+    } | null;
+  };
+  if (data.organization?.id !== workspaceId) throw new Error('Linear session prompt verification workspace mismatch');
+  const viewerId = data.viewer?.id;
+  if (!viewerId) throw new Error('Linear session prompt verification identity unavailable');
+  const activity = onlyActivity(data);
+  const author = activity?.promptAuthor ?? activity?.user;
+  const sessionId = activity?.agentSession?.id;
+  if (activity?.content?.__typename !== 'AgentActivityPromptContent' || !sessionId
+    || !author?.id || author.app || author.id === viewerId) return null;
+  return { sessionId, authorId: author.id, body: activity.content.body ?? '', createdAt: activity.createdAt ?? '' };
+}
+
+const SESSION_ACTIVITY_QUERY = `
+query SessionActivityShown($id: ID!) {
+  organization { id }
+  agentActivities(filter: { id: { eq: $id } }, first: 1) { nodes { createdAt agentSession { id } } }
+}`;
+
+/**
+ * When Linear recorded one of this app's activities, and in which session; null when
+ * it does not exist. Throws when Linear cannot answer, so the caller retries.
+ */
+export async function fetchSessionActivityShown(
+  accessToken: string,
+  workspaceId: string,
+  activityId: string,
+): Promise<{ readonly sessionId: string; readonly createdAt: string } | null> {
+  const result = await graphqlData(accessToken, SESSION_ACTIVITY_QUERY, { id: activityId });
+  if (!result.ok) throw new Error('Linear session activity lookup unavailable');
+  const data = result.value as {
+    organization?: { id?: string };
+    agentActivities?: { nodes?: Array<{ createdAt?: string; agentSession?: { id?: string } | null }> } | null;
+  };
+  if (data.organization?.id !== workspaceId) throw new Error('Linear session activity lookup workspace mismatch');
+  const activity = onlyActivity(data);
+  const sessionId = activity?.agentSession?.id;
+  const createdAt = activity?.createdAt;
+  return sessionId && createdAt ? { sessionId, createdAt } : null;
 }
 
 /** Separator + heading that introduces Linear's `promptContext` in the description. */

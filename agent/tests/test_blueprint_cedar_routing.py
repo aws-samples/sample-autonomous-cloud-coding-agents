@@ -61,7 +61,7 @@ def test_guide_hard_rule_matches_the_prod_directory(guide_policies, tool, path, 
         assert "block_prod_writes" in decision.reason
 
 
-@pytest.mark.parametrize(("task_timeout", "expected"), [(None, 300), (600, 600), (3600, 900)])
+@pytest.mark.parametrize(("task_timeout", "expected"), [(None, 900), (600, 600), (3600, 900)])
 def test_guide_soft_rule_uses_shorter_approval_window(guide_policies, task_timeout, expected):
     engine = engine_for(guide_policies, timeout_s=task_timeout)
     decision = engine.evaluate_tool_use("Bash", {"command": "terraform apply"})

@@ -46,6 +46,10 @@ import type {
   DynamoDBStreamEvent,
 } from 'aws-lambda';
 import { TaskStatus, TERMINAL_STATUSES } from '../constructs/task-status';
+import {
+  approvalNotificationMarkdown, isApprovalNotification, loadApprovalNotification, markApprovalNotificationDelivered,
+  APPROVAL_NOTIFICATION_EVENTS as LINEAR_APPROVAL_EVENTS,
+} from './shared/approval-notifications';
 import { clearTokenCache, resolveGitHubToken } from './shared/context-hydration';
 import { classifyError } from './shared/error-classifier';
 import { renderFailureReply } from './shared/failure-reply';
@@ -68,10 +72,12 @@ import {
 } from './shared/jira-status-comment';
 import { addAgentSessionExternalUrl, emitAgentActivity, setAgentSessionPlan, type AgentActivityContent } from './shared/linear-agent-session';
 import { isLinearAgentSessionsEnabled, SESSION_STOP_CANCELLED_VIA } from './shared/linear-agent-session-event';
+import { closeLinearApprovalThread, type LinearApprovalThread, saveLinearApprovalThread } from './shared/linear-approval-thread';
 import {
   EMOJI_FAILURE,
   EMOJI_NEEDS_INPUT,
   EMOJI_SUCCESS,
+  postIdentifiedComment,
   postIssueComment,
   resolveToken,
   swapCommentReaction,
@@ -80,6 +86,7 @@ import {
   type LinearFeedbackContext,
   type LinearPostResult,
 } from './shared/linear-feedback';
+import { sessionApprovalActivity, sessionApprovalNoticeId } from './shared/linear-session-approval';
 import {
   checklistKind,
   checklistMoveForEvent,
@@ -228,6 +235,7 @@ export const CHANNEL_DEFAULTS: Record<NotificationChannel, ReadonlySet<string>> 
   // even earlier, at task-admission in the webhook processor (ADR-016 P4.5).
   linear: new Set<string>([
     ...TERMINAL_EVENT_TYPES,
+    ...LINEAR_APPROVAL_EVENTS,
     'pr_created',
     // Include task_timed_out so a Linear standalone iteration
     // that TIMES OUT still settles (its 👀→✅/❌ + terminal reply come through the
@@ -397,7 +405,9 @@ export function parseStreamRecord(record: DynamoDBRecord): FanOutEvent | null {
  * ``trajectory_uploaded``, ``trace_truncated``. Only ``pr_created``
  * is currently in any channel's default filter (§6.2 Slack + GitHub).
  */
-const ROUTABLE_MILESTONES: ReadonlySet<string> = new Set(['pr_created', ...LINEAR_SESSION_PROGRESS_MILESTONES]);
+const ROUTABLE_MILESTONES: ReadonlySet<string> = new Set([
+  'pr_created', ...LINEAR_APPROVAL_EVENTS, ...LINEAR_SESSION_PROGRESS_MILESTONES,
+]);
 
 /**
  * Unwrap ``agent_milestone`` events to their milestone name for
@@ -1197,6 +1207,76 @@ function formatDuration(seconds: number): string {
   return s === 0 ? `${m}m` : `${m}m ${s}s`;
 }
 
+/** The Linear issue comment for an approval event: a request waiting for a decision, the decision, a timeout or a stranded wait. */
+async function dispatchLinearApprovalNotice(
+  event: FanOutEvent,
+  task: TaskRecord,
+  effectiveType: string,
+  approvalsTable: string | undefined,
+  workspaceId: string,
+  issueId: string,
+  registryTableName: string,
+): Promise<void> {
+  if (!approvalsTable) {
+    logger.warn('[fanout/linear] approval notice skipped: TASK_APPROVALS_TABLE_NAME unset', {
+      event: 'fanout.linear.approval_unconfigured', task_id: event.task_id,
+    });
+    return;
+  }
+  // The notice compares the task's live gate with the saved row, so read the
+  // task consistently: a stale read would silently drop a real request.
+  const liveTask = (await ddb.send(new GetCommand({
+    TableName: process.env.TASK_TABLE_NAME, Key: { task_id: task.task_id }, ConsistentRead: true,
+  }))).Item as TaskRecord | undefined;
+  if (!liveTask) return;
+  const notification = await loadApprovalNotification(ddb, liveTask, effectiveType, event.metadata ?? {}, 'linear');
+  if (!notification) return;
+  const thread: LinearApprovalThread = {
+    workspaceId, issueId, taskId: task.task_id, requestId: notification.requestId, userId: notification.userId,
+  };
+  const ctx = { linearWorkspaceId: workspaceId, registryTableName };
+  const body = approvalNotificationMarkdown(notification);
+  // Retention follows the saved closure even if Linear cannot take the notice.
+  if (effectiveType !== 'approval_requested') await closeLinearApprovalThread(ddb, approvalsTable, thread);
+  const result = effectiveType === 'approval_requested'
+    ? await postIdentifiedComment(ctx, { id: await saveLinearApprovalThread(ddb, approvalsTable, thread), issueId, body })
+    : await postIssueComment(ctx, issueId, body);
+  if (!result.ok) {
+    logger.warn('Linear approval notification failed', {
+      event: 'fanout.linear.approval_post_failed',
+      task_id: task.task_id,
+      request_id: notification.requestId,
+      retryable: result.retryable,
+    });
+    if (result.retryable) throw new Error('Retryable Linear approval notification failure');
+    return;
+  }
+  await markApprovalNotificationDelivered(ddb, notification);
+  logger.info('Linear approval notification delivered', {
+    event: 'fanout.linear.approval_dispatched', task_id: task.task_id, request_id: notification.requestId,
+  });
+}
+
+/** A task that ends while waiting for approval: start the retention of its Linear reply thread. */
+async function closeEndedApprovalThread(
+  event: FanOutEvent,
+  task: TaskRecord,
+  approvalsTable: string | undefined,
+  workspaceId: string,
+  issueId: string,
+): Promise<void> {
+  if (approvalsTable && task.awaiting_approval_request_id
+    && (TERMINAL_EVENT_TYPES as readonly string[]).includes(event.event_type)) {
+    await closeLinearApprovalThread(ddb, approvalsTable, {
+      workspaceId,
+      issueId,
+      taskId: task.task_id,
+      requestId: task.awaiting_approval_request_id,
+      userId: task.user_id,
+    });
+  }
+}
+
 /**
  * Linear dispatcher — posts a deterministic final-status comment when a
  * Linear-origin task reaches a terminal event. Mirrors Slack's structural
@@ -1294,6 +1374,14 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
   // Session progress only matters to session tasks. (The comment path below would
   // otherwise read any `agent_milestone` as the PR milestone.)
   if (progressOnly) return;
+
+  const approvalsTable = process.env.TASK_APPROVALS_TABLE_NAME;
+  const effectiveType = effectiveEventType(event);
+  if (isApprovalNotification(effectiveType)) {
+    await dispatchLinearApprovalNotice(event, task, effectiveType, approvalsTable, workspaceId, issueId, registryTableName);
+    return;
+  }
+  await closeEndedApprovalThread(event, task, approvalsTable, workspaceId, issueId);
 
   // Iteration-UX: this task is a comment-iteration when it carries a maturing
   // reply id (set at trigger time). For those, the progress + terminal status
@@ -1540,6 +1628,10 @@ async function dispatchToLinearAgentSession(
   ctx: LinearFeedbackContext,
 ): Promise<void> {
   const effective = effectiveEventType(event);
+  if (isApprovalNotification(effective)) {
+    await dispatchSessionApproval(event, task, agentSessionId, ctx);
+    return;
+  }
   await advanceSessionChecklist(event, task, agentSessionId, ctx);
   if (LINEAR_SESSION_PROGRESS_EVENTS.has(effective)) {
     const progress = sessionProgressActivity(effective, event.metadata);
@@ -1630,6 +1722,61 @@ async function dispatchToLinearAgentSession(
       `[fanout/linear-session] transient Linear activity failure for task ${task.task_id} — escalating for batch retry`,
     );
   }
+}
+
+/**
+ * An approval notice in the task's session (#1066): a pending request is a choice with
+ * Approve / Deny buttons, anything after it a note. Same loader as the comment channel,
+ * so a delayed "please approve" for a request that is no longer open is never shown.
+ * Retried through the batch like the comment channel's notice; the activity id is
+ * derived from the notice, so a retry is the same activity.
+ */
+async function dispatchSessionApproval(
+  event: FanOutEvent,
+  task: TaskRecord,
+  agentSessionId: string,
+  ctx: LinearFeedbackContext,
+): Promise<void> {
+  const effective = effectiveEventType(event);
+  const logCtx = { task_id: task.task_id, linear_agent_session_id: agentSessionId, event_type: effective };
+  const approvalsTable = process.env.TASK_APPROVALS_TABLE_NAME;
+  if (!approvalsTable) {
+    logger.warn('[fanout/linear-session] approval notice skipped: TASK_APPROVALS_TABLE_NAME unset', logCtx);
+    return;
+  }
+  // After the final response a new activity would reopen the session.
+  if (task.linear_final_comment_event_id) return;
+  // A decision made in the session already has its reply there.
+  if (effective === 'approval_decision_recorded'
+    && String(event.metadata?.decision_source ?? '').startsWith('["linear_session"')) return;
+  const liveTask = (await ddb.send(new GetCommand({
+    TableName: process.env.TASK_TABLE_NAME, Key: { task_id: task.task_id }, ConsistentRead: true,
+  }))).Item as TaskRecord | undefined;
+  if (!liveTask) return;
+  const notification = await loadApprovalNotification(ddb, liveTask, effective, event.metadata ?? {}, 'linear_session');
+  if (!notification) return;
+  const token = await resolveToken(ctx);
+  if (!token) {
+    // The resolver also returns null when the secret cannot be read once. A request
+    // that is never shown is denied when it times out, so it is retried; a note is not.
+    logger.warn('[fanout/linear-session] approval notice: no workspace token', { ...logCtx, request_id: notification.requestId });
+    if (effective === 'approval_requested') {
+      throw new Error(`[fanout/linear-session] no Linear token for the approval request ${notification.requestId} of task ${task.task_id}`);
+    }
+    return;
+  }
+  const activity = sessionApprovalActivity(effective, notification);
+  const result = await emitAgentActivity(token, agentSessionId, activity.content, {
+    id: sessionApprovalNoticeId(effective, notification.requestId),
+    ...(activity.signal && { signal: activity.signal, signalMetadata: activity.signalMetadata }),
+  });
+  if (!result.ok) {
+    logger.warn('[fanout/linear-session] approval notice failed', { ...logCtx, retryable: result.retryable });
+    if (result.retryable) throw new Error(`[fanout/linear-session] transient approval notice failure for task ${task.task_id}`);
+    return;
+  }
+  await markApprovalNotificationDelivered(ddb, notification);
+  logger.info('[fanout/linear-session] approval notice dispatched', { ...logCtx, request_id: notification.requestId });
 }
 
 /**

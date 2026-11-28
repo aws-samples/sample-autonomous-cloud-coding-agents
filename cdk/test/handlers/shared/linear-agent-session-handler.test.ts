@@ -41,19 +41,28 @@ jest.mock('../../../src/handlers/shared/linear-oauth-resolver', () => ({
 
 const emitAgentActivityMock = jest.fn();
 const fetchAgentSessionIssueMock = jest.fn();
+const fetchSessionPromptActivityMock = jest.fn();
+const fetchSessionActivityShownMock = jest.fn();
 jest.mock('../../../src/handlers/shared/linear-agent-session', () => {
   const actual = jest.requireActual('../../../src/handlers/shared/linear-agent-session');
   return {
     ...actual,
     emitAgentActivity: (...args: unknown[]) => emitAgentActivityMock(...args),
     fetchAgentSessionIssue: (...args: unknown[]) => fetchAgentSessionIssueMock(...args),
+    fetchSessionPromptActivity: (...args: unknown[]) => fetchSessionPromptActivityMock(...args),
+    fetchSessionActivityShown: (...args: unknown[]) => fetchSessionActivityShownMock(...args),
   };
 });
 
 const lookupTaskByLinearIssueMock = jest.fn();
+const lookupRunningTaskInSessionMock = jest.fn();
 jest.mock('../../../src/handlers/shared/linear-task-by-issue', () => {
   const actual = jest.requireActual('../../../src/handlers/shared/linear-task-by-issue');
-  return { ...actual, lookupTaskByLinearIssue: (...args: unknown[]) => lookupTaskByLinearIssueMock(...args) };
+  return {
+    ...actual,
+    lookupTaskByLinearIssue: (...args: unknown[]) => lookupTaskByLinearIssueMock(...args),
+    lookupRunningTaskInSession: (...args: unknown[]) => lookupRunningTaskInSessionMock(...args),
+  };
 });
 
 const fetchIssueParentIdMock = jest.fn();
@@ -93,6 +102,12 @@ process.env.TASK_EVENTS_TABLE_NAME = 'TaskEvents';
 process.env.NUDGES_TABLE_NAME = 'Nudges';
 process.env.NUDGE_RATE_LIMIT_PER_MINUTE = '4';
 process.env.LINEAR_WEBHOOK_DEDUP_TABLE_NAME = 'LinearDedup';
+process.env.TASK_APPROVALS_TABLE_NAME = 'Approvals';
+
+const recordApprovalMock = jest.fn();
+const recordDenialMock = jest.fn();
+jest.mock('../../../src/handlers/approve-task', () => ({ recordApprovalForUser: (...a: unknown[]) => recordApprovalMock(...a) }));
+jest.mock('../../../src/handlers/deny-task', () => ({ recordDenialForUser: (...a: unknown[]) => recordDenialMock(...a) }));
 
 import { SESSION_STOP_CANCELLED_VIA } from '../../../src/handlers/shared/linear-agent-session-event';
 import { handleAgentSessionEvent } from '../../../src/handlers/shared/linear-agent-session-handler';
@@ -158,6 +173,7 @@ function ddbWith(opts: { linked?: boolean; mapping?: Record<string, unknown> | n
       const key = (cmd.input as unknown as { Key: { task_id: string } }).Key.task_id;
       return { Item: taskRecords.get(key) };
     }
+    if (cmd.input.TableName === 'Approvals') return approvalRow ? { Item: approvalRow } : {};
     if (cmd.input.TableName === 'LinearDedup' && (cmd as unknown as { _type: string })._type === 'Get') {
       return sessionPointer ? { Item: { task_id: sessionPointer, ttl: Math.floor(Date.now() / 1000) + 600 } } : {};
     }
@@ -167,6 +183,8 @@ function ddbWith(opts: { linked?: boolean; mapping?: Record<string, unknown> | n
 
 /** Task id the (strongly consistent) session → task pointer names, if any. */
 let sessionPointer: string | null = null;
+/** The approval request row the handler reads for a whole-task approval. */
+let approvalRow: Record<string, unknown> | null = null;
 
 /** Commands sent to one table, by type. */
 function sent(table: string, type: string): Array<{ input: Record<string, any> }> {
@@ -212,6 +230,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   taskRecords.clear();
   sessionPointer = null;
+  approvalRow = null;
   resetSessionWorkspaceCacheForTests();
   stopTaskComputeMock.mockResolvedValue(undefined);
   screenWithGuardrailMock.mockResolvedValue({ action: 'NONE' });
@@ -219,6 +238,7 @@ beforeEach(() => {
   emitAgentActivityMock.mockResolvedValue({ ok: true });
   fetchAgentSessionIssueMock.mockResolvedValue({ ok: true, value: ISSUE });
   lookupTaskByLinearIssueMock.mockResolvedValue({ kind: 'none' });
+  lookupRunningTaskInSessionMock.mockResolvedValue(null);
   fetchIssueParentIdMock.mockResolvedValue({ ok: false, absent: true });
   loadOrchestrationMock.mockResolvedValue(null);
   createTaskCoreMock.mockResolvedValue({ statusCode: 201, body: '{}' });
@@ -795,5 +815,267 @@ describe('channel_metadata builders', () => {
     });
     expect(lines.some((l) => l.trim() === 'linear_workspace_slug: resolved.workspaceSlug,')).toBe(true);
     expect(offenders).toEqual([]);
+  });
+});
+
+describe('handleAgentSessionEvent — approval requests in the session (#1066)', () => {
+  const OPEN = '01M89PC2Y1YDH7SJEVVYR0VCAX';
+  const OPENED = '2026-11-26T10:00:00Z';
+  const WRITTEN = '2026-11-26T10:05:00.000Z';
+  const waiting = (user = 'platform-user-1') => {
+    approvalRow = { task_id: 't-1', request_id: OPEN, created_at: OPENED, matching_rule_ids: [] };
+    priorTask({
+      task_id: 't-1',
+      status: 'AWAITING_APPROVAL',
+      awaiting_approval_request_id: OPEN,
+      user_id: user,
+      linear_workspace_id: 'org-1',
+      session: 'session-1',
+    });
+  };
+  const lastEmit = () => emitAgentActivityMock.mock.calls.at(-1)!;
+
+  /** Send a prompt that Linear holds as written: the same session, author and body. */
+  const answer = async (body: string) => {
+    fetchSessionPromptActivityMock.mockResolvedValue({ sessionId: 'session-1', authorId: 'linear-user-1', body, createdAt: WRITTEN });
+    await handleAgentSessionEvent(prompted({ content: { body } }));
+  };
+
+  beforeEach(() => {
+    // Linear recorded the open request's choice at 10:01; answers are written at 10:05.
+    fetchSessionActivityShownMock.mockResolvedValue({ sessionId: 'session-1', createdAt: '2026-11-26T10:01:00.000Z' });
+    recordApprovalMock.mockResolvedValue({ statusCode: 202 });
+    recordDenialMock.mockResolvedValue({ statusCode: 202 });
+  });
+
+  test('the owner\'s Approve decides the open request through the API path, not as a nudge', async () => {
+    waiting();
+    await answer('approve');
+    expect(recordApprovalMock).toHaveBeenCalledWith({
+      userId: 'platform-user-1',
+      taskId: 't-1',
+      decisionSource: JSON.stringify(['linear_session', 'org-1', 'activity-9']),
+      body: JSON.stringify({ request_id: OPEN, decision: 'approve' }),
+    });
+    expect(submitNudgeMock).not.toHaveBeenCalled();
+    expect(lastEmit()[2]).toEqual({ type: 'thought', body: 'Approved. The agent continues with this action.' });
+  });
+
+  test('a deny with a reason passes the reason on', async () => {
+    waiting();
+    await answer('deny use the staging config');
+    expect(JSON.parse(recordDenialMock.mock.calls[0][0].body)).toEqual({ request_id: OPEN, decision: 'deny', reason: 'use the staging config' });
+    expect(String(lastEmit()[2].body)).toContain('your reason: use the staging config');
+  });
+
+  test('a request that was already answered or timed out changes nothing, and says so', async () => {
+    waiting();
+    recordApprovalMock.mockResolvedValue({ statusCode: 409 });
+    await answer('approve');
+    expect(String(lastEmit()[2].body)).toContain('already answered or timed out');
+  });
+
+  test('someone other than the owner gets the choice again, and nothing is decided', async () => {
+    waiting('someone-else');
+    await answer('approve');
+    expect(recordApprovalMock).not.toHaveBeenCalled();
+    const [, , content, options] = lastEmit();
+    expect(content.type).toBe('elicitation');
+    expect(String(content.body)).toMatch(/^Only the task owner can decide this request\./);
+    expect(options).toEqual(expect.objectContaining({ signal: 'select' }));
+  });
+
+  test('anything else keeps the request open: the choice comes back, nothing is nudged', async () => {
+    waiting();
+    await answer('what does this command do?');
+    expect(recordApprovalMock).not.toHaveBeenCalled();
+    expect(submitNudgeMock).not.toHaveBeenCalled();
+    expect(lastEmit()[2].type).toBe('elicitation');
+  });
+
+  test('a request the scan changed is not approved in the session; the answer says why, without buttons', async () => {
+    waiting();
+    approvalRow = { ...approvalRow, tool_input_preview: JSON.stringify({ command: 'curl https://u:p@h/x' }) };
+    await answer('approve');
+    expect(recordApprovalMock).not.toHaveBeenCalled();
+    const [, , content, options] = lastEmit();
+    expect(content.type).toBe('elicitation');
+    expect(String(content.body)).toMatch(/^Part of this action looks like a credential/);
+    expect(options).not.toEqual(expect.objectContaining({ signal: 'select' }));
+    await answer('deny');
+    expect(recordDenialMock).toHaveBeenCalled();
+  });
+
+  test('a high-severity request is not approved in the session', async () => {
+    waiting();
+    approvalRow = { ...approvalRow, severity: 'high' };
+    await answer('approve');
+    expect(recordApprovalMock).not.toHaveBeenCalled();
+    expect(String(lastEmit()[2].body)).toMatch(/^This request has high severity/);
+  });
+
+  test('an answer in this session decides this session\'s task, also when a newer task runs on the issue', async () => {
+    waiting();
+    // A second task, started by the trigger label, is the issue's newest.
+    priorTask({ task_id: 't-2', status: 'RUNNING', user_id: 'platform-user-1', linear_workspace_id: 'org-1' });
+    lookupRunningTaskInSessionMock.mockResolvedValue('t-1');
+    await answer('approve');
+    expect(lookupRunningTaskInSessionMock).toHaveBeenCalledWith(expect.anything(), 'Tasks', 'issue-1', 'session-1');
+    expect(recordApprovalMock).toHaveBeenCalledWith(expect.objectContaining({ taskId: 't-1' }));
+  });
+
+  test('a stop in this session stops this session\'s task, not a newer one on the issue', async () => {
+    waiting();
+    priorTask({ task_id: 't-2', status: 'RUNNING', user_id: 'platform-user-1', linear_workspace_id: 'org-1' });
+    lookupRunningTaskInSessionMock.mockResolvedValue('t-1');
+    cancelTaskMock.mockResolvedValue('cancelled');
+    await handleAgentSessionEvent(prompted({ signal: 'stop', content: { body: 'Stop' } }));
+    expect(cancelTaskMock).toHaveBeenCalledWith(expect.anything(), 't-1', 'platform-user-1', expect.any(String), expect.anything());
+  });
+
+  test.each([
+    ['another reason', 'deny use the staging config', 'deny use production'],
+    ['another decision', 'deny', 'approve'],
+    ['another request\'s button', `deny request ${OPEN}`, 'deny request 01M89PAAAAAAAAAAAAAAAAAAAA'],
+    ['the same button without its request', `deny request ${OPEN}`, 'deny'],
+  ])('an answer whose copy in Linear has %s decides nothing', async (_what, webhookBody, linearBody) => {
+    waiting();
+    fetchSessionPromptActivityMock.mockResolvedValue({ sessionId: 'session-1', authorId: 'linear-user-1', body: linearBody, createdAt: WRITTEN });
+    await handleAgentSessionEvent(prompted({ content: { body: webhookBody } }));
+    expect(recordApprovalMock).not.toHaveBeenCalled();
+    expect(recordDenialMock).not.toHaveBeenCalled();
+    expect(String(lastEmit()[2].body)).toMatch(/^I couldn't confirm this answer with Linear/);
+  });
+
+  test.each([
+    ['another session', { sessionId: 'session-2', authorId: 'linear-user-1' }],
+    ['another author', { sessionId: 'session-1', authorId: 'linear-user-2' }],
+  ])('an answer that Linear holds in %s decides nothing', async (_what, held) => {
+    waiting();
+    fetchSessionPromptActivityMock.mockResolvedValue({ ...held, body: 'approve', createdAt: WRITTEN });
+    await handleAgentSessionEvent(prompted({ content: { body: 'approve' } }));
+    expect(recordApprovalMock).not.toHaveBeenCalled();
+  });
+
+  test('a typed "approve for this task" is not an answer: nothing is decided and the choice comes back', async () => {
+    waiting();
+    approvalRow = { ...approvalRow, matching_rule_ids: ['write_env_files'] };
+    await answer('approve for this task');
+    expect(recordApprovalMock).not.toHaveBeenCalled();
+    expect(lastEmit()[2].type).toBe('elicitation');
+  });
+
+  test('a late Approve after the task finished starts nothing', async () => {
+    priorTask({ task_id: 't-1', status: 'COMPLETED', repo: 'acme/web', linear_workspace_id: 'org-1', session: 'session-1' });
+    await answer('approve');
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+    expect(lastEmit()[2]).toEqual(expect.objectContaining({ type: 'response', body: expect.stringContaining('Nothing is waiting for your approval') }));
+  });
+
+  test('a new session whose request starts with "Deny" starts the task', async () => {
+    await handleAgentSessionEvent(created({
+      agentSession: { id: 'session-1', issueId: 'issue-1', creatorId: 'linear-user-1', comment: { body: 'Deny anonymous access to /admin' } },
+    }));
+    expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('a follow-up that starts with "deny" while the task runs without a request is passed to the agent', async () => {
+    priorTask({ task_id: 't-1', status: 'RUNNING', user_id: 'platform-user-1', linear_workspace_id: 'org-1', session: 'session-1' });
+    await answer('deny-list the tracker domains too');
+    expect(submitNudgeMock).toHaveBeenCalledWith(expect.objectContaining({ message: 'deny-list the tracker domains too' }));
+  });
+
+  test('a "deny <reason>" after the task\'s request closed is not passed to the running agent', async () => {
+    priorTask({ task_id: 't-1', status: 'RUNNING', user_id: 'platform-user-1', linear_workspace_id: 'org-1', session: 'session-1', approval_gate_count: 1 });
+    await answer('deny use the staging config');
+    expect(submitNudgeMock).not.toHaveBeenCalled();
+    expect(lastEmit()[2]).toEqual(expect.objectContaining({ type: 'thought', body: expect.stringContaining('That approval request is already closed') }));
+  });
+
+  test('a "deny <reason>" after the finished task\'s request closed starts nothing', async () => {
+    priorTask({ task_id: 't-1', status: 'COMPLETED', repo: 'acme/web', linear_workspace_id: 'org-1', session: 'session-1', approval_gate_count: 2 });
+    await answer('deny use the staging config');
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+    expect(lastEmit()[2]).toEqual(expect.objectContaining({ type: 'response', body: expect.stringContaining('That approval request is already closed') }));
+  });
+
+  test.each(['approve', 'deny'])('a one-word "%s" to a run that ended with a question resumes it with that answer', async (word) => {
+    priorTask({
+      task_id: 't-1',
+      status: 'COMPLETED',
+      repo: 'acme/web',
+      linear_workspace_id: 'org-1',
+      session: 'session-1',
+      code_changed: false,
+      answer_text: 'Should I drop the legacy table?',
+      task_description: 'Clean up the schema',
+      workflow_ref: 'coding/new-task-v1',
+    });
+    await answer(word);
+    expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+    expect(createTaskCoreMock.mock.calls[0][0].task_description).toContain(`The reviewer answered: ${word}`);
+  });
+
+  test('an Approve while the task runs without a request is not passed to the agent', async () => {
+    priorTask({ task_id: 't-1', status: 'RUNNING', user_id: 'platform-user-1', linear_workspace_id: 'org-1', session: 'session-1' });
+    await answer('deny');
+    expect(submitNudgeMock).not.toHaveBeenCalled();
+    expect(lastEmit()[2]).toEqual(expect.objectContaining({ type: 'thought', body: expect.stringContaining('Nothing is waiting') }));
+  });
+
+  test('a button from an earlier request decides nothing; the current request\'s button does', async () => {
+    waiting();
+    await answer('approve request 01M89PAAAAAAAAAAAAAAAAAAAA');
+    expect(recordApprovalMock).not.toHaveBeenCalled();
+    expect(String(lastEmit()[2].body)).toMatch(/^That answer was for an earlier request/);
+    expect(lastEmit()[3]).toEqual(expect.objectContaining({ signal: 'select' }));
+
+    await answer(`deny request ${OPEN}`);
+    expect(JSON.parse(recordDenialMock.mock.calls[0][0].body)).toEqual({ request_id: OPEN, decision: 'deny' });
+  });
+
+  test('a reply Linear does not hold as written decides nothing (a forged webhook)', async () => {
+    waiting();
+    for (const held of [
+      null,
+      { sessionId: 'session-1', authorId: 'someone-else', body: 'approve' },
+      { sessionId: 'other-session', authorId: 'linear-user-1', body: 'approve' },
+      { sessionId: 'session-1', authorId: 'linear-user-1', body: 'deny' },
+    ]) {
+      recordApprovalMock.mockClear();
+      fetchSessionPromptActivityMock.mockResolvedValue(held);
+      await handleAgentSessionEvent(prompted({ content: { body: 'approve' } }));
+      expect(recordApprovalMock).not.toHaveBeenCalled();
+      expect(String(lastEmit()[2].body)).toMatch(/^I couldn't confirm this answer with Linear/);
+    }
+    expect(fetchSessionPromptActivityMock).toHaveBeenCalledWith('lin_tok', 'org-1', 'activity-9');
+  });
+
+  test('when Linear cannot be asked, the delivery fails so it is retried, and nothing is decided', async () => {
+    waiting();
+    fetchSessionPromptActivityMock.mockRejectedValue(new Error('Linear session prompt verification unavailable'));
+    await expect(handleAgentSessionEvent(prompted({ content: { body: 'approve' } }))).rejects.toThrow('verification unavailable');
+    expect(recordApprovalMock).not.toHaveBeenCalled();
+  });
+
+  test('an answer Linear recorded before the open request\'s choice decides nothing (a delayed retry)', async () => {
+    waiting();
+    fetchSessionPromptActivityMock.mockResolvedValue({
+      sessionId: 'session-1', authorId: 'linear-user-1', body: 'approve', createdAt: '2026-11-26T10:00:59.999Z',
+    });
+    await handleAgentSessionEvent(prompted({ content: { body: 'approve' } }));
+    expect(recordApprovalMock).not.toHaveBeenCalled();
+    expect(String(lastEmit()[2].body)).toMatch(/^That answer was written before this request was shown here/);
+    expect(fetchSessionActivityShownMock).toHaveBeenCalledWith('lin_tok', 'org-1', expect.stringMatching(/^[0-9a-f-]{36}$/));
+  });
+
+  test.each([
+    ['not posted yet', null],
+    ['posted in another session', { sessionId: 'other-session', createdAt: '2026-11-26T10:01:00.000Z' }],
+  ])('a choice %s cannot be answered here', async (_label, shown) => {
+    waiting();
+    fetchSessionActivityShownMock.mockResolvedValue(shown);
+    await answer('approve');
+    expect(recordApprovalMock).not.toHaveBeenCalled();
   });
 });

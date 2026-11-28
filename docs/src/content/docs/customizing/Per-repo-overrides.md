@@ -24,7 +24,7 @@ When you specify `--max-turns` (CLI) or `max_turns` (API) on a task, your value 
 
 ### Removing a per-repo override
 
-Deleting an override from the Blueprint and redeploying does not remove it. A redeploy writes the settings the Blueprint declares and leaves the rest of the repository's record in `RepoTable` as it is, so the repository keeps the last value: a deleted `agent.maxBudgetUsd` is still the default budget of its tasks, and a deleted `agent.modelId` still selects the old model. An empty string or an empty list does not clear a setting either. Only the registry asset lists (`assets.mcpServers`, `assets.cedarPolicyModules`, `assets.skills`) are removed from the record when the Blueprint stops declaring them.
+Deleting an override from the Blueprint and redeploying does not remove it. A redeploy writes the settings the Blueprint declares and leaves the rest of the repository's record in `RepoTable` as it is, so the repository keeps the last value: a deleted `agent.maxBudgetUsd` is still the default budget of its tasks, and a deleted `agent.modelId` still selects the old model. An empty string or an empty list does not clear a setting either. Only the registry asset lists (`assets.mcpServers`, `assets.cedarPolicyModules`, `assets.skills`) and the approval window (`security.approvalTimeoutSeconds`) are removed from the record when the Blueprint stops declaring them.
 
 `bgagent repo onboard` has no option that removes a setting. When you run it again for an onboarded repository, it keeps the stored value of every option you leave out, and a stored `max_budget_usd` or `memory_token_budget`.
 

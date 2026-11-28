@@ -52,7 +52,16 @@ jest.mock('../../src/handlers/shared/linear-agent-session', () => ({
   addAgentSessionExternalUrl: jest.fn().mockResolvedValue({ ok: true }),
 }));
 
+const mockLoadApproval = jest.fn();
+const mockMarkApproval = jest.fn().mockResolvedValue(undefined);
+jest.mock('../../src/handlers/shared/approval-notifications', () => ({
+  ...jest.requireActual('../../src/handlers/shared/approval-notifications'),
+  loadApprovalNotification: (...args: unknown[]) => mockLoadApproval(...args),
+  markApprovalNotificationDelivered: (...args: unknown[]) => mockMarkApproval(...args),
+}));
+
 process.env.LINEAR_AGENT_SESSIONS_ENABLED = 'true';
+process.env.TASK_APPROVALS_TABLE_NAME = 'Approvals';
 process.env.TASK_TABLE_NAME = 'Tasks';
 process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME = 'LinearWorkspaceRegistry';
 
@@ -102,6 +111,8 @@ beforeEach(() => {
   mockEmitAgentActivity.mockReset().mockResolvedValue({ ok: true });
   mockSetPlan.mockReset().mockResolvedValue({ ok: true });
   mockTransitionIssueState.mockClear();
+  mockLoadApproval.mockReset();
+  mockMarkApproval.mockClear();
   resetLinearHeartbeatMemoForTests();
   startLinearProgressBudget();
 });
@@ -398,4 +409,83 @@ test('progress stops once it has spent its share of the invocation', async () =>
   }
   expect(progressEmits()).toHaveLength(3);
   expect(mockEmitAgentActivity).toHaveBeenCalledWith('lin_tok', 'session-1', expect.objectContaining({ type: 'response' }));
+});
+
+// --- Approval requests in the session ---
+
+const PENDING_NOTICE = {
+  title: 'Approval needed',
+  text: 'Approval needed\nThe agent wants to run a shell command.',
+  taskId: 't-sess',
+  requestId: 'req-1',
+  userId: 'u-1',
+  marker: 'notified_linear_session_approval_requested',
+  deadline: '2026-11-20T00:30:00Z',
+};
+
+test('a pending request goes into the session as Approve / Deny buttons, once', async () => {
+  mockTask({ ...SESSION_TASK, status: 'AWAITING_APPROVAL', awaiting_approval_request_id: 'req-1' });
+  mockLoadApproval.mockResolvedValue(PENDING_NOTICE);
+  await routeEvent(ev('agent_milestone', { milestone: 'approval_requested', request_id: 'req-1' }), LINEAR_ONLY);
+  expect(mockLoadApproval).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ task_id: 't-sess' }),
+    'approval_requested', expect.objectContaining({ request_id: 'req-1' }), 'linear_session');
+  const [, session, content, options] = mockEmitAgentActivity.mock.calls[0];
+  expect(session).toBe('session-1');
+  expect(content.type).toBe('elicitation');
+  expect(content.body).toContain('**Waiting on you.**');
+  expect(options).toEqual(expect.objectContaining({ signal: 'select', id: expect.stringMatching(/^[0-9a-f-]{36}$/) }));
+  expect(mockMarkApproval).toHaveBeenCalledWith(expect.anything(), PENDING_NOTICE);
+  expect(mockPostIssueComment).not.toHaveBeenCalled();
+});
+
+test('a request that is no longer open is not shown', async () => {
+  mockTask(SESSION_TASK);
+  mockLoadApproval.mockResolvedValue(null);
+  await routeEvent(ev('agent_milestone', { milestone: 'approval_requested', request_id: 'req-1' }), LINEAR_ONLY);
+  expect(mockEmitAgentActivity).not.toHaveBeenCalled();
+});
+
+test('a decision made in the session is not echoed; one made elsewhere is a note', async () => {
+  mockTask(SESSION_TASK);
+  mockLoadApproval.mockResolvedValue({ ...PENDING_NOTICE, title: 'Approval recorded', marker: 'notified_linear_session_approval_decision_recorded' });
+  await routeEvent(ev('agent_milestone', {
+    milestone: 'approval_decision_recorded', request_id: 'req-1', decision_source: '["linear_session","org-1","p-1"]',
+  }), LINEAR_ONLY);
+  expect(mockLoadApproval).not.toHaveBeenCalled();
+  await routeEvent(ev('agent_milestone', { milestone: 'approval_decision_recorded', request_id: 'req-1' }, 'e-cli'), LINEAR_ONLY);
+  expect(mockEmitAgentActivity).toHaveBeenCalledWith('lin_tok', 'session-1', expect.objectContaining({ type: 'thought' }), expect.anything());
+});
+
+test('a transient failure retries the batch, and nothing is marked delivered', async () => {
+  mockTask({ ...SESSION_TASK, status: 'AWAITING_APPROVAL', awaiting_approval_request_id: 'req-1' });
+  mockLoadApproval.mockResolvedValue(PENDING_NOTICE);
+  mockEmitAgentActivity.mockResolvedValueOnce({ ok: false, retryable: true });
+  const outcome = await routeEvent(ev('agent_milestone', { milestone: 'approval_requested', request_id: 'req-1' }), LINEAR_ONLY);
+  expect(outcome.infraRejections).toEqual(['linear']);
+  expect(mockMarkApproval).not.toHaveBeenCalled();
+});
+
+test('a pending request whose workspace token cannot be resolved is retried, not dropped', async () => {
+  mockTask({ ...SESSION_TASK, status: 'AWAITING_APPROVAL', awaiting_approval_request_id: 'req-1' });
+  mockLoadApproval.mockResolvedValue(PENDING_NOTICE);
+  mockResolveToken.mockResolvedValue(null);
+  const outcome = await routeEvent(ev('agent_milestone', { milestone: 'approval_requested', request_id: 'req-1' }), LINEAR_ONLY);
+  expect(outcome.infraRejections).toEqual(['linear']);
+  expect(mockEmitAgentActivity).not.toHaveBeenCalled();
+  expect(mockMarkApproval).not.toHaveBeenCalled();
+});
+
+test('a note after the request whose token cannot be resolved is skipped without a retry', async () => {
+  mockTask(SESSION_TASK);
+  mockLoadApproval.mockResolvedValue({ ...PENDING_NOTICE, title: 'Approval request timed out', marker: 'notified_linear_session_approval_timed_out' });
+  mockResolveToken.mockResolvedValue(null);
+  const outcome = await routeEvent(ev('agent_milestone', { milestone: 'approval_timed_out', request_id: 'req-1' }), LINEAR_ONLY);
+  expect(outcome.infraRejections).toEqual([]);
+});
+
+test('after the final response nothing reopens the session', async () => {
+  mockTask({ ...SESSION_TASK, linear_final_comment_event_id: 'e-done' });
+  mockLoadApproval.mockResolvedValue(PENDING_NOTICE);
+  await routeEvent(ev('agent_milestone', { milestone: 'approval_timed_out', request_id: 'req-1' }), LINEAR_ONLY);
+  expect(mockEmitAgentActivity).not.toHaveBeenCalled();
 });

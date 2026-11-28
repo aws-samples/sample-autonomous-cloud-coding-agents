@@ -548,3 +548,98 @@ describe('LinearIntegration construct — agent sessions (ADR-018 Phase 2)', () 
     expect(nudgeStatements(t)).toEqual([]);
   });
 });
+
+describe('LinearIntegration construct — approval replies (#1001)', () => {
+  function buildWith(opts: { withApprovals: boolean; microvmImageArn?: string }): { t: Template; approvalsId?: string } {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+    const api = new apigw.RestApi(stack, 'TestApi');
+    const userPool = new cognito.UserPool(stack, 'TestUserPool');
+    const taskTable = new dynamodb.Table(stack, 'TaskTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+    });
+    const taskEventsTable = new dynamodb.Table(stack, 'TaskEventsTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'event_id', type: dynamodb.AttributeType.STRING },
+    });
+    const taskApprovalsTable = opts.withApprovals
+      ? new dynamodb.Table(stack, 'ApprovalsTable', {
+        partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+        sortKey: { name: 'request_id', type: dynamodb.AttributeType.STRING },
+      })
+      : undefined;
+    new LinearIntegration(stack, 'LinearIntegration', {
+      api,
+      userPool,
+      taskTable,
+      taskEventsTable,
+      ...(taskApprovalsTable && { taskApprovalsTable }),
+      ...(opts.microvmImageArn && { lambdaMicrovmImageArn: opts.microvmImageArn }),
+    });
+    return {
+      t: Template.fromStack(stack),
+      approvalsId: taskApprovalsTable && stack.getLogicalId(taskApprovalsTable.node.defaultChild as dynamodb.CfnTable),
+    };
+  }
+
+  test('wires TASK_APPROVALS_TABLE_NAME on the processor and grants it the approvals table', () => {
+    const { t, approvalsId } = buildWith({ withApprovals: true });
+    t.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          TASK_APPROVALS_TABLE_NAME: { Ref: approvalsId },
+          LINEAR_WORKSPACE_REGISTRY_TABLE_NAME: Match.anyValue(),
+        }),
+      },
+    });
+    const grants = Object.values(t.findResources('AWS::IAM::Policy')).filter((p) => {
+      const stmts = (p as { Properties: { PolicyDocument: { Statement: Array<{ Action: unknown; Resource: unknown }> } } })
+        .Properties.PolicyDocument.Statement;
+      return stmts.some((s) => {
+        const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+        return actions.includes('dynamodb:UpdateItem') && actions.includes('dynamodb:GetItem')
+          && JSON.stringify(s.Resource).includes(approvalsId!);
+      });
+    });
+    expect(grants).toHaveLength(1);
+  });
+
+  /** Every action the processor's policies grant on a resource whose reference names ``id``. */
+  function actionsOn(t: Template, id: string): string[] {
+    return Object.values(t.findResources('AWS::IAM::Policy')).flatMap((p) =>
+      (p as { Properties: { PolicyDocument: { Statement: Array<{ Action: string | string[]; Resource: unknown }> } } })
+        .Properties.PolicyDocument.Statement
+        .filter((st) => JSON.stringify(st.Resource).includes(id))
+        .flatMap((st) => (Array.isArray(st.Action) ? st.Action : [st.Action])));
+  }
+
+  test('the processor gets only GetItem and UpdateItem on the approvals table, as the fan-out does', () => {
+    const { t, approvalsId } = buildWith({ withApprovals: true });
+    expect(new Set(actionsOn(t, approvalsId!))).toEqual(new Set(['dynamodb:GetItem', 'dynamodb:UpdateItem']));
+  });
+
+  test('a decision recorded from Linear can wake a suspended MicroVM: GetMicrovm and ResumeMicrovm on the image', () => {
+    const image = 'arn:aws:lambda:us-east-1:123456789012:microvm-image:abca-agent';
+    const { t } = buildWith({ withApprovals: true, microvmImageArn: image });
+    t.hasResourceProperties('AWS::IAM::Policy', {
+      PolicyDocument: {
+        Statement: Match.arrayWith([Match.objectLike({
+          Action: ['lambda:GetMicrovm', 'lambda:ResumeMicrovm'],
+          Resource: [image, `${image}:*`],
+        })]),
+      },
+    });
+    const withoutImage = buildWith({ withApprovals: true }).t;
+    expect(JSON.stringify(withoutImage.toJSON())).not.toContain('lambda:ResumeMicrovm');
+  });
+
+  test('does NOT set TASK_APPROVALS_TABLE_NAME when the table is omitted (back-compat)', () => {
+    const { t } = buildWith({ withApprovals: false });
+    const fns = t.findResources('AWS::Lambda::Function', {
+      Properties: {
+        Environment: { Variables: Match.objectLike({ TASK_APPROVALS_TABLE_NAME: Match.anyValue() }) },
+      },
+    });
+    expect(Object.keys(fns)).toHaveLength(0);
+  });
+});

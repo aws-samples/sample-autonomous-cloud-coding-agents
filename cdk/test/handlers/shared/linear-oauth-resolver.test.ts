@@ -1576,3 +1576,25 @@ describe('resolveSoleActiveLinearWorkspace — bind only when the answer is unam
     await expect(resolveSoleActiveLinearWorkspace(scanning([]), undefined)).resolves.toBeUndefined();
   });
 });
+
+describe('a workspace set up through the vault on a deployment whose vault is off', () => {
+  test('says so in the error, with what to do', async () => {
+    const savedEnabled = process.env.LINEAR_VAULT_ENABLED;
+    delete process.env.LINEAR_VAULT_ENABLED;
+    const errorSpy = jest.spyOn(logger, 'error').mockImplementation(() => {});
+    try {
+      const clients = makeFakeClients({
+        registryItem: { workspace_slug: 'acme', oauth_secret_arn: 'arn:secret:vault-off', status: 'active', provider_name: 'bgagent-linear-oauth-acme' },
+        storedToken: null,
+      });
+      await expect(resolveLinearOauthToken('ws-uuid-vault-off', REGISTRY_TABLE, clients)).resolves.toBeNull();
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining('set up through the Linear identity vault, which this deployment has turned off'),
+        expect.objectContaining({ linear_workspace_id: 'ws-uuid-vault-off', error_id: 'LINEAR_VAULT_OFF_FOR_VAULT_WORKSPACE' }),
+      );
+    } finally {
+      errorSpy.mockRestore();
+      if (savedEnabled !== undefined) process.env.LINEAR_VAULT_ENABLED = savedEnabled;
+    }
+  });
+});

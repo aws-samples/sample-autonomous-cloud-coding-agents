@@ -617,6 +617,18 @@ export async function resolveLinearOauthToken(
       return null; // nosemgrep: ts-silent-success-masking -- null IS this resolver's whole failure encoding ("Returns null on any failure … so callers can gracefully no-op", see the contract on the function); it can never be confused with an empty success because no success path returns null, and the cause is logged with full context immediately above
     }
     if (!fetched) {
+      if (row.provider_name && !isVaultEnabled()) {
+        // Setup with the vault on stores a workspace in the vault only. A later deploy
+        // with the vault off (AgentCore or MicroVM backends changed, an explicit
+        // enableLinearIdentityVault=false, a rollback) leaves it with no token at all.
+        logger.error('This Linear workspace was set up through the Linear identity vault, which this deployment has '
+          + 'turned off, and it has no Secrets Manager token. Redeploy with -c enableLinearIdentityVault=true; to move '
+          + 'the workspace to Secrets Manager instead, delete its registry row and run bgagent linear setup again.', {
+          error_id: 'LINEAR_VAULT_OFF_FOR_VAULT_WORKSPACE',
+          linear_workspace_id: linearWorkspaceId,
+          provider_name: row.provider_name,
+        });
+      }
       logger.error('Linear OAuth secret missing or unreadable', {
         oauth_secret_arn: row.oauth_secret_arn,
         linear_workspace_id: linearWorkspaceId,

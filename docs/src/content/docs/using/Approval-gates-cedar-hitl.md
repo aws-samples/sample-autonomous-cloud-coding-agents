@@ -15,7 +15,7 @@ When a rule marked `@tier("soft")` matches a tool call:
 1. The agent stops before invoking the tool.
 2. A row is atomically written to the approvals table and the task status flips to `AWAITING_APPROVAL`.
 3. A progress event (`approval_requested`) is emitted so `bgagent watch` shows the gate in real time.
-4. The task waits for your decision up to the rule's timeout (default 300 s, configurable per-rule and per-task).
+4. The task waits for your decision up to the approval window (default 30 minutes; configurable per repo with the blueprint's `security.approvalTimeoutSeconds`, per task, and per rule, up to 1 hour).
 5. On approval, the agent proceeds; on denial, the deny reason is best-effort injected back into the agent's context so it can adapt; on timeout, the gate is treated as a denial with `timed_out` as the reason.
 
 A decision is recorded at most once per request. Replaying approve/deny on the same `(task_id, request_id)` is idempotent.

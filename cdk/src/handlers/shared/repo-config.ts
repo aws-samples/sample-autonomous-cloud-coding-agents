@@ -68,6 +68,13 @@ export interface RepoConfig {
    */
   readonly approval_gate_cap?: number;
   /**
+   * Cedar HITL: per-blueprint default approval window in seconds, written by the
+   * Blueprint construct from ``security.approvalTimeoutSeconds``. Resolved at
+   * submit time onto the TaskRecord's ``approval_timeout_s`` (a request's own
+   * value wins). Absent: the platform default from ``contracts/constants.json``.
+   */
+  readonly approval_timeout_s?: number;
+  /**
    * Registry (#246) ``registry://`` refs for MCP servers pinned by the
    * blueprint. Resolved by the orchestrator at task start and merged into the
    * agent's ``.mcp.json``.

@@ -539,7 +539,8 @@ describe('reconcile-admission-queue — queue heartbeat (#1066)', () => {
     expect(puts[0].task_id).toEqual({ S: 'LONG' });
     expect(puts[0].event_type).toEqual({ S: 'admission_queued' });
     expect(puts[0].metadata.M.reason).toEqual({ S: 'concurrency_limit' });
-    expect(Number(puts[0].metadata.M.waited_s.N)).toBeGreaterThanOrEqual(920);
+    // Past the 15-minute mark; the exact second depends on how long the test took to reach the handler.
+    expect(Number(puts[0].metadata.M.waited_s.N)).toBeGreaterThanOrEqual(900);
     expect(mockLambdaSend).not.toHaveBeenCalled();
   });
 

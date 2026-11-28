@@ -18,6 +18,7 @@
  */
 
 import { type DynamoDBDocumentClient, QueryCommand } from '@aws-sdk/lib-dynamodb';
+import { TERMINAL_STATUSES, type TaskStatusType } from '../../constructs/task-status';
 import { LINEAR_ISSUE_INDEX_NAME } from '../../constructs/task-table-indexes';
 import { logger } from './logger';
 
@@ -109,4 +110,30 @@ export async function lookupTaskByLinearIssue(
     });
     return { kind: 'error', message };
   }
+}
+
+/**
+ * The running task that reports into the agent session ``sessionId``, or null. The
+ * issue's newest task is not always it: a trigger label can start a second task on
+ * the same issue while this session's task waits for an approval. Reads the issue's
+ * rows of ``LinearIssueIndex`` (eventually consistent: a task created a moment ago
+ * may be missing, and the caller falls back to its newest-task lookup). Throws when
+ * the query fails.
+ */
+export async function lookupRunningTaskInSession(
+  ddb: DynamoDBDocumentClient,
+  taskTableName: string,
+  linearIssueId: string,
+  sessionId: string,
+): Promise<string | null> {
+  const res = await ddb.send(new QueryCommand({
+    TableName: taskTableName,
+    IndexName: LINEAR_ISSUE_INDEX_NAME,
+    KeyConditionExpression: 'linear_issue_id = :iid',
+    ExpressionAttributeValues: { ':iid': linearIssueId },
+    ScanIndexForward: false,
+  }));
+  const item = (res.Items ?? []).find((row) => row.channel_metadata?.linear_agent_session_id === sessionId
+    && !TERMINAL_STATUSES.includes(row.status as TaskStatusType));
+  return typeof item?.task_id === 'string' ? item.task_id : null;
 }

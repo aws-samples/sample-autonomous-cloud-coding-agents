@@ -1178,6 +1178,31 @@ describe('createTaskCore', () => {
     expect(record.approval_gate_cap).toBe(50);
   });
 
+  // --- approval window: request > blueprint > platform default (#1066) ---
+
+  test('the blueprint\'s approval window becomes the task\'s when the request sets none', async () => {
+    mockOnboardedWithConfig({ approval_timeout_s: 2700 });
+    const result = await createTaskCore({ repo: 'org/repo', task_description: 'x' }, makeContext(), 'req-ats-repo');
+    expect(result.statusCode).toBe(201);
+    expect(getPersistedTaskRecord().approval_timeout_s).toBe(2700);
+  });
+
+  test('a request\'s own approval window wins over the blueprint\'s', async () => {
+    mockOnboardedWithConfig({ approval_timeout_s: 2700 });
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'x', approval_timeout_s: 120 }, makeContext(), 'req-ats-body',
+    );
+    expect(result.statusCode).toBe(201);
+    expect(getPersistedTaskRecord().approval_timeout_s).toBe(120);
+  });
+
+  test.each([5, 7200, 90.5, '1800'])('a blueprint window of %p is ignored, not a reason to refuse the task', async (bad) => {
+    mockOnboardedWithConfig({ approval_timeout_s: bad });
+    const result = await createTaskCore({ repo: 'org/repo', task_description: 'x' }, makeContext(), 'req-ats-bad');
+    expect(result.statusCode).toBe(201);
+    expect(getPersistedTaskRecord().approval_timeout_s).toBeUndefined();
+  });
+
   test('persists blueprint-configured approval_gate_cap when within bounds', async () => {
     mockOnboardedWithConfig({ approval_gate_cap: 150 });
     const result = await createTaskCore(

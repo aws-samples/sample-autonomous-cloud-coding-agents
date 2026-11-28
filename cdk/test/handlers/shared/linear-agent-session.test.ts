@@ -27,6 +27,8 @@ import {
   buildAgentSessionTaskDescription,
   emitAgentActivity,
   fetchAgentSessionIssue,
+  fetchSessionActivityShown,
+  fetchSessionPromptActivity,
 } from '../../../src/handlers/shared/linear-agent-session';
 import {
   isHandledAgentSessionAction,
@@ -285,5 +287,80 @@ describe('GraphQL helpers', () => {
     const failed = await fetchAgentSessionIssue('tok', 'i-1');
     expect(failed.ok).toBe(false);
     expect('error' in failed).toBe(true);
+  });
+
+  describe('fetchSessionPromptActivity (consent is read from Linear, not the webhook)', () => {
+    const reply = (activity: unknown, org = 'org-1') => jsonResponse({
+      data: { organization: { id: org }, viewer: { id: 'app-user' }, agentActivities: { nodes: activity ? [activity] : [] } },
+    });
+    const prompt = (author: unknown, typename = 'AgentActivityPromptContent') => ({
+      createdAt: '2026-11-26T10:05:00.000Z',
+      agentSession: { id: 's-1' },
+      content: { __typename: typename, body: 'approve' },
+      user: null,
+      promptAuthor: author,
+    });
+
+    test('a human\'s prompt comes back with its session, author and body', async () => {
+      fetchMock.mockResolvedValueOnce(reply(prompt({ id: 'u-1', app: false })));
+      await expect(fetchSessionPromptActivity('tok', 'org-1', 'a-1')).resolves.toEqual({
+        sessionId: 's-1', authorId: 'u-1', body: 'approve', createdAt: '2026-11-26T10:05:00.000Z',
+      });
+      expect(sentBody(0).variables).toEqual({ id: 'a-1' });
+    });
+
+    test.each([
+      ['an app', prompt({ id: 'u-2', app: true })],
+      ['this token\'s own identity', prompt({ id: 'app-user', app: false })],
+      ['not a prompt', prompt({ id: 'u-1', app: false }, 'AgentActivityThoughtContent')],
+      ['missing', null],
+    ])('an activity by %s is not consent', async (_label, activity) => {
+      fetchMock.mockResolvedValueOnce(reply(activity));
+      await expect(fetchSessionPromptActivity('tok', 'org-1', 'a-1')).resolves.toBeNull();
+    });
+
+    test('fetchSessionActivityShown reads when Linear recorded an activity, and in which session', async () => {
+      fetchMock.mockImplementationOnce(linearWith({ 'n-1': { createdAt: '2026-11-26T10:01:00.000Z', agentSession: { id: 's-1' } } }));
+      await expect(fetchSessionActivityShown('tok', 'org-1', 'n-1')).resolves.toEqual({ sessionId: 's-1', createdAt: '2026-11-26T10:01:00.000Z' });
+      fetchMock.mockResolvedValueOnce(jsonResponse({}, 500));
+      await expect(fetchSessionActivityShown('tok', 'org-1', 'n-1')).rejects.toThrow('unavailable');
+    });
+
+    // Linear's schema: agentActivity(id: String!): AgentActivity! (a missing activity is a
+    // GraphQL error, never null) and agentActivities(filter: AgentActivityFilter): a
+    // connection whose nodes are empty when nothing matches.
+    function linearWith(activities: Record<string, unknown>) {
+      return async (_url: string, init: { body: string }) => {
+        const { query, variables } = JSON.parse(init.body) as { query: string; variables: { id: string } };
+        const base = { organization: { id: 'org-1' }, viewer: { id: 'app-user' } };
+        const found = activities[variables.id];
+        if (/agentActivity\(id:/.test(query)) {
+          return found ? jsonResponse({ data: { ...base, agentActivity: found } })
+            : jsonResponse({ data: null, errors: [{ message: 'Entity not found: AgentActivity', path: ['agentActivity'], extensions: { type: 'invalid input', code: 'INPUT_ERROR' } }] });
+        }
+        if (/agentActivities\(filter: \{ id: \{ eq: \$id \} \}/.test(query)) {
+          return jsonResponse({ data: { ...base, agentActivities: { nodes: found ? [found] : [] } } });
+        }
+        return jsonResponse({ data: null, errors: [{ message: 'Cannot query this field' }] }, 400);
+      };
+    }
+
+    test('an activity that does not exist is null, in both reads, as Linear answers it', async () => {
+      fetchMock.mockImplementation(linearWith({}));
+      await expect(fetchSessionPromptActivity('tok', 'org-1', 'gone')).resolves.toBeNull();
+      await expect(fetchSessionActivityShown('tok', 'org-1', 'gone')).resolves.toBeNull();
+    });
+
+    test('a prompt is read through the same query that finds a missing one', async () => {
+      fetchMock.mockImplementation(linearWith({ 'a-1': prompt({ id: 'u-1', app: false }) }));
+      await expect(fetchSessionPromptActivity('tok', 'org-1', 'a-1')).resolves.toEqual(expect.objectContaining({ authorId: 'u-1' }));
+    });
+
+    test('another workspace, or Linear failing, throws so the delivery retries', async () => {
+      fetchMock.mockResolvedValueOnce(reply(prompt({ id: 'u-1', app: false }), 'org-2'));
+      await expect(fetchSessionPromptActivity('tok', 'org-1', 'a-1')).rejects.toThrow('workspace mismatch');
+      fetchMock.mockResolvedValueOnce(jsonResponse({}, 500));
+      await expect(fetchSessionPromptActivity('tok', 'org-1', 'a-1')).rejects.toThrow('unavailable');
+    });
   });
 });

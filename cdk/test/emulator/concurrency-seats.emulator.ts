@@ -146,12 +146,12 @@ describe('concurrency seats against the AWS Emulator', () => {
     expect(await seats(user)).toBe(1);
   });
 
-  // KNOWN FAILURES: executable witnesses for two seat defects on main, reproduced
+  // KNOWN FAILURE: an executable witness for a seat defect on main, reproduced
   // here with real conditional writes rather than mocked `send` calls. Kept as
   // `test.failing` so the suite stays green and flags the day the fix lands (open
-  // PR #1009 addresses both). Each was run once as a plain `test` to confirm it
-  // fails on its last assertion and not on setup; the passing tests above cover
-  // the same setup.
+  // PR #1009 addresses it). It was run once as a plain `test` to confirm it fails
+  // on its last assertion and not on setup; the passing tests above cover the
+  // same setup.
   test.failing('#1003: a replayed finalize step does not release a second seat', async () => {
     const user = newUser();
     const done = await running(user);
@@ -165,10 +165,9 @@ describe('concurrency seats against the AWS Emulator', () => {
     expect(await seats(user)).toBe(1);
   });
 
-  // No issue reports this one: reconcile-concurrency counts four hard-coded
-  // statuses, while the design and ACTIVE_STATUSES say a task awaiting approval
-  // holds its seat.
-  test.failing('the concurrency reconciler keeps the seat of a task awaiting approval', async () => {
+  // reconcile-concurrency counts ACTIVE_STATUSES, which holds AWAITING_APPROVAL:
+  // a task awaiting approval keeps its seat.
+  test('the concurrency reconciler keeps the seat of a task awaiting approval', async () => {
     const user = newUser();
     const paused = await running(user);
     // The Python agent is the only writer of this status; this writes the status

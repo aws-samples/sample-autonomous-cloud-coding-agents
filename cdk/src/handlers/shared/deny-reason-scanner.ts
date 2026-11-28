@@ -40,7 +40,11 @@
 interface SecretPattern {
   readonly name: string;
   readonly regex: RegExp;
+  /** What a match is replaced by, from its named groups; ``[REDACTED-<name>]`` when unset. */
+  readonly replace?: (groups: Record<string, string | undefined>) => string;
 }
+
+const CONNECTION_STRING_MARKER = '[REDACTED-CONNECTION_STRING]';
 
 // Where the password of a URL would stand: not a placeholder and nothing
 // else. The placeholders are {name} and ${NAME}, also with doubled braces,
@@ -101,6 +105,12 @@ const PATTERNS: readonly SecretPattern[] = [
     regex: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g,
   },
   {
+    name: 'LINEAR_TOKEN',
+    // Linear personal API keys (`lin_api_`), OAuth access and refresh tokens
+    // (`lin_oauth_`, `lin_refresh_`) and webhook signing secrets (`lin_wh_`).
+    regex: /\blin_(?:api|oauth|refresh|wh)_[A-Za-z0-9]{16,}/g,
+  },
+  {
     name: 'GENERIC_BEARER',
     regex: /\bBearer\s+[A-Za-z0-9._~+/=-]{20,}/gi,
   },
@@ -122,6 +132,10 @@ const PATTERNS: readonly SecretPattern[] = [
     // the rest of an IPv6 address, "]:"). It reads from the port to that
     // segment only while no further ":" comes, which keeps the scan linear
     // as well.
+    // Only the user and the password are replaced, and the query and the
+    // fragment, which can hold a secret as well (AWS_SESSION_TOKEN:... in a
+    // MongoDB URL): the scheme, the "@", the host and the path stay, so a
+    // reader still sees where the URL points.
     // Second form: the user ends in the marker that AWS_KEY has put there.
     // What follows up to the "@" (the rest of a password, or ":" and a
     // password or session token) may have any length while it holds no
@@ -132,7 +146,9 @@ const PATTERNS: readonly SecretPattern[] = [
     // limits count characters, as the agent's scanner does.
     // contracts/secret-scan-vectors.json holds the cases that the tests of
     // this scanner and of the agent's run.
-    regex: new RegExp(String.raw`[a-zA-Z][a-zA-Z0-9+.-]{0,20}://(?:[^\s:/"']*:${NOT_ONLY_A_PLACEHOLDER}(?:[^\s@/"']+|(?!(?:[^\s@/"']*\]:)?[0-9]{1,5}/(?:[^\s@:"']*/)?@)(?:[^\s@:"']+|[^\s@"']{1,256}))|[^\s:/"']*\[REDACTED-AWS_KEY\](?::?[^\s@:"'[]*|[^\s@"']{0,256}))@[^\s"']+`, 'gu'),
+    regex: new RegExp(String.raw`(?<keep>[a-zA-Z][a-zA-Z0-9+.-]{0,20}://)(?:[^\s:/"']*:${NOT_ONLY_A_PLACEHOLDER}(?:[^\s@/"']+|(?!(?:[^\s@/"']*\]:)?[0-9]{1,5}/(?:[^\s@:"']*/)?@)(?:[^\s@:"']+|[^\s@"']{1,256}))|[^\s:/"']*\[REDACTED-AWS_KEY\](?::?[^\s@:"'[]*|[^\s@"']{0,256}))@(?=[^\s"'])(?<host>[^\s"'?#]*)(?<query>[?#][^\s"']*)?`, 'gu'),
+    replace: (groups) => `${groups.keep}${CONNECTION_STRING_MARKER}@${groups.host}`
+      + (groups.query ? `${groups.query[0]}${CONNECTION_STRING_MARKER}` : ''),
   },
   {
     name: 'GITHUB_APP_TOKEN',
@@ -179,8 +195,10 @@ export function scanDenyReason(text: string): string {
     return text || '';
   }
   let out = text;
-  for (const { name, regex } of PATTERNS) {
-    out = out.replace(regex, `[REDACTED-${name}]`);
+  for (const { name, regex, replace } of PATTERNS) {
+    out = replace
+      ? out.replace(regex, (...args: unknown[]) => replace(args[args.length - 1] as Record<string, string | undefined>))
+      : out.replace(regex, `[REDACTED-${name}]`);
   }
   return out;
 }
@@ -190,3 +208,20 @@ export function scanDenyReason(text: string): string {
  */
 export const DENY_REASON_SECRET_NAMES: readonly string[] =
   PATTERNS.map((p) => p.name);
+
+/**
+ * {@link scanDenyReason} over every string in a JSON-shaped value. Applied to the
+ * variables of every outbound Linear GraphQL call and to GitHub comment bodies, so
+ * agent-originated text the platform relays (answers, error messages, event
+ * details) cannot carry a credential out, whatever path it took.
+ * @param value - a JSON-shaped value.
+ * @returns the same shape with known secrets replaced.
+ */
+export function redactValue<T>(value: T): T {
+  if (typeof value === 'string') return scanDenyReason(value) as T;
+  if (Array.isArray(value)) return value.map((v: unknown) => redactValue(v)) as T;
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, redactValue(v)])) as T;
+  }
+  return value;
+}

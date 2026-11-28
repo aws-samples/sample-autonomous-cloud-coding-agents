@@ -30,6 +30,7 @@ jest.mock('@aws-sdk/client-dynamodb', () => ({
 process.env.TASK_TABLE_NAME = 'Tasks';
 process.env.USER_CONCURRENCY_TABLE_NAME = 'UserConcurrency';
 
+import { ACTIVE_STATUSES } from '../../src/constructs/task-status';
 import { handler } from '../../src/handlers/reconcile-concurrency';
 
 beforeEach(() => {
@@ -37,6 +38,17 @@ beforeEach(() => {
 });
 
 describe('reconcile-concurrency handler', () => {
+  test('counts every status that holds a seat, also a task awaiting approval', async () => {
+    mockDdbSend
+      .mockResolvedValueOnce({ Items: [{ user_id: { S: 'user-1' }, active_count: { N: '1' } }], LastEvaluatedKey: undefined })
+      .mockResolvedValueOnce({ Count: 1, LastEvaluatedKey: undefined });
+    await handler();
+    const query = mockDdbSend.mock.calls.map((c: any[]) => c[0]).find((c: { _type: string }) => c._type === 'Query');
+    const counted = Object.entries(query.input.ExpressionAttributeValues as Record<string, { S: string }>)
+      .filter(([name]) => name !== ':uid').map(([, value]) => value.S);
+    expect(new Set(counted)).toEqual(new Set(ACTIVE_STATUSES));
+  });
+
   test('completes without errors when no users exist', async () => {
     mockDdbSend.mockResolvedValueOnce({ Items: [], LastEvaluatedKey: undefined });
     await handler();

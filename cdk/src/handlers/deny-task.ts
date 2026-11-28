@@ -66,25 +66,50 @@ const AUDIT_EVENT_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90
 export async function handler(
   event: APIGatewayProxyEvent, context?: Pick<Context, 'getRemainingTimeInMillis'>,
 ): Promise<APIGatewayProxyResult> {
-  const invocationStartedMs = Date.now();
+  return recordDenialForUser({
+    userId: extractUserId(event),
+    taskId: event.pathParameters?.task_id,
+    body: event.body,
+    invocationStartedMs: Date.now(),
+    context,
+  });
+}
+
+/**
+ * Shared decision path for the API and Linear approval replies. Callers must
+ * authenticate and map the platform user first; this applies the same
+ * validation, rate limit, owner and state checks as the API.
+ * ``decisionSource`` records where a non-API decision came from.
+ */
+export async function recordDenialForUser(input: {
+  userId: string | null;
+  taskId?: string;
+  body?: string | null;
+  decisionSource?: string;
+  /** API invocation start and Lambda context bound the post-commit MicroVM wake. */
+  invocationStartedMs?: number;
+  context?: Pick<Context, 'getRemainingTimeInMillis'>;
+}): Promise<APIGatewayProxyResult> {
+  const invocationStartedMs = input.invocationStartedMs ?? Date.now();
+  const context = input.context;
   const requestId = ulid();
 
   try {
     // 1. Auth
-    const callerUserId = extractUserId(event);
+    const callerUserId = input.userId;
     if (!callerUserId) {
       return errorResponse(401, ErrorCode.UNAUTHORIZED, 'Missing or invalid authentication.', requestId);
     }
 
     // 2. Path + body
-    const taskId = event.pathParameters?.task_id;
+    const taskId = input.taskId;
     if (!taskId) {
       return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Missing task_id path parameter.', requestId);
     }
 
     let parsed: DenyRequest | null = null;
     try {
-      parsed = event.body ? JSON.parse(event.body) as DenyRequest : null;
+      parsed = input.body ? JSON.parse(input.body) as DenyRequest : null;
     } catch {
       return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Request body must be valid JSON.', requestId);
     }
@@ -163,7 +188,8 @@ export async function handler(
               TableName: TASK_APPROVALS_TABLE_NAME,
               Key: { task_id: taskId, request_id },
               UpdateExpression:
-                'SET #status = :denied, decided_at = :now, deny_reason = :reason',
+                'SET #status = :denied, decided_at = :now, deny_reason = :reason'
+                  + (input.decisionSource ? ', decision_source = :source' : ''),
               ConditionExpression:
                 'attribute_exists(request_id) AND #status = :pending AND user_id = :caller '
                   + 'AND (attribute_not_exists(deadline_epoch) OR deadline_epoch > :epoch)',
@@ -175,6 +201,7 @@ export async function handler(
                 ':reason': sanitizedReason,
                 ':caller': callerUserId,
                 ':epoch': nowEpoch,
+                ...(input.decisionSource ? { ':source': input.decisionSource } : {}),
               },
             },
           },
@@ -211,7 +238,7 @@ export async function handler(
       callerUserId,
       requestId: request_id,
       decision: 'DENIED',
-      auditMetadata: { reason: sanitizedReason },
+      auditMetadata: { ...(input.decisionSource ? { decision_source: input.decisionSource } : {}), reason: sanitizedReason },
       decidedAt: nowIso,
       nowEpoch,
       retentionDays: AUDIT_EVENT_RETENTION_DAYS,

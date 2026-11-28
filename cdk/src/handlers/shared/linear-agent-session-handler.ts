@@ -20,6 +20,7 @@
 import { GetCommand } from '@aws-sdk/lib-dynamodb';
 import { ulid } from 'ulid';
 import { TERMINAL_STATUSES, type TaskStatusType } from '../../constructs/task-status';
+import { linearApprovalRefusal } from './approval-notifications';
 import { cancelTask, stopTaskCompute, type CancelTaskTables } from './cancel-task-core';
 import { buildClarifyResumeDescription, isClarifyHold, type ClarifyHoldRow } from './clarify-resume';
 import { screenWithGuardrail } from './context-hydration';
@@ -29,6 +30,9 @@ import {
   buildAgentSessionTaskDescription,
   emitAgentActivity,
   fetchAgentSessionIssue,
+  fetchSessionActivityShown,
+  fetchSessionPromptActivity,
+  type SessionPromptActivity,
   type AgentActivityContent,
   type AgentSessionIssue,
 } from './linear-agent-session';
@@ -47,8 +51,17 @@ import {
   writeSessionTaskPointer,
 } from './linear-channel-metadata';
 import { resolveLinearOauthToken, type ResolvedLinearToken } from './linear-oauth-resolver';
+import {
+  lateApprovalAnswerReply,
+  parseSessionApprovalAnswer,
+  repeatedApprovalChoice,
+  sessionApprovalNoticeId,
+  sessionDecisionNote,
+  type SessionApprovalActivity,
+  type SessionApprovalAnswer,
+} from './linear-session-approval';
 import { fetchIssueParentId } from './linear-subissue-fetch';
-import { lookupTaskByLinearIssue, type LinearIssueTask } from './linear-task-by-issue';
+import { lookupRunningTaskInSession, lookupTaskByLinearIssue, type LinearIssueTask } from './linear-task-by-issue';
 import { logger } from './logger';
 import { isLookupFailure, lookupValueOr } from './lookup-result';
 import { submitNudge } from './nudge-core';
@@ -70,6 +83,8 @@ const TASK_EVENTS_TABLE_NAME = process.env.TASK_EVENTS_TABLE_NAME!;
 const TASK_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90');
 /** Optional: without it a follow-up to a running task cannot be forwarded to the agent. */
 const NUDGES_TABLE_NAME = process.env.NUDGES_TABLE_NAME;
+/** Set when approval replies are configured; a session decides a request only then. */
+const TASK_APPROVALS_TABLE_NAME = process.env.TASK_APPROVALS_TABLE_NAME;
 /** Same value TaskApi gives `POST /tasks/{id}/nudge`: both paths share one counter row. */
 const NUDGE_RATE_LIMIT_PER_MINUTE = Number(process.env.NUDGE_RATE_LIMIT_PER_MINUTE ?? '10');
 /** Optional: holds the session → task pointer that covers the issue index's lag. */
@@ -130,8 +145,8 @@ export async function handleAgentSessionEvent(payload: LinearAgentSessionEvent):
     logger.warn('Agent-session delivery for an unresolvable workspace — ignoring', logCtx);
     return;
   }
-  const emit = (content: AgentActivityContent, ephemeral = false) =>
-    emitSessionActivity(resolved.accessToken, request, content, ephemeral);
+  const emit = (content: AgentActivityContent, ephemeral = false, signal?: Omit<SessionApprovalActivity, 'content'>) =>
+    emitSessionActivity(resolved.accessToken, request, content, ephemeral, signal);
   // Per-workspace evidence that sessions open here; the comment trigger only
   // yields to sessions in workspaces that carry it. Started now but awaited
   // only once the delivery is handled, so its round trip never sits between
@@ -189,7 +204,16 @@ async function respondToAgentSession(
 
   const priorTask = await findPriorTask(request);
   if (priorTask && !isTerminal(priorTask.status)) {
-    await steerRunningTask(request, priorTask, platformUserId, emit);
+    await steerRunningTask(request, priorTask, platformUserId, emit, resolved.accessToken);
+    return;
+  }
+  // A late "approve" / "deny" (after its request timed out, or in the wrong session)
+  // is an answer to nothing. Taken as a prompt it would start new work. A run that
+  // ended with a question takes it as the answer, as any other reply.
+  const gateCount = priorTask?.approval_gate_count;
+  const late = isClarifyHold(priorTask) ? null : lateApprovalAnswerReply(request.directive, gateCount);
+  if (late) {
+    await emit({ type: 'response', body: late });
     return;
   }
 
@@ -421,10 +445,21 @@ async function steerRunningTask(
   request: AgentSessionRequest,
   task: PriorTask,
   platformUserId: string,
-  emit: (content: AgentActivityContent) => Promise<void>,
+  emit: SessionEmit,
+  accessToken: string,
 ): Promise<void> {
   const ownSession = isRunningTasksOwnSession(request, task);
   const reply = (body: string) => emit(ownSession ? { type: 'thought', body } : { type: 'response', body });
+  const openRequest = task.status === 'AWAITING_APPROVAL' ? task.awaiting_approval_request_id : undefined;
+  if (ownSession && openRequest && request.directive) {
+    await decideSessionApproval(request, task, openRequest, platformUserId, emit, accessToken);
+    return;
+  }
+  const late = lateApprovalAnswerReply(request.directive, task.approval_gate_count);
+  if (late) {
+    await reply(late);
+    return;
+  }
   if (!request.directive) {
     await reply(ownSession
       ? `Already working on this (task \`${task.task_id}\`) — I'll report back here.`
@@ -464,16 +499,133 @@ async function steerRunningTask(
   await reply(body);
 }
 
+type SessionEmit = (
+  content: AgentActivityContent, ephemeral?: boolean, signal?: Omit<SessionApprovalActivity, 'content'>,
+) => Promise<void>;
+
+/**
+ * A reply in the session while its task waits on an approval request: an approve /
+ * deny from the task's owner decides that request through the API's decision path.
+ * Anything else shows the choice again, so the request stays the session's last
+ * activity (a thought would end its waiting-for-input state and bury it).
+ */
+async function decideSessionApproval(
+  request: AgentSessionRequest,
+  task: PriorTask,
+  requestId: string,
+  platformUserId: string,
+  emit: SessionEmit,
+  accessToken: string,
+): Promise<void> {
+  const notApprovableHere = await linearRefusalOf(task.task_id, requestId);
+  const again = async (lead: string) => {
+    const activity = repeatedApprovalChoice(lead, requestId, notApprovableHere);
+    await emit(activity.content, false, activity);
+  };
+  const answer = parseSessionApprovalAnswer(request.directive);
+  if (!answer) {
+    await again('That isn\'t an answer to the open approval request, so I haven\'t passed it to the agent.');
+    return;
+  }
+  // A button names the request it was shown with; an older choice clicked late must
+  // not decide the request that is open now.
+  if (answer.requestId && answer.requestId !== requestId) {
+    await again('That answer was for an earlier request, which is no longer open, so nothing was decided.');
+    return;
+  }
+  if (task.user_id !== platformUserId) {
+    await again(`Only the task owner can decide this request. ${NOT_OWNER_MESSAGE}`);
+    return;
+  }
+  if (!TASK_APPROVALS_TABLE_NAME) {
+    await emit({ type: 'thought', body: 'Approvals can\'t be answered in Linear on this deployment. Use `bgagent approve` / `bgagent deny`.' });
+    return;
+  }
+  if (notApprovableHere && answer.decision === 'approve') {
+    await emit({ type: 'elicitation', body: `${notApprovableHere} Nothing was decided. You can deny it here: reply deny, with an optional reason.` });
+    return;
+  }
+  const prompt = await confirmedPrompt(request, answer, accessToken);
+  if (!prompt) {
+    logger.warn('Agent-session approval reply not confirmed by Linear — no decision recorded', {
+      linear_agent_session_id: request.sessionId, task_id: task.task_id, request_id: requestId,
+    });
+    await again('I couldn\'t confirm this answer with Linear, so nothing was decided.');
+    return;
+  }
+  // An answer belongs to the request whose choice was showing when it was written.
+  // Both times are Linear's: the worker's own clock, and Lambda retry timing, play no
+  // part. A delivery retried after its request closed and another opened, or written
+  // before the new choice was posted, decides nothing.
+  const shown = await fetchSessionActivityShown(
+    accessToken, request.workspaceId, sessionApprovalNoticeId('approval_requested', requestId),
+  );
+  if (shown?.sessionId !== request.sessionId || !(Date.parse(prompt.createdAt) > Date.parse(shown.createdAt))) {
+    await again('That answer was written before this request was shown here, so nothing was decided.');
+    return;
+  }
+  // Loaded only when a session decides: other session deliveries do not need the
+  // decision handlers' environment.
+  const record = answer.decision === 'approve'
+    ? (await import('../approve-task.js')).recordApprovalForUser
+    : (await import('../deny-task.js')).recordDenialForUser;
+  const result = await record({
+    userId: platformUserId,
+    taskId: task.task_id,
+    decisionSource: JSON.stringify(['linear_session', request.workspaceId, request.deliveryId]),
+    body: JSON.stringify({
+      request_id: requestId,
+      decision: answer.decision,
+      ...(answer.decision === 'deny' && answer.reason ? { reason: answer.reason } : {}),
+    }),
+  });
+  logger.info('Agent-session approval reply', {
+    linear_agent_session_id: request.sessionId,
+    task_id: task.task_id,
+    request_id: requestId,
+    decision: answer.decision,
+    status_code: result.statusCode,
+  });
+  await emit({ type: 'thought', body: sessionDecisionNote(answer, result) });
+}
+
+/**
+ * Linear's copy of this delivery when it is a human's prompt in this session, from
+ * the same person, with the same answer; else null. The decision is consent, so it
+ * is taken from Linear's copy, not the webhook's (see ``fetchSessionPromptActivity``).
+ */
+async function confirmedPrompt(
+  request: AgentSessionRequest, answer: SessionApprovalAnswer, accessToken: string,
+): Promise<SessionPromptActivity | null> {
+  const prompt = await fetchSessionPromptActivity(accessToken, request.workspaceId, request.deliveryId);
+  const echoed = prompt ? parseSessionApprovalAnswer(prompt.body) : null;
+  const same = prompt?.sessionId === request.sessionId && prompt.authorId === request.actorId
+    && echoed?.decision === answer.decision && (echoed.reason ?? '') === (answer.reason ?? '')
+    && echoed.requestId === answer.requestId;
+  return same ? prompt : null;
+}
+
+/** Why the open request cannot be approved in Linear, read consistently from its row; undefined when it can. */
+async function linearRefusalOf(taskId: string, requestId: string): Promise<string | undefined> {
+  if (!TASK_APPROVALS_TABLE_NAME) return undefined;
+  const { Item } = await ddb.send(new GetCommand({
+    TableName: TASK_APPROVALS_TABLE_NAME, Key: { task_id: taskId, request_id: requestId }, ConsistentRead: true,
+  }));
+  return (Item && linearApprovalRefusal(Item)) ?? undefined;
+}
+
 /** The prior task as read from the base table (strongly consistent). */
 type PriorTask = LinearIssueTask & ClarifyHoldRow
-  & Pick<TaskRecord, 'session_id' | 'agent_runtime_arn' | 'compute_type' | 'compute_metadata' | 'created_at'>
+  & Pick<TaskRecord, 'session_id' | 'agent_runtime_arn' | 'compute_type' | 'compute_metadata' | 'created_at'
+    | 'awaiting_approval_request_id' | 'approval_gate_count'>
   & {
     readonly status: TaskStatusType;
     readonly channel_metadata?: Readonly<Record<string, string>>;
   };
 
 /**
- * The issue's newest ABCA task, scoped to this workspace. Throws on a lookup
+ * For a prompt or a stop, the running task of its session; otherwise, and when the
+ * session has none, the issue's newest ABCA task, scoped to this workspace. Throws on a lookup
  * failure: guessing "no task" would start a duplicate run beside a live one.
  *
  * Two sources, because neither is enough alone. The ``LinearIssueIndex`` GSI
@@ -483,6 +635,12 @@ type PriorTask = LinearIssueTask & ClarifyHoldRow
  * from the base table, and the newer one wins.
  */
 async function findPriorTask(request: AgentSessionRequest): Promise<PriorTask | null> {
+  // A prompt or a stop in a session is meant for the task that session reports into.
+  if (request.action === 'prompted') {
+    const sessionTaskId = await lookupRunningTaskInSession(ddb, TASK_TABLE_NAME, request.issueId, request.sessionId);
+    const sessionTask = sessionTaskId ? await readTaskForIssue(sessionTaskId, request) : null;
+    if (sessionTask && !isTerminal(sessionTask.status)) return sessionTask;
+  }
   const lookup = await lookupTaskByLinearIssue(ddb, TASK_TABLE_NAME, request.issueId);
   if (lookup.kind === 'error') {
     throw new Error(`Task lookup for Linear issue ${request.issueId} failed: ${lookup.message}`);
@@ -582,8 +740,9 @@ async function emitSessionActivity(
   request: AgentSessionRequest,
   content: AgentActivityContent,
   ephemeral: boolean,
+  signal?: Omit<SessionApprovalActivity, 'content'>,
 ): Promise<void> {
-  const result = await emitAgentActivity(accessToken, request.sessionId, content, { ephemeral });
+  const result = await emitAgentActivity(accessToken, request.sessionId, content, { ephemeral, ...signal });
   if (!result.ok) {
     // Best-effort: the task outcome is still delivered by the fan-out plane.
     logger.warn('Failed to emit Linear agent activity', {

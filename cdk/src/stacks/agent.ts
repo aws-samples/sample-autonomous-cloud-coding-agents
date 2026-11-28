@@ -296,6 +296,20 @@ function linearAgentSessionsProps(
   };
 }
 
+/**
+ * Whether the Linear OAuth token vault is deployed. An explicit context value wins;
+ * otherwise on when Linear and AgentCore are both deployed and MicroVMs are not
+ * (see the call site).
+ */
+function resolveLinearIdentityVault(
+  context: unknown, deployed: { readonly linear: boolean; readonly agentCore: boolean; readonly microvm: boolean },
+): boolean {
+  if (context === true || context === 'true') return true;
+  if (context === false || context === 'false') return false;
+  if (context !== undefined) throw new Error('enableLinearIdentityVault must be true or false');
+  return deployed.linear && deployed.agentCore && !deployed.microvm;
+}
+
 export class AgentStack extends Stack {
   /** The REST API and its Cognito user pool; the operator console stack signs users in against these. */
   public readonly taskApi: TaskApi;
@@ -311,7 +325,7 @@ export class AgentStack extends Stack {
   /** Set when deployed with the Linear identity vault; the console then mints tokens through it. */
   public readonly linearIdentityVault?: LinearIdentityVault;
 
-  // eslint-disable-next-line complexity -- predates the ceiling (120; 108 when it landed); must not grow
+  // eslint-disable-next-line complexity -- predates the ceiling (119, down from 120; 108 when it landed); must not grow
   constructor(scope: Construct, id: string, props: AgentStackProps = {}) {
     super(scope, id, props);
 
@@ -490,11 +504,21 @@ export class AgentStack extends Stack {
     // unchanged and introduces no new CFN types into the bootstrap policy set.
     const toolGatewayEnabled = features.toolGateway;
 
-    // RFC #249 Phase 1 (Linear OAuth token vault). Additive + default-off:
-    // resolved here (early) so the agent runtime env map + the LinearIdentityVault
-    // construct + the token grants all key off one predicate and cannot drift.
-    const linearIdentityVaultEnabled = this.node.tryGetContext('enableLinearIdentityVault') === true
-      || this.node.tryGetContext('enableLinearIdentityVault') === 'true';
+    // RFC #249 Linear OAuth token vault (AgentCore Identity). Default ON wherever
+    // Linear and AgentCore are both deployed: AgentCore already proves the region
+    // has it, and the vault refreshes the Linear grant itself, so an idle workspace
+    // cannot strand an expired refresh token in Secrets Manager. Deployments without
+    // AgentCore default to Secrets Manager, and without Linear there is no grant to
+    // vault. With the MicroVM backend it stays opt-in: the orchestrator then sends
+    // the vault keys to MicroVM runs, a guest image built before those keys were in
+    // the contract rejects every run, and a deploy does not rebuild the image.
+    // `--context enableLinearIdentityVault=true|false` overrides the default (an
+    // explicit true without Linear still fails below). Resolved early so the
+    // runtime env map, the LinearIdentityVault construct and the token grants share
+    // one predicate.
+    const linearIdentityVaultEnabled = resolveLinearIdentityVault(
+      this.node.tryGetContext('enableLinearIdentityVault'),
+      { linear: features.linear, agentCore: agentCoreEnabled, microvm: lambdaMicrovmEnabled });
     if (linearIdentityVaultEnabled && !features.linear) {
       throw new Error('enableLinearIdentityVault requires the linear feature; enable Linear or drop the vault switch');
     }
@@ -548,6 +572,9 @@ export class AgentStack extends Stack {
         return microvmImageArnHolder;
       },
     });
+    // The image ARN for the handlers that act on a MicroVM-backed task (cancel, and the
+    // approval decisions that wake it), or nothing when no image is configured.
+    const microvmImageGrant = microvmImageConfigured ? { lambdaMicrovmImageArn: lazyMicrovmImageArn } : {};
 
     // Network isolation — VPC with restricted egress.
     // AgentCore only supports a subset of physical availability zones per
@@ -690,7 +717,7 @@ export class AgentStack extends Stack {
       // platform MicroVM image, so cancelling a MicroVM-backed task stops compute
       // immediately. Omitted when no image is configured — there can be no
       // MicroVM-backed task to cancel then.
-      ...(microvmImageConfigured && { lambdaMicrovmImageArn: lazyMicrovmImageArn }),
+      ...microvmImageGrant,
       largeBodyWebhookPaths: ([
         features.linear && '/v1/linear/webhook',
         features.jira && '/v1/jira/webhook',
@@ -1747,6 +1774,8 @@ export class AgentStack extends Stack {
       userPool: taskApi.userPool,
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
+      taskApprovalsTable: taskApprovalsTable.table,
+      ...microvmImageGrant,
       budgetTable: budgetTable.table,
       repoTable: repoTable.table,
       // Enables the webhook processor's orchestration path
@@ -2131,6 +2160,7 @@ export class AgentStack extends Stack {
     const fanOutConsumer = new FanOutConsumer(this, 'FanOutConsumer', {
       taskEventsTable: taskEventsTable.table,
       taskTable: taskTable.table,
+      taskApprovalsTable: taskApprovalsTable.table,
       repoTable: repoTable.table,
       githubTokenSecret,
       // Slack bot-token grant is guarded on this prop — pass the

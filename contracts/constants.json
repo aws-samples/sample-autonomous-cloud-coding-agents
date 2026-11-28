@@ -7,7 +7,7 @@
   "approval_timeout_s": {
     "min": 30,
     "max": 3600,
-    "default": 300
+    "default": 1800
   },
   "microvm_sleep_after_s": {
     "min": 0,

@@ -19,6 +19,7 @@
 
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { DeleteCommand, type DynamoDBDocumentClient, GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { redactValue } from './deny-reason-scanner';
 
 /**
  * Linear helpers for the operator console: list a mapped project's open issues, and
@@ -50,7 +51,7 @@ async function linearQuery<T>(accessToken: string, query: string, variables: Rec
     resp = await fetchImpl(LINEAR_GRAPHQL_URL, {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, variables }),
+      body: JSON.stringify({ query, variables: redactValue(variables) }),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
   } catch (err) {
